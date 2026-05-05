@@ -493,7 +493,12 @@ static int parse_association(struct libusb_context *ctx,
 
 	RETURN(parsed, int);
 err:
-	clear_association(config->association_descriptor);
+	if (config->association_descriptor) {
+		int i;
+		for (i = 0; i < config->num_associations; i++)
+			clear_association(config->association_descriptor + i);
+		free((void *)config->association_descriptor);
+	}
 	config->association_descriptor = NULL;
 	RETURN(parsed, int);
 }
