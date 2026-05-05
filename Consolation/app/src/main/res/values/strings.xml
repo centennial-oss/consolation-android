@@ -1,0 +1,96 @@
+<resources>
+    <string name="app_name">Consolation</string>
+    <string name="label_title">Consolation</string>
+    <string name="label_subtitle">First-pass port from SwiftUI with USB discovery and watch-only controls.</string>
+    <string name="label_device">Device</string>
+    <string name="label_resolution">Resolution &amp; Frame Rate</string>
+    <string name="hint_select_device">Choose a connected USB capture device</string>
+    <string name="hint_no_capture_devices">No device found. Connect a Capture Card to continue.</string>
+    <string name="startup_permission_notice">You\'ll be asked to allow Camera, Mic and USB access, which is required because Android treats Capture Cards as USB Webcams.</string>
+    <string name="action_request_permission">Request USB permission</string>
+    <string name="action_start_video">Play</string>
+    <string name="action_stop_video">Stop Video</string>
+    <string name="action_dump_usb_diagnostics">Dump USB diagnostics (Logcat)</string>
+    <string name="action_help">Help</string>
+    <string name="action_about">About</string>
+    <string name="action_capture_card_compatibility_warning">Capture card compatibility warning</string>
+    <string name="label_status">State</string>
+    <string name="label_telemetry">Telemetry</string>
+    <string name="state_idle">idle</string>
+    <string name="state_requesting_permission">requesting permission</string>
+    <string name="state_no_device">no device connected</string>
+    <string name="state_checking_formats">Checking Available Resolutions ...</string>
+    <string name="state_no_formats">no resolutions reported for this device</string>
+    <string name="state_probe_unavailable">formats unavailable (device busy — try replug)</string>
+    <string name="state_ready">ready</string>
+    <string name="state_running">running</string>
+    <string name="state_failed">failed: %1$s</string>
+    <string name="connecting_capture_card">Connecting to Capture Card…</string>
+    <string name="telemetry_format">%1$dx%2$d @ %3$dp %4$s | Actual: %5$dfps | Drops: %6$d | Stutter: %7$.1f ms</string>
+    <string name="low_fps_warning">Low FPS detected. Tap for info.</string>
+    <string name="low_fps_info_title">Low FPS Warning</string>
+    <string name="low_fps_info_message">The actual frame rate is lower than requested. This can be caused by USB bandwidth limitations, high system load, or capture card limitations. Try a lower resolution or a different USB port.</string>
+    <string name="compatibility_issue_title">Capture Card Compatibility</string>
+    <string name="compatibility_issue_intro">This capture card has known compatibility issues. Performance may be below the advertised resolution or frame rate settings.</string>
+    <string name="compatibility_issue_about_title">About Your Capture Card</string>
+    <string name="settings_show_stats">Show Video Stats</string>
+    <string name="settings_low_fps_warnings">Low FPS Warnings</string>
+    <string name="settings_rotation">Video Rotation</string>
+    <string name="settings_flip">Video Flip</string>
+    <string name="settings_stats_off">Off</string>
+    <string name="settings_stats_bottom_left">Bottom Left</string>
+    <string name="settings_stats_bottom_right">Bottom Right</string>
+    <string name="help_title">Consolation Help</string>
+    <string name="help_getting_started_title">Getting Started</string>
+    <string name="help_getting_started_body">Connect a USB capture device, select it from the list, and press Play.</string>
+    <string name="help_frame_rate_title">Frame Rate</string>
+    <string name="help_frame_rate_body">For best results, select a frame rate that is equal to or higher than the frame rate of the source input. If playback frame rate is lower than expected, avoid USB hubs and replace low-quality cables.</string>
+    <string name="help_video_controls_title">Video Controls</string>
+    <string name="help_video_controls_body">Use the settings menu to rotate the picture, mirror the image, and show frame rate stats.</string>
+    <string name="help_audio_controls_title">Audio Controls</string>
+    <string name="help_audio_controls_body">Use the playback controls to mute playback and set the volume.</string>
+    <string name="help_device_support_title">Device Support</string>
+    <string name="help_device_support_body">While any USB Video Class (UVC) device should work with Consolation, video quality ultimately depends on the capture device hardware. Some devices may advertise resolutions and frame rates beyond their actual capabilities.</string>
+    <string name="about_title">About Consolation</string>
+    <string name="about_header_title">Consolation™  v%1$s</string>
+    <string name="about_copyright">Copyright © 2026 Centennial OSS Inc.</string>
+    <string name="about_trademark_body">Consolation and the Consolation logo are trademarks of Centennial OSS Inc.\nAll rights reserved.</string>
+    <string name="about_utility_body">Consolation is a USB Capture Card utility for viewing gaming consoles, Raspberry Pis, and other HDMI devices on Android tablets.</string>
+    <string name="about_uvc_required_body">External USB Video Class (UVC) capture hardware is required.</string>
+    <string name="about_privacy_body">Consolation is 100% private. It does not collect analytics or snoop on your usage. Nothing ever leaves your device. Period.</string>
+    <string name="about_open_source_body">This software is completely free and open source for you to enjoy.</string>
+    <string name="about_privacy_policy_button">Privacy Policy</string>
+    <string name="about_github_button">GitHub</string>
+    <string name="about_build_info_label">Build info (copy for support)</string>
+    <string name="action_copy_to_clipboard">Copy to Clipboard</string>
+    <string name="action_close">Close</string>
+    <string name="message_build_info_copied">Build info copied.</string>
+    <string name="message_select_device">Select a capture device first.</string>
+    <string name="message_select_resolution">Select a resolution first.</string>
+    <string name="message_permission_required">USB permission is required before starting preview.</string>
+    <string name="message_camera_permission_required_for_usb">
+        Camera permission is required before Android will show the USB access prompt for video-class (UVC) devices. Grant it, then request USB permission again.
+    </string>
+    <string name="message_record_audio_optional">
+        Microphone permission was denied; video will play without HDMI/capture-card audio from USB.
+    </string>
+    <string name="message_runtime_perms_for_watch">
+        Camera and microphone access are required for USB video and for playing capture-card audio through the device speakers.
+    </string>
+    <string name="message_permission_granted">USB permission granted.</string>
+    <string name="message_permission_denied">USB permission denied for the selected device.</string>
+    <string name="message_permission_request_start_failed">Could not start USB permission request.</string>
+    <string name="message_permission_request_timeout">USB permission request timed out.</string>
+    <string name="message_usb_device_not_found">USB device is not connected or no longer matches the selected entry.</string>
+    <string name="message_uvc_open_failed">
+        Could not start UVC preview on this USB path. Try a direct port (no hub), a different cable or hub, or unplug and replug the capture device.
+    </string>
+    <string name="audio_playback_failed_title">Audio Playback Failed</string>
+    <string name="audio_playback_failed_message">
+        Android could not expose an audio input for the selected capture card. This can happen when multiple USB capture or USB audio devices are connected at the same time. Disconnect the extra USB devices, then stop and start playback again.
+    </string>
+    <string name="message_usb_diag_logged">
+        USB diagnostics written to Logcat (tag ConsolationUsbDiag). Filter: adb logcat -s ConsolationUsbDiag:I
+    </string>
+    <string name="message_capture_device_detached">Capture device unplugged. Preview stopped.</string>
+</resources>

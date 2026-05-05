@@ -1,0 +1,51 @@
+# Build output
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+
+# local data
+localdata/
+
+TODO.md
+
+.cursor
+AGENTS.md
+
+# Android (module outputs under Consolation/**; shared build/ dirs use top-level build/ rule)
+*.iml
+Consolation/**/.gradle/
+Consolation/**/local.properties
+Consolation/**/.kotlin/
+Consolation/**/obj/
+Consolation/**/.externalNativeBuild/
+Consolation/**/.cxx/
+Consolation/**/.idea/caches
+Consolation/**/.idea/libraries
+Consolation/**/.idea/modules.xml
+Consolation/**/.idea/workspace.xml
+Consolation/**/.idea/navEditor.xml
+Consolation/**/.idea/assetWizardSettings.xml
+Consolation/**/captures/
+
+# Signing keys and Play App Signing export files (never commit)
+*.jks
+*.keystore
+keystore.properties
+build.properties
+local.properties
+*.pepk
+
+# Memory heap dumps
+*.hprof
+
+planningMode.xml
+
+*.log
