@@ -27,10 +27,13 @@
 
 CallbackPipeline::CallbackPipeline(const size_t &_data_bytes)
 :	CaptureBasePipeline(MAX_FRAME_NUM, INIT_FRAME_POOL_SZ, _data_bytes),
+	mFrameCallbackObj(NULL),
 	mFrameCallbackFunc(NULL),
+	mPixelFormat(PIXEL_FORMAT_RAW),
 	callbackPixelBytes(0)
 {
 	ENTER();
+	iframecallback_fields.onFrame = NULL;
 
 	setState(PIPELINE_STATE_INITIALIZED);
 
@@ -39,6 +42,26 @@ CallbackPipeline::CallbackPipeline(const size_t &_data_bytes)
 
 CallbackPipeline::~CallbackPipeline() {
 	ENTER();
+	JavaVM *vm = getVM();
+	JNIEnv *env = NULL;
+	bool attached = false;
+	if (vm && (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_EDETACHED)) {
+		if (vm->AttachCurrentThread(&env, NULL) == 0)
+			attached = true;
+		else
+			env = NULL;
+	}
+	{
+		Mutex::Autolock lock(capture_mutex);
+		if (env && mFrameCallbackObj) {
+			env->DeleteGlobalRef(mFrameCallbackObj);
+		}
+		mFrameCallbackObj = NULL;
+		iframecallback_fields.onFrame = NULL;
+	}
+	if (attached && vm) {
+		vm->DetachCurrentThread();
+	}
 
 	EXIT();
 }

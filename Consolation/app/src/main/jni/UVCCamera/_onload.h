@@ -34,6 +34,7 @@ extern "C" {
 #endif
 
 jint JNI_OnLoad(JavaVM *vm, void *reserved);
+void JNI_OnUnload(JavaVM *vm, void *reserved);
 
 #ifdef __cplusplus
 }

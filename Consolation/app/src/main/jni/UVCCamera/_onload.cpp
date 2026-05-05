@@ -29,6 +29,7 @@
 
 extern int register_uvccamera(JNIEnv *env);
 extern int consolation_prime_iframe_callback_cache(JNIEnv *env);
+extern int consolation_cleanup_iframe_callback_cache(JNIEnv *env);
 
 jint JNI_OnLoad(JavaVM *vm, void *reserved) {
 #if LOCAL_DEBUG
@@ -48,4 +49,14 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     LOGD("JNI_OnLoad:finished:result=%d", result);
 #endif
     return JNI_VERSION_1_6;
+}
+
+void JNI_OnUnload(JavaVM *vm, void *reserved) {
+	(void) reserved;
+	JNIEnv *env = NULL;
+	if (!vm)
+		return;
+	if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK)
+		return;
+	(void) consolation_cleanup_iframe_callback_cache(env);
 }

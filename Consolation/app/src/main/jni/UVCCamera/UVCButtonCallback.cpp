@@ -21,6 +21,27 @@ UVCButtonCallback::UVCButtonCallback(uvc_device_handle_t *devh)
 UVCButtonCallback::~UVCButtonCallback() {
 
 	ENTER();
+	JavaVM *vm = getVM();
+	JNIEnv *env = NULL;
+	bool attached = false;
+	if (vm && (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_EDETACHED)) {
+		if (vm->AttachCurrentThread(&env, NULL) == 0)
+			attached = true;
+		else
+			env = NULL;
+	}
+	pthread_mutex_lock(&button_mutex);
+	{
+		if (env && mButtonCallbackObj) {
+			env->DeleteGlobalRef(mButtonCallbackObj);
+		}
+		mButtonCallbackObj = NULL;
+		ibuttoncallback_fields.onButton = NULL;
+	}
+	pthread_mutex_unlock(&button_mutex);
+	if (attached && vm) {
+		vm->DetachCurrentThread();
+	}
 	pthread_mutex_destroy(&button_mutex);
 	EXIT();
 }

@@ -29,6 +29,15 @@ int consolation_prime_iframe_callback_cache(JNIEnv *env) {
 	return 0;
 }
 
+int consolation_cleanup_iframe_callback_cache(JNIEnv *env) {
+	if (g_iface_iframe_callback) {
+		env->DeleteGlobalRef(g_iface_iframe_callback);
+		g_iface_iframe_callback = NULL;
+	}
+	g_mid_iframe_on_frame = NULL;
+	return 0;
+}
+
 jmethodID consolation_resolve_iframe_on_frame_mid(JNIEnv *env, jobject receiver) {
 	if UNLIKELY(!receiver)
 		return NULL;

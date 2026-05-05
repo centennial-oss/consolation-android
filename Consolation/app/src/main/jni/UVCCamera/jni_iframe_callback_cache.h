@@ -9,6 +9,7 @@
 
 /** Best-effort; safe to call multiple times. Returns 0. */
 int consolation_prime_iframe_callback_cache(JNIEnv *env);
+int consolation_cleanup_iframe_callback_cache(JNIEnv *env);
 
 /**
  * Resolve onFrame for this receiver; uses cache when the object implements
