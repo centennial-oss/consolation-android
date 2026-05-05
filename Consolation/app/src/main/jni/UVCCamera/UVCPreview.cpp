@@ -588,6 +588,24 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 		preview->recordPayloadBytes(frame->actual_bytes);
 
 		if (preview->frameMode != REQUEST_MODE_H264) {
+			const bool preview_rendered = preview->renderFrameDirectToSurface(frame,
+				&preview->mPreviewWindow, &preview->preview_mutex);
+			bool capture_window_present = false;
+			pthread_mutex_lock(&preview->capture_mutex);
+			capture_window_present = preview->mCaptureWindow != NULL;
+			pthread_mutex_unlock(&preview->capture_mutex);
+			const bool capture_rendered = !capture_window_present ||
+				preview->renderFrameDirectToSurface(frame, &preview->mCaptureWindow,
+					&preview->capture_mutex);
+
+			if (preview_rendered && capture_rendered) {
+				uvc_frame_t *notification = preview->createFrameNotification(frame);
+				if (LIKELY(notification)) {
+					preview->addPreviewFrame(notification);
+					return;
+				}
+			}
+
 			uvc_frame_t *rgbx = preview->convertPreviewFrameToRgbx(frame);
 			if (LIKELY(rgbx))
 				preview->addPreviewFrame(rgbx);
@@ -608,6 +626,60 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 		}
 		preview->addPreviewFrame(copy);
 	}
+}
+
+uvc_frame_t *UVCPreview::createFrameNotification(uvc_frame_t *frame) {
+	uvc_frame_t *notification = get_frame(1);
+	if (UNLIKELY(!notification))
+		return NULL;
+
+	notification->width = frame->width;
+	notification->height = frame->height;
+	notification->frame_format = UVC_FRAME_FORMAT_UNKNOWN;
+	notification->step = 0;
+	notification->sequence = frame->sequence;
+	notification->capture_time = frame->capture_time;
+	notification->source = frame->source;
+	notification->actual_bytes = notification->data ? 1 : 0;
+	return notification;
+}
+
+bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
+	ANativeWindow **window, pthread_mutex_t *window_mutex) {
+	bool rendered = false;
+
+	pthread_mutex_lock(window_mutex);
+	ANativeWindow *target = *window;
+	if (LIKELY(target)) {
+		ANativeWindow_Buffer buffer;
+		if (LIKELY(ANativeWindow_lock(target, &buffer, NULL) == 0)) {
+			if (LIKELY(buffer.bits && buffer.width >= (int32_t) frame->width &&
+					buffer.height >= (int32_t) frame->height)) {
+				uvc_frame_t surface = {};
+				surface.data = buffer.bits;
+				surface.data_bytes = (size_t) buffer.stride * (size_t) buffer.height
+					* PREVIEW_PIXEL_BYTES;
+				surface.width = frame->width;
+				surface.height = frame->height;
+				surface.frame_format = UVC_FRAME_FORMAT_RGBX;
+				surface.step = (size_t) buffer.stride * PREVIEW_PIXEL_BYTES;
+				surface.sequence = frame->sequence;
+				surface.capture_time = frame->capture_time;
+				surface.source = frame->source;
+				surface.library_owns_data = 0;
+
+				const uint64_t t_convert = processing_now_ns();
+				const uvc_error_t result = frame->frame_format == UVC_FRAME_FORMAT_MJPEG
+					? uvc_mjpeg2rgbx(frame, &surface) : uvc_any2rgbx(frame, &surface);
+				recordPreviewConversionTiming(processing_now_ns() - t_convert);
+				rendered = result == UVC_SUCCESS;
+			}
+			ANativeWindow_unlockAndPost(target);
+		}
+	}
+	pthread_mutex_unlock(window_mutex);
+
+	return rendered;
 }
 
 uvc_frame_t *UVCPreview::convertPreviewFrameToRgbx(uvc_frame_t *frame) {
@@ -777,7 +849,9 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame = waitPreviewFrame();
 				if (LIKELY(frame)) {
-					frame = draw_preview_one(frame, &mPreviewWindow, nullptr, PREVIEW_PIXEL_BYTES);
+					if (frame->frame_format != UVC_FRAME_FORMAT_UNKNOWN)
+						frame = draw_preview_one(frame, &mPreviewWindow, nullptr,
+							PREVIEW_PIXEL_BYTES);
 					addCaptureFrame(frame);
 				}
 			}
@@ -1040,6 +1114,10 @@ void UVCPreview::do_capture_surface(JNIEnv *env) {
 	for (; isRunning() && isCapturing() ;) {
 		frame = waitCaptureFrame();
 		if (LIKELY(frame)) {
+			if (frame->frame_format == UVC_FRAME_FORMAT_UNKNOWN) {
+				do_capture_callback(env, frame);
+				continue;
+			}
 			bool fused_into_callback = false;
 			if LIKELY(isCapturing()) {
 				bool conv_ok = false;

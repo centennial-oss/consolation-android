@@ -475,7 +475,8 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	out->width = in->width;
 	out->height = in->height;
 	out->frame_format = UVC_FRAME_FORMAT_RGBX;	// XXX
-	out->step = in->width * 4;
+	if (out->library_owns_data || out->step < (size_t) in->width * 4)
+		out->step = in->width * 4;
 	// local copy — MUST be after ensure_frame_size (may realloc data) and after step is set
 	uint8_t *data = out->data;
 	const int out_step = out->step;
