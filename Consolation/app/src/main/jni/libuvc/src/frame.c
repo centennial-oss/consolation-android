@@ -60,20 +60,25 @@
 #define USE_STRIDE 1
 /** @internal */
 uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes) {
+	if (UNLIKELY(!need_bytes))
+		return UVC_ERROR_NO_MEM;
+
 	if LIKELY(frame->library_owns_data) {
-		if UNLIKELY(!frame->data || frame->data_bytes != need_bytes) {
+		if UNLIKELY(!frame->data || frame->data_bytes < need_bytes) {
 			void *resized = realloc(frame->data, need_bytes);
 			if (UNLIKELY(!resized))
 				return UVC_ERROR_NO_MEM;
 			frame->data = resized;
-			frame->actual_bytes = frame->data_bytes = need_bytes;	// XXX
+			frame->data_bytes = need_bytes;
 		}
-		if (UNLIKELY(!frame->data || !need_bytes))
+		if (UNLIKELY(!frame->data))
 			return UVC_ERROR_NO_MEM;
+		frame->actual_bytes = need_bytes;
 		return UVC_SUCCESS;
 	} else {
 		if (UNLIKELY(!frame->data || frame->data_bytes < need_bytes))
 			return UVC_ERROR_NO_MEM;
+		frame->actual_bytes = need_bytes;
 		return UVC_SUCCESS;
 	}
 }
@@ -140,7 +145,10 @@ static inline void store_rgb565(uint8_t *dst, int r, int g, int b) {
  * @param out Duplicate frame
  */
 uvc_error_t uvc_duplicate_frame(uvc_frame_t *in, uvc_frame_t *out) {
-	if (UNLIKELY(uvc_ensure_frame_size(out, in->data_bytes) < 0))
+	const size_t copy_bytes = (in->actual_bytes > 0 && in->actual_bytes <= in->data_bytes)
+		? in->actual_bytes : in->data_bytes;
+
+	if (UNLIKELY(uvc_ensure_frame_size(out, copy_bytes) < 0))
 		return UVC_ERROR_NO_MEM;
 
 	out->width = in->width;
@@ -151,7 +159,7 @@ uvc_error_t uvc_duplicate_frame(uvc_frame_t *in, uvc_frame_t *out) {
 	out->sequence = in->sequence;
 	out->capture_time = in->capture_time;
 	out->source = in->source;
-	out->actual_bytes = in->actual_bytes;	// XXX
+	out->actual_bytes = copy_bytes;
 
 #if USE_STRIDE	 // XXX
 	if (in->step && out->step) {
@@ -159,22 +167,31 @@ uvc_error_t uvc_duplicate_frame(uvc_frame_t *in, uvc_frame_t *out) {
 		const int ostep = out->step;
 		const int hh = in->height < out->height ? in->height : out->height;
 		const int rowbytes = istep < ostep ? istep : ostep;
+		const size_t input_span = (hh > 0 && istep > 0 && rowbytes > 0)
+			? ((size_t)(hh - 1) * (size_t)istep) + (size_t)rowbytes : 0;
+		const size_t output_span = (hh > 0 && ostep > 0 && rowbytes > 0)
+			? ((size_t)(hh - 1) * (size_t)ostep) + (size_t)rowbytes : 0;
 		register void *ip = in->data;
 		register void *op = out->data;
 		int h;
-		/* One row per iteration — 4× unroll advanced h by 4 always, reading past the
+		/* One row per iteration -- 4x unroll advanced h by 4 always, reading past the
 		 * last row when hh % 4 != 0 (buffer overrun). */
-		for (h = 0; h < hh; h++) {
-			memcpy(op, ip, rowbytes);
-			ip += istep;
-			op += ostep;
+		if (hh > 0 && istep > 0 && ostep > 0 && rowbytes > 0 &&
+				input_span <= copy_bytes && output_span <= out->data_bytes) {
+			for (h = 0; h < hh; h++) {
+				memcpy(op, ip, rowbytes);
+				ip += istep;
+				op += ostep;
+			}
+		} else {
+			memcpy(out->data, in->data, copy_bytes);
 		}
 	} else {
 		// compressed format? XXX if only one of the frame in / out has step, this may lead to crash...
-		memcpy(out->data, in->data, in->actual_bytes);
+		memcpy(out->data, in->data, copy_bytes);
 	}
 #else
-	memcpy(out->data, in->data, in->actual_bytes); // XXX
+	memcpy(out->data, in->data, copy_bytes); // XXX
 #endif
 	return UVC_SUCCESS;
 }

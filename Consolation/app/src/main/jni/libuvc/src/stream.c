@@ -1088,6 +1088,40 @@ static uvc_streaming_interface_t *_uvc_get_stream_if(uvc_device_handle_t *devh,
 	return NULL;
 }
 
+#define LIBUVC_FRAME_BUF_MIN_SIZE (64 * 1024)
+#define LIBUVC_FRAME_BUF_MARGIN_SIZE (64 * 1024)
+#define LIBUVC_FRAME_BUF_ALIGNMENT 4096
+
+static size_t _uvc_stream_frame_buffer_size(const uvc_stream_ctrl_t *ctrl,
+		uvc_streaming_interface_t *stream_if) {
+	uint64_t frame_size = ctrl->dwMaxVideoFrameSize;
+	const uvc_frame_desc_t *frame_desc = _uvc_find_frame_desc_stream_if(stream_if,
+		ctrl->bFormatIndex, ctrl->bFrameIndex);
+
+	if (frame_desc && frame_desc->dwMaxVideoFrameBufferSize > frame_size)
+		frame_size = frame_desc->dwMaxVideoFrameBufferSize;
+
+	if (!frame_size)
+		return LIBUVC_XFER_BUF_SIZE;
+
+	uint64_t wanted = frame_size + (frame_size / 8) + LIBUVC_FRAME_BUF_MARGIN_SIZE;
+	if (wanted < LIBUVC_FRAME_BUF_MIN_SIZE)
+		wanted = LIBUVC_FRAME_BUF_MIN_SIZE;
+
+	if (frame_size <= LIBUVC_XFER_BUF_SIZE && wanted > LIBUVC_XFER_BUF_SIZE)
+		wanted = LIBUVC_XFER_BUF_SIZE;
+
+	if (wanted > (uint64_t)((size_t)-1))
+		wanted = (uint64_t)((size_t)-1);
+
+	size_t result = (size_t)wanted;
+	if (result <= (size_t)-1 - (LIBUVC_FRAME_BUF_ALIGNMENT - 1))
+		result = (result + (LIBUVC_FRAME_BUF_ALIGNMENT - 1))
+			& ~((size_t)LIBUVC_FRAME_BUF_ALIGNMENT - 1);
+
+	return result;
+}
+
 /** Open a new video stream.
  * @ingroup streaming
  *
@@ -1102,6 +1136,7 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 	uvc_streaming_interface_t *stream_if;
 	uvc_error_t ret;
 	int claimed = 0;
+	size_t stream_buf_size;
 
 	UVC_ENTER();
 
@@ -1136,14 +1171,14 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 
 	// Set up the streaming status and data space
 	strmh->running = 0;
-	/** @todo take only what we need */
-	strmh->outbuf = malloc(LIBUVC_XFER_BUF_SIZE);
-	strmh->holdbuf = malloc(LIBUVC_XFER_BUF_SIZE);
+	stream_buf_size = _uvc_stream_frame_buffer_size(ctrl, stream_if);
+	strmh->outbuf = malloc(stream_buf_size);
+	strmh->holdbuf = malloc(stream_buf_size);
 	if (UNLIKELY(!strmh->outbuf || !strmh->holdbuf)) {
 		ret = UVC_ERROR_NO_MEM;
 		goto fail;
 	}
-	strmh->size_buf = LIBUVC_XFER_BUF_SIZE;	// xxx for boundary check
+	strmh->size_buf = stream_buf_size;	// xxx for boundary check
 
 	pthread_mutex_init(&strmh->cb_mutex, NULL);
 	pthread_cond_init(&strmh->cb_cond, NULL);
@@ -1236,8 +1271,9 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 		LOGE("unlnown frame format");
 		goto fail;
 	}
-	const uint32_t dwMaxVideoFrameSize = ctrl->dwMaxVideoFrameSize <= frame_desc->dwMaxVideoFrameBufferSize
-		? ctrl->dwMaxVideoFrameSize : frame_desc->dwMaxVideoFrameBufferSize;
+	uint32_t dwMaxVideoFrameSize = ctrl->dwMaxVideoFrameSize;
+	if (frame_desc->dwMaxVideoFrameBufferSize > dwMaxVideoFrameSize)
+		dwMaxVideoFrameSize = frame_desc->dwMaxVideoFrameBufferSize;
 
 	// Get the interface that provides the chosen format and frame configuration
 	interface_id = strmh->stream_if->bInterfaceNumber;

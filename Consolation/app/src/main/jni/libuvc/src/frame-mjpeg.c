@@ -42,6 +42,7 @@
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
 #include <jpeglib.h>
+#include <pthread.h>
 #include <setjmp.h>
 
 extern uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes);
@@ -64,6 +65,60 @@ static void _error_exit(j_common_ptr dinfo) {
 #endif
 #endif
 	longjmp(myerr->jmp, 1);
+}
+
+struct mjpeg_decoder_ctx {
+	struct jpeg_decompress_struct dinfo;
+	int initialized;
+};
+
+static pthread_key_t mjpeg_decoder_key;
+static pthread_once_t mjpeg_decoder_key_once = PTHREAD_ONCE_INIT;
+static int mjpeg_decoder_key_result;
+
+static void _mjpeg_decoder_destroy(void *ptr) {
+	struct mjpeg_decoder_ctx *ctx = (struct mjpeg_decoder_ctx *) ptr;
+	if (!ctx)
+		return;
+	if (ctx->initialized)
+		jpeg_destroy_decompress(&ctx->dinfo);
+	free(ctx);
+}
+
+static void _mjpeg_decoder_make_key(void) {
+	mjpeg_decoder_key_result = pthread_key_create(&mjpeg_decoder_key,
+		_mjpeg_decoder_destroy);
+}
+
+static struct mjpeg_decoder_ctx *_mjpeg_decoder_get(void) {
+	struct mjpeg_decoder_ctx *ctx;
+
+	pthread_once(&mjpeg_decoder_key_once, _mjpeg_decoder_make_key);
+	if (UNLIKELY(mjpeg_decoder_key_result))
+		return NULL;
+
+	ctx = (struct mjpeg_decoder_ctx *) pthread_getspecific(mjpeg_decoder_key);
+	if (ctx)
+		return ctx;
+
+	ctx = (struct mjpeg_decoder_ctx *) calloc(1, sizeof(*ctx));
+	if (UNLIKELY(!ctx))
+		return NULL;
+
+	if (UNLIKELY(pthread_setspecific(mjpeg_decoder_key, ctx))) {
+		free(ctx);
+		return NULL;
+	}
+
+	return ctx;
+}
+
+static void _mjpeg_decoder_reset(struct mjpeg_decoder_ctx *ctx) {
+	if (ctx && ctx->initialized) {
+		jpeg_destroy_decompress(&ctx->dinfo);
+		memset(&ctx->dinfo, 0, sizeof(ctx->dinfo));
+		ctx->initialized = 0;
+	}
 }
 
 /* ISO/IEC 10918-1:1993(E) K.3.3. Default Huffman tables used by MJPEG UVC devices
@@ -401,7 +456,8 @@ fail:
  * @param out RGBX frame
  */
 uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
-	struct jpeg_decompress_struct dinfo;
+	struct mjpeg_decoder_ctx *decoder;
+	struct jpeg_decompress_struct *dinfo;
 	struct error_mgr jerr;
 	size_t lines_read;
 
@@ -427,49 +483,57 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	out->capture_time = in->capture_time;
 	out->source = in->source;
 
-	dinfo.err = jpeg_std_error(&jerr.super);
+	decoder = _mjpeg_decoder_get();
+	if (UNLIKELY(!decoder))
+		return UVC_ERROR_NO_MEM;
+
+	dinfo = &decoder->dinfo;
+	dinfo->err = jpeg_std_error(&jerr.super);
 	jerr.super.error_exit = _error_exit;
 
 	if (setjmp(jerr.jmp)) {
 		goto fail;
 	}
 
-	jpeg_create_decompress(&dinfo);
-	jpeg_mem_src(&dinfo, in->data, in->actual_bytes/*in->data_bytes*/);	// XXX
-	jpeg_read_header(&dinfo, TRUE);
-
-	if (dinfo.dc_huff_tbl_ptrs[0] == NULL) {
-		/* This frame is missing the Huffman tables: fill in the standard ones */
-		insert_huff_tables(&dinfo);
+	if (!decoder->initialized) {
+		jpeg_create_decompress(dinfo);
+		decoder->initialized = 1;
 	}
 
-	dinfo.out_color_space = JCS_EXT_RGBX;
-	dinfo.dct_method = JDCT_IFAST;
+	jpeg_mem_src(dinfo, in->data, in->actual_bytes/*in->data_bytes*/);	// XXX
+	jpeg_read_header(dinfo, TRUE);
 
-	jpeg_start_decompress(&dinfo);
+	if (dinfo->dc_huff_tbl_ptrs[0] == NULL) {
+		/* This frame is missing the Huffman tables: fill in the standard ones */
+		insert_huff_tables(dinfo);
+	}
+
+	dinfo->out_color_space = JCS_EXT_RGBX;
+	dinfo->dct_method = JDCT_IFAST;
+
+	jpeg_start_decompress(dinfo);
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo.output_height == (JDIMENSION) out->height &&
-			dinfo.output_width == (JDIMENSION) out->width)) {
-		for (; dinfo.output_scanline < dinfo.output_height ;) {
-			const JDIMENSION rows_remaining = dinfo.output_height - dinfo.output_scanline;
+			dinfo->output_height == (JDIMENSION) out->height &&
+			dinfo->output_width == (JDIMENSION) out->width)) {
+		for (; dinfo->output_scanline < dinfo->output_height ;) {
+			const JDIMENSION rows_remaining = dinfo->output_height - dinfo->output_scanline;
 			const JDIMENSION rows_to_read = rows_remaining < MJPEG_RGBX_READLINE
 				? rows_remaining : MJPEG_RGBX_READLINE;
 			buffer[0] = data + (lines_read) * out_step;
 			for (i = 1; i < (int) rows_to_read; i++)
 				buffer[i] = buffer[i-1] + out_step;
-			num_scanlines = jpeg_read_scanlines(&dinfo, buffer, rows_to_read);
+			num_scanlines = jpeg_read_scanlines(dinfo, buffer, rows_to_read);
 			lines_read += num_scanlines;
 		}
 		out->actual_bytes = in->width * in->height * 4;	// XXX
 	}
-	jpeg_finish_decompress(&dinfo);
-	jpeg_destroy_decompress(&dinfo);
+	jpeg_finish_decompress(dinfo);
 	return uvc_mjpeg_lines_match_height(lines_read, out->height)
 		? UVC_SUCCESS : UVC_ERROR_OTHER;
 
 fail:
-	jpeg_destroy_decompress(&dinfo);
+	_mjpeg_decoder_reset(decoder);
 	return UVC_ERROR_OTHER+1;
 }
 
