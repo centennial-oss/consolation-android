@@ -600,6 +600,36 @@ static void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
 	strmh->bfh_err = 0;	// XXX
 }
 
+/* Unified transfer-slot cleanup:
+ * - transfer_bufs[i] is the canonical owner of heap payload memory.
+ * - transfer->buffer usually aliases transfer_bufs[i], but may be set independently.
+ * Always null slot pointers after cleanup to prevent stale ownership state. */
+static void _uvc_release_transfer_slot(uvc_stream_handle_t *strmh, int transfer_id) {
+	struct libusb_transfer *transfer;
+	uint8_t *buffer;
+
+	if (UNLIKELY(transfer_id < 0 || transfer_id >= LIBUVC_NUM_TRANSFER_BUFS))
+		return;
+
+	transfer = strmh->transfers[transfer_id];
+	buffer = strmh->transfer_bufs[transfer_id];
+	if (!buffer && transfer) {
+		buffer = transfer->buffer;
+	}
+
+	if (buffer) {
+		free(buffer);
+	}
+	strmh->transfer_bufs[transfer_id] = NULL;
+
+	if (transfer) {
+		/* Avoid dangling pointer inside libusb transfer before free. */
+		transfer->buffer = NULL;
+		libusb_free_transfer(transfer);
+	}
+	strmh->transfers[transfer_id] = NULL;
+}
+
 static void _uvc_delete_transfer(struct libusb_transfer *transfer) {
 	ENTER();
 
@@ -615,9 +645,7 @@ static void _uvc_delete_transfer(struct libusb_transfer *transfer) {
 			if (strmh->transfers[i] == transfer) {
 				libusb_cancel_transfer(strmh->transfers[i]);	// XXX 20141112追加
 				UVC_DEBUG("Freeing transfer %d (%p)", i, transfer);
-				free(transfer->buffer);
-				libusb_free_transfer(transfer);
-				strmh->transfers[i] = NULL;
+				_uvc_release_transfer_slot(strmh, i);
 				break;
 			}
 		}
@@ -632,13 +660,7 @@ static void _uvc_delete_transfer(struct libusb_transfer *transfer) {
 }
 
 static void _uvc_free_transfer(uvc_stream_handle_t *strmh, int transfer_id) {
-	struct libusb_transfer *transfer = strmh->transfers[transfer_id];
-	free(strmh->transfer_bufs[transfer_id]);
-	strmh->transfer_bufs[transfer_id] = NULL;
-	if (transfer) {
-		libusb_free_transfer(transfer);
-		strmh->transfers[transfer_id] = NULL;
-	}
+	_uvc_release_transfer_slot(strmh, transfer_id);
 }
 
 #define USE_EOF
@@ -1665,6 +1687,15 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 			if (i == LIBUVC_NUM_TRANSFER_BUFS)
 				break;
 			pthread_cond_wait(&strmh->cb_cond, &strmh->cb_mutex);
+		}
+		/* Defensive sweep: callbacks should have released all transfer buffers by now.
+		 * Keep this in stop path so failed/partial starts cannot retain orphaned buffers. */
+		for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+			if (UNLIKELY(strmh->transfer_bufs[i] != NULL)) {
+				UVC_DEBUG("reclaiming orphaned transfer buffer %d", i);
+				free(strmh->transfer_bufs[i]);
+				strmh->transfer_bufs[i] = NULL;
+			}
 		}
 		// Kick the user thread awake
 		pthread_cond_broadcast(&strmh->cb_cond);

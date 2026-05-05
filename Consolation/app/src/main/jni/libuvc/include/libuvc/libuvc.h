@@ -793,6 +793,7 @@ void uvc_print_stream_ctrl(uvc_stream_ctrl_t *ctrl, FILE *stream);
 
 uvc_frame_t *uvc_allocate_frame(size_t data_bytes);
 void uvc_free_frame(uvc_frame_t *frame);
+void uvc_cleanup_frame_caches(void);
 
 uvc_error_t uvc_duplicate_frame(uvc_frame_t *in, uvc_frame_t *out);
 //----------------------------------------------------------------------

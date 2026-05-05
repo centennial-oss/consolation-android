@@ -1532,11 +1532,24 @@ uvc_error_t uvc_any2yuyv(uvc_frame_t *in, uvc_frame_t *out) {
 }
 
 /* Scratch frame reused across calls to avoid per-frame malloc in the any2yuv420SP
-   family. Sized up on demand; never freed (persists for the process lifetime).
-   These functions must not be called concurrently on the same stream. */
+   family. Sized up on demand. Use a bounded cache and transient allocations for
+   unusually large frames so retained memory does not grow without bound. */
 static uvc_frame_t *s_yuv420sp_scratch;
+/* Keep persistent cache modest; larger frames use temporary scratch. */
+#define LIBUVC_YUV420SP_SCRATCH_CAP_BYTES (32 * 1024 * 1024)
 
-static uvc_frame_t *get_yuv_scratch(size_t need_bytes) {
+static uvc_frame_t *get_yuv_scratch(size_t need_bytes, int *must_free) {
+	if (must_free) {
+		*must_free = 0;
+	}
+
+	if (UNLIKELY(need_bytes > LIBUVC_YUV420SP_SCRATCH_CAP_BYTES)) {
+		if (must_free) {
+			*must_free = 1;
+		}
+		return uvc_allocate_frame(need_bytes);
+	}
+
 	if (UNLIKELY(!s_yuv420sp_scratch)) {
 		s_yuv420sp_scratch = uvc_allocate_frame(need_bytes);
 	} else if (UNLIKELY(s_yuv420sp_scratch->data_bytes < need_bytes)) {
@@ -1546,6 +1559,13 @@ static uvc_frame_t *get_yuv_scratch(size_t need_bytes) {
 	return s_yuv420sp_scratch;
 }
 
+void uvc_cleanup_frame_caches(void) {
+	if (s_yuv420sp_scratch) {
+		uvc_free_frame(s_yuv420sp_scratch);
+		s_yuv420sp_scratch = NULL;
+	}
+}
+
 /** @brief Convert a frame to yuv420sp
  * @ingroup frame
  *
@@ -1553,12 +1573,15 @@ static uvc_frame_t *get_yuv_scratch(size_t need_bytes) {
  * @param out yuv420sp frame
  */
 uvc_error_t uvc_any2yuv420SP(uvc_frame_t *in, uvc_frame_t *out) {
-	uvc_frame_t *yuv = get_yuv_scratch((in->width * in->height * 3) / 2);
+	int free_scratch = 0;
+	uvc_frame_t *yuv = get_yuv_scratch((in->width * in->height * 3) / 2, &free_scratch);
 	if (UNLIKELY(!yuv))
 		return UVC_ERROR_NO_MEM;
 	uvc_error_t result = uvc_any2yuyv(in, yuv);
 	if (LIKELY(!result))
 		result = uvc_yuyv2yuv420SP(yuv, out);
+	if (free_scratch)
+		uvc_free_frame(yuv);
 	return result;
 }
 
@@ -1569,11 +1592,14 @@ uvc_error_t uvc_any2yuv420SP(uvc_frame_t *in, uvc_frame_t *out) {
  * @param out iyuv420SP(NV21) frame
  */
 uvc_error_t uvc_any2iyuv420SP(uvc_frame_t *in, uvc_frame_t *out) {
-	uvc_frame_t *yuv = get_yuv_scratch((in->width * in->height * 3) / 2);
+	int free_scratch = 0;
+	uvc_frame_t *yuv = get_yuv_scratch((in->width * in->height * 3) / 2, &free_scratch);
 	if (UNLIKELY(!yuv))
 		return UVC_ERROR_NO_MEM;
 	uvc_error_t result = uvc_any2yuyv(in, yuv);
 	if (LIKELY(!result))
 		result = uvc_yuyv2iyuv420SP(yuv, out);
+	if (free_scratch)
+		uvc_free_frame(yuv);
 	return result;
 }

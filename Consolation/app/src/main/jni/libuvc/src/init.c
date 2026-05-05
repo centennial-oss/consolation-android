@@ -191,6 +191,7 @@ void uvc_exit(uvc_context_t *ctx) {
 	{
 		uvc_close(devh);
 	}
+	uvc_cleanup_frame_caches();
 
 	if (ctx->own_usb_ctx)
 		libusb_exit(ctx->usb_ctx);
