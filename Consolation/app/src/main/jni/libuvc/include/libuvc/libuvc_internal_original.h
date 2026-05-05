@@ -363,7 +363,7 @@ uvc_error_t uvc_query_stream_ctrl(
     uint8_t probe,
     enum uvc_req_code req);
 
-void uvc_start_handler_thread(uvc_context_t *ctx);
+uvc_error_t uvc_start_handler_thread(uvc_context_t *ctx);
 uvc_error_t uvc_claim_if(uvc_device_handle_t *devh, int idx);
 uvc_error_t uvc_release_if(uvc_device_handle_t *devh, int idx);
 

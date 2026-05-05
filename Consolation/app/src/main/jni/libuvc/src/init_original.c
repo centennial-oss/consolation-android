@@ -155,8 +155,12 @@ void uvc_exit(uvc_context_t *ctx) {
  * This should be called at the end of a successful uvc_open if no devices
  * are already open (and being handled).
  */
-void uvc_start_handler_thread(uvc_context_t *ctx) {
-  if (ctx->own_usb_ctx)
-    pthread_create(&ctx->handler_thread, NULL, _uvc_handle_events, (void*) ctx);
+uvc_error_t uvc_start_handler_thread(uvc_context_t *ctx) {
+  if (ctx->own_usb_ctx) {
+    if (UNLIKELY(pthread_create(&ctx->handler_thread, NULL, _uvc_handle_events, (void*) ctx))) {
+      return UVC_ERROR_OTHER;
+    }
+  }
+  return UVC_SUCCESS;
 }
 

@@ -56,8 +56,11 @@
 uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes) {
 	if LIKELY(frame->library_owns_data) {
 		if UNLIKELY(!frame->data || frame->data_bytes != need_bytes) {
+			void *resized = realloc(frame->data, need_bytes);
+			if (UNLIKELY(!resized))
+				return UVC_ERROR_NO_MEM;
+			frame->data = resized;
 			frame->actual_bytes = frame->data_bytes = need_bytes;	// XXX
-			frame->data = realloc(frame->data, frame->data_bytes);
 		}
 		if (UNLIKELY(!frame->data || !need_bytes))
 			return UVC_ERROR_NO_MEM;

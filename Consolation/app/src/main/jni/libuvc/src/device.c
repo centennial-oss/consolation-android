@@ -200,6 +200,12 @@ uvc_error_t uvc_find_device2(uvc_context_t *ctx, uvc_device_t **device, int vid,
 
 	if (usb_dev) {
 		*device = malloc(sizeof(uvc_device_t/* *device */));
+		if (UNLIKELY(!*device)) {
+			libusb_unref_device(usb_dev);
+			*device = NULL;
+			UVC_EXIT(UVC_ERROR_NO_MEM);
+			return UVC_ERROR_NO_MEM;
+		}
 		(*device)->ctx = ctx;
 		(*device)->ref = 0;
 		(*device)->usb_dev = usb_dev;
@@ -230,6 +236,12 @@ uvc_error_t uvc_get_device_with_fd(uvc_context_t *ctx, uvc_device_t **device,
 
 	if (LIKELY(usb_dev)) {
 		*device = malloc(sizeof(uvc_device_t/* *device */));
+		if (UNLIKELY(!*device)) {
+			libusb_unref_device(usb_dev);
+			*device = NULL;
+			UVC_EXIT(UVC_ERROR_NO_MEM);
+			RETURN(UVC_ERROR_NO_MEM, int);
+		}
 		(*device)->ctx = ctx;
 		(*device)->ref = 0;
 		(*device)->usb_dev = usb_dev;
@@ -285,6 +297,10 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 	uvc_ref_device(dev);
 
 	internal_devh = calloc(1, sizeof(*internal_devh));
+	if (UNLIKELY(!internal_devh)) {
+		ret = UVC_ERROR_NO_MEM;
+		goto fail_nomem;
+	}
 	internal_devh->dev = dev;
 	internal_devh->usb_devh = usb_devh;
 	internal_devh->reset_on_release_if = 0;	// XXX
@@ -332,7 +348,9 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 
 	if (dev->ctx->own_usb_ctx && dev->ctx->open_devices == NULL) {
 		/* Since this is our first device, we need to spawn the event handler thread */
-		uvc_start_handler_thread(dev->ctx);
+		ret = uvc_start_handler_thread(dev->ctx);
+		if (UNLIKELY(ret != UVC_SUCCESS))
+			goto fail;
 	}
 
 	DL_APPEND(dev->ctx->open_devices, internal_devh);
@@ -340,6 +358,12 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 
 	UVC_EXIT(ret);
 
+	return ret;
+
+fail_nomem:
+	libusb_close(usb_devh);
+	uvc_unref_device(dev);
+	UVC_EXIT(ret);
 	return ret;
 
 fail:
@@ -539,6 +563,10 @@ uvc_error_t uvc_get_device_descriptor(uvc_device_t *dev,
 	}
 
 	desc_internal = calloc(1, sizeof(*desc_internal));
+	if (UNLIKELY(!desc_internal)) {
+		UVC_EXIT(UVC_ERROR_NO_MEM);
+		return UVC_ERROR_NO_MEM;
+	}
 	desc_internal->idVendor = usb_desc.idVendor;
 	desc_internal->idProduct = usb_desc.idProduct;
 
@@ -656,8 +684,10 @@ uvc_error_t uvc_get_device_list(uvc_context_t *ctx, uvc_device_t ***list) {
 		if (libusb_get_config_descriptor(usb_dev, 0, &config) != 0)
 			continue;
 
-		if (libusb_get_device_descriptor (usb_dev, &desc) != LIBUSB_SUCCESS)
+		if (libusb_get_device_descriptor (usb_dev, &desc) != LIBUSB_SUCCESS) {
+			libusb_free_config_descriptor(config);
 			continue;
+		}
 
 		// Special case for Imaging Source cameras
 		if ((0x199e == desc.idVendor) && (0x8101 == desc.idProduct)) {
@@ -1245,6 +1275,10 @@ uvc_error_t uvc_scan_streaming(uvc_device_t *dev, uvc_device_info_t *info,
 		}
 	}
 	stream_if = calloc(1, sizeof(*stream_if));
+	if (UNLIKELY(!stream_if)) {
+		UVC_EXIT(UVC_ERROR_NO_MEM);
+		return UVC_ERROR_NO_MEM;
+	}
 	stream_if->parent = info;
 	stream_if->bInterfaceNumber = if_desc->bInterfaceNumber;
 	DL_APPEND(info->stream_ifs, stream_if);
@@ -1291,6 +1325,10 @@ uvc_error_t uvc_parse_vs_input_header(uvc_streaming_interface_t *stream_if,
 		const uint8_t p = (block_size - 13) / n;
 		if (LIKELY(p)) {
 			uint64_t *bmaControls = (uint64_t *)calloc(p, sizeof(uint64_t));
+			if (UNLIKELY(!bmaControls)) {
+				UVC_EXIT(UVC_ERROR_NO_MEM);
+				return UVC_ERROR_NO_MEM;
+			}
 			stream_if->bmaControls = bmaControls;
 			const uint8_t *bma;
 			int pp, nn;
@@ -1317,6 +1355,10 @@ uvc_error_t uvc_parse_vs_format_uncompressed(
 	UVC_ENTER();
 
 	uvc_format_desc_t *format = calloc(1, sizeof(*format));
+	if (UNLIKELY(!format)) {
+		UVC_EXIT(UVC_ERROR_NO_MEM);
+		return UVC_ERROR_NO_MEM;
+	}
 
 	format->parent = stream_if;
 	format->bDescriptorSubtype = block[2];
@@ -1346,6 +1388,10 @@ uvc_error_t uvc_parse_vs_frame_format(uvc_streaming_interface_t *stream_if,
 	UVC_ENTER();
 
 	uvc_format_desc_t *format = calloc(1, sizeof(*format));
+	if (UNLIKELY(!format)) {
+		UVC_EXIT(UVC_ERROR_NO_MEM);
+		return UVC_ERROR_NO_MEM;
+	}
 
 	format->parent = stream_if;
 	format->bDescriptorSubtype = block[2];
@@ -1375,6 +1421,10 @@ uvc_error_t uvc_parse_vs_format_mjpeg(uvc_streaming_interface_t *stream_if,
 	UVC_ENTER();
 
 	uvc_format_desc_t *format = calloc(1, sizeof(*format));
+	if (UNLIKELY(!format)) {
+		UVC_EXIT(UVC_ERROR_NO_MEM);
+		return UVC_ERROR_NO_MEM;
+	}
 
 	format->parent = stream_if;
 	format->bDescriptorSubtype = block[2];
@@ -1411,6 +1461,10 @@ uvc_error_t uvc_parse_vs_frame_frame(uvc_streaming_interface_t *stream_if,
 
   format = stream_if->format_descs->prev;
   frame = calloc(1, sizeof(*frame));
+  if (UNLIKELY(!frame)) {
+    UVC_EXIT(UVC_ERROR_NO_MEM);
+    return UVC_ERROR_NO_MEM;
+  }
 
   frame->parent = format;
 
@@ -1431,6 +1485,11 @@ uvc_error_t uvc_parse_vs_frame_frame(uvc_streaming_interface_t *stream_if,
     frame->dwFrameIntervalStep = DW_TO_INT(&block[34]);
   } else {
     frame->intervals = calloc(block[21] + 1, sizeof(frame->intervals[0]));
+    if (UNLIKELY(!frame->intervals)) {
+      free(frame);
+      UVC_EXIT(UVC_ERROR_NO_MEM);
+      return UVC_ERROR_NO_MEM;
+    }
     p = &block[26];
 
     for (i = 0; i < block[21]; ++i) {
@@ -1466,6 +1525,10 @@ uvc_error_t uvc_parse_vs_frame_uncompressed(
 
 	format = stream_if->format_descs->prev;
 	frame = calloc(1, sizeof(*frame));
+	if (UNLIKELY(!frame)) {
+		UVC_EXIT(UVC_ERROR_NO_MEM);
+		return UVC_ERROR_NO_MEM;
+	}
 
 	frame->parent = format;
 
@@ -1486,6 +1549,11 @@ uvc_error_t uvc_parse_vs_frame_uncompressed(
 		frame->dwFrameIntervalStep = DW_TO_INT(&block[34]);
 	} else {
 		frame->intervals = calloc(n + 1, sizeof(frame->intervals[0]));
+		if (UNLIKELY(!frame->intervals)) {
+			free(frame);
+			UVC_EXIT(UVC_ERROR_NO_MEM);
+			return UVC_ERROR_NO_MEM;
+		}
 		p = &block[26];
 
 		for (i = 0; i < n; ++i) {
@@ -1596,6 +1664,20 @@ void uvc_close(uvc_device_handle_t *devh) {
 
 	if (devh->streams)
 		uvc_stop_streaming(devh);
+
+	/* Stop status callbacks and detach transfer ownership before teardown. */
+	pthread_mutex_lock(&devh->status_mutex);
+	{
+		devh->status_cb = NULL;
+		devh->status_user_ptr = NULL;
+		devh->button_cb = NULL;
+		devh->button_user_ptr = NULL;
+		if (devh->status_xfer) {
+			devh->status_xfer->user_data = NULL;
+			libusb_cancel_transfer(devh->status_xfer);
+		}
+	}
+	pthread_mutex_unlock(&devh->status_mutex);
 
 	uvc_release_if(devh, devh->info->ctrl_if.bInterfaceNumber);
 
@@ -1797,6 +1879,11 @@ void _uvc_status_callback(struct libusb_transfer *transfer) {
 	UVC_ENTER();
 
 	uvc_device_handle_t *devh = (uvc_device_handle_t *) transfer->user_data;
+	if (UNLIKELY(!devh)) {
+		UVC_DEBUG("status callback without device handle");
+		UVC_EXIT_VOID();
+		return;
+	}
 
 	switch (transfer->status) {
 	case LIBUSB_TRANSFER_ERROR:
