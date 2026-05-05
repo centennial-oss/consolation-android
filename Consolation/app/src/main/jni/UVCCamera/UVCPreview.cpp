@@ -127,7 +127,7 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	frameBytes(DEFAULT_PREVIEW_WIDTH * DEFAULT_PREVIEW_HEIGHT * 2),	// YUYV
 	frameMode(0),
 	preview_frame_ring(PREVIEW_QUEUE_MAX),
-	previewFormat(WINDOW_FORMAT_RGBA_8888),
+	previewFormat(WINDOW_FORMAT_RGBX_8888),
 	previewBytes(DEFAULT_PREVIEW_WIDTH * DEFAULT_PREVIEW_HEIGHT * PREVIEW_PIXEL_BYTES),
 	mIsRunning(false),
 	mIsCapturing(false),
@@ -735,7 +735,7 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			}
 		} else if (frameMode == REQUEST_MODE_MJPEG) {
 			/*
-			 * MJPEG → RGBX direct path using uvc_mjpeg2rgbx (JCS_EXT_RGBA).
+			 * MJPEG → RGBX direct path using uvc_mjpeg2rgbx (JCS_EXT_RGBX).
 			 * Root cause of prior SIGSEGV fixed: uvc_mjpeg2rgbx was snapshotting
 			 * out->data / out->step *before* uvc_ensure_frame_size (which may realloc),
 			 * leaving a dangling `data` pointer + wrong stride on first use at a new

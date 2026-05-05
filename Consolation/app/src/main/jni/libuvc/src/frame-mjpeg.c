@@ -158,6 +158,8 @@ static inline void insert_huff_tables(j_decompress_ptr dinfo) {
 #define MAX_READLINE 1
 #endif
 
+#define MJPEG_RGBX_READLINE 16
+
 /** True if full output height was decoded (avoids size_t vs int compare on return paths). */
 static inline int uvc_mjpeg_lines_match_height(size_t lines_decoded, int height_px) {
 	if UNLIKELY(height_px < 0)
@@ -405,7 +407,7 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 
 	int num_scanlines, i;
 	lines_read = 0;
-	unsigned char *buffer[MAX_READLINE];
+	unsigned char *buffer[MJPEG_RGBX_READLINE];
 
 	out->actual_bytes = 0;	// XXX
 	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_MJPEG))
@@ -441,18 +443,22 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 		insert_huff_tables(&dinfo);
 	}
 
-	dinfo.out_color_space = JCS_EXT_RGBA;
+	dinfo.out_color_space = JCS_EXT_RGBX;
 	dinfo.dct_method = JDCT_IFAST;
 
 	jpeg_start_decompress(&dinfo);
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo.output_height == (JDIMENSION) out->height)) {
+			dinfo.output_height == (JDIMENSION) out->height &&
+			dinfo.output_width == (JDIMENSION) out->width)) {
 		for (; dinfo.output_scanline < dinfo.output_height ;) {
+			const JDIMENSION rows_remaining = dinfo.output_height - dinfo.output_scanline;
+			const JDIMENSION rows_to_read = rows_remaining < MJPEG_RGBX_READLINE
+				? rows_remaining : MJPEG_RGBX_READLINE;
 			buffer[0] = data + (lines_read) * out_step;
-			for (i = 1; i < MAX_READLINE; i++)
+			for (i = 1; i < (int) rows_to_read; i++)
 				buffer[i] = buffer[i-1] + out_step;
-			num_scanlines = jpeg_read_scanlines(&dinfo, buffer, MAX_READLINE);
+			num_scanlines = jpeg_read_scanlines(&dinfo, buffer, rows_to_read);
 			lines_read += num_scanlines;
 		}
 		out->actual_bytes = in->width * in->height * 4;	// XXX
@@ -576,4 +582,3 @@ fail:
 	return uvc_mjpeg_lines_match_height(lines_read, out->height)
 		? UVC_SUCCESS : UVC_ERROR_OTHER+1;
 }
-
