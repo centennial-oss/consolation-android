@@ -309,6 +309,15 @@ int UVCCamera::setCaptureDisplay(ANativeWindow *capture_window) {
 	RETURN(result, int);
 }
 
+void UVCCamera::getAndResetProcessingStats(uint64_t stats[12]) {
+	if (stats) {
+		for (int i = 0; i < 12; i++)
+			stats[i] = 0;
+		if (mPreview)
+			mPreview->getAndResetProcessingStats(stats);
+	}
+}
+
 //======================================================================
 // カメラのサポートしているコントロール機能を取得する
 int UVCCamera::getCtrlSupports(uint64_t *supports) {

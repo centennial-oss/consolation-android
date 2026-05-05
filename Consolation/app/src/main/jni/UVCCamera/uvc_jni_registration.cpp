@@ -325,6 +325,26 @@ static jint nativeSetCaptureDisplay(JNIEnv *env, jobject thiz,
 	RETURN(result, jint);
 }
 
+static jlongArray nativeGetAndResetProcessingStats(JNIEnv *env, jobject thiz,
+	ID_TYPE id_camera) {
+
+	ENTER();
+	uint64_t stats[12] = {};
+	UVCCamera *camera = reinterpret_cast<UVCCamera *>(id_camera);
+	if (LIKELY(camera)) {
+		camera->getAndResetProcessingStats(stats);
+	}
+	jlong values[12];
+	for (int i = 0; i < 12; i++) {
+		values[i] = static_cast<jlong>(stats[i]);
+	}
+	jlongArray result = env->NewLongArray(12);
+	if (LIKELY(result)) {
+		env->SetLongArrayRegion(result, 0, 12, values);
+	}
+	RETURN(result, jlongArray);
+}
+
 //======================================================================
 // カメラコントロールでサポートしている機能を取得する
 static jlong nativeGetCtrlSupports(JNIEnv *env, jobject thiz,
@@ -2068,6 +2088,7 @@ static JNINativeMethod methods[] = {
 	{ "nativeSetFrameCallback",			"(JLorg/centennialoss/consolation/uvc/IFrameCallback;I)I", (void *) nativeSetFrameCallback },
 
 	{ "nativeSetCaptureDisplay",		"(JLandroid/view/Surface;)I", (void *) nativeSetCaptureDisplay },
+	{ "nativeGetAndResetProcessingStats", "(J)[J", (void *) nativeGetAndResetProcessingStats },
 
 	{ "nativeGetCtrlSupports",			"(J)J", (void *) nativeGetCtrlSupports },
 	{ "nativeGetProcSupports",			"(J)J", (void *) nativeGetProcSupports },

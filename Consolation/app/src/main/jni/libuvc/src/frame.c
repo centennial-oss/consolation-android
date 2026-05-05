@@ -50,6 +50,12 @@
  */
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define LIBUVC_HAS_ARM_NEON 1
+#else
+#define LIBUVC_HAS_ARM_NEON 0
+#endif
 
 #define USE_STRIDE 1
 /** @internal */
@@ -589,6 +595,66 @@ uvc_error_t uvc_yuyv2rgb565(uvc_frame_t *in, uvc_frame_t *out) {
 	IYUYV2RGBX_2(pyuv, prgbx, ax, bx) \
 	IYUYV2RGBX_2(pyuv, prgbx, ax + PIXEL2_YUYV, bx + PIXEL2_RGBX);
 
+#if LIBUVC_HAS_ARM_NEON
+static inline int16x8_t yuv_mul_shift_s16(int16x8_t value, int coeff) {
+	const int32x4_t lo = vmull_n_s16(vget_low_s16(value), coeff);
+	const int32x4_t hi = vmull_n_s16(vget_high_s16(value), coeff);
+	return vcombine_s16(vshrn_n_s32(lo, 14), vshrn_n_s32(hi, 14));
+}
+
+static inline uint8x8_t yuv_add_sat_u8(uint8x8_t y, int16x8_t addend) {
+	return vqmovun_s16(vaddq_s16(vreinterpretq_s16_u16(vmovl_u8(y)), addend));
+}
+
+static inline void yuv422_to_rgbx_neon_8pairs(uint8_t *dst, uint8x8_t y0,
+		uint8x8_t chroma_u, uint8x8_t y1, uint8x8_t chroma_v) {
+	const int16x8_t u = vreinterpretq_s16_u16(vsubl_u8(chroma_u, vdup_n_u8(128)));
+	const int16x8_t v = vreinterpretq_s16_u16(vsubl_u8(chroma_v, vdup_n_u8(128)));
+	const int16x8_t r_add = yuv_mul_shift_s16(v, 22987);
+	const int16x8_t b_add = yuv_mul_shift_s16(u, 29049);
+	const int32x4_t g_lo = vaddq_s32(
+		vmull_n_s16(vget_low_s16(u), -5636),
+		vmull_n_s16(vget_low_s16(v), -11698));
+	const int32x4_t g_hi = vaddq_s32(
+		vmull_n_s16(vget_high_s16(u), -5636),
+		vmull_n_s16(vget_high_s16(v), -11698));
+	const int16x8_t g_add = vcombine_s16(vshrn_n_s32(g_lo, 14), vshrn_n_s32(g_hi, 14));
+
+	const uint8x8_t r0 = yuv_add_sat_u8(y0, r_add);
+	const uint8x8_t g0 = yuv_add_sat_u8(y0, g_add);
+	const uint8x8_t b0 = yuv_add_sat_u8(y0, b_add);
+	const uint8x8_t r1 = yuv_add_sat_u8(y1, r_add);
+	const uint8x8_t g1 = yuv_add_sat_u8(y1, g_add);
+	const uint8x8_t b1 = yuv_add_sat_u8(y1, b_add);
+
+	uint8x8x2_t rz = vzip_u8(r0, r1);
+	uint8x8x2_t gz = vzip_u8(g0, g1);
+	uint8x8x2_t bz = vzip_u8(b0, b1);
+	uint8x16x4_t rgba;
+	rgba.val[0] = vcombine_u8(rz.val[0], rz.val[1]);
+	rgba.val[1] = vcombine_u8(gz.val[0], gz.val[1]);
+	rgba.val[2] = vcombine_u8(bz.val[0], bz.val[1]);
+	rgba.val[3] = vdupq_n_u8(0xff);
+	vst4q_u8(dst, rgba);
+}
+
+static void yuyv2rgbx_neon_line(const uint8_t *src, uint8_t *dst, int width) {
+	int x = 0;
+	for (; x + 16 <= width; x += 16) {
+		const uint8x8x4_t yuyv = vld4_u8(src);
+		yuv422_to_rgbx_neon_8pairs(dst, yuyv.val[0], yuyv.val[1], yuyv.val[2], yuyv.val[3]);
+		src += 32;
+		dst += 64;
+	}
+	for (; x + 2 <= width; x += 2) {
+		IYUYV2RGBX_2(src, dst, 0, 0);
+		src += PIXEL2_YUYV;
+		dst += PIXEL2_RGBX;
+	}
+}
+
+#endif
+
 /** @brief Convert a frame from YUYV to RGBX8888
  * @ingroup frame
  * @param ini YUYV frame
@@ -616,6 +682,22 @@ uvc_error_t uvc_yuyv2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	const uint8_t *prgbx_end = prgbx + out->data_bytes - PIXEL8_RGBX;
 
 	// YUYV => RGBX8888
+#if LIBUVC_HAS_ARM_NEON
+	if (LIKELY(in->width >= 16 && !(in->width & 1))) {
+		if (in->step && out->step && (in->step != out->step)) {
+			const int hh = in->height < out->height ? in->height : out->height;
+			const int ww = (in->width < out->width ? in->width : out->width) & ~1;
+			int h;
+			for (h = 0; h < hh; h++) {
+				yuyv2rgbx_neon_line(in->data + in->step * h,
+					out->data + out->step * h, ww);
+			}
+		} else {
+			yuyv2rgbx_neon_line(in->data, out->data, in->width * in->height);
+		}
+		return UVC_SUCCESS;
+	}
+#endif
 #if USE_STRIDE
 	if (in->step && out->step && (in->step != out->step)) {
 		const int hh = in->height < out->height ? in->height : out->height;
@@ -1066,6 +1148,23 @@ uvc_error_t uvc_uyvy2rgb565(uvc_frame_t *in, uvc_frame_t *out) {
 	IUYVY2RGBX_2(pyuv, prgbx, ax, bx) \
 	IUYVY2RGBX_2(pyuv, prgbx, ax + PIXEL2_UYVY, bx + PIXEL2_RGBX)
 
+#if LIBUVC_HAS_ARM_NEON
+static void uyvy2rgbx_neon_line(const uint8_t *src, uint8_t *dst, int width) {
+	int x = 0;
+	for (; x + 16 <= width; x += 16) {
+		const uint8x8x4_t uyvy = vld4_u8(src);
+		yuv422_to_rgbx_neon_8pairs(dst, uyvy.val[1], uyvy.val[0], uyvy.val[3], uyvy.val[2]);
+		src += 32;
+		dst += 64;
+	}
+	for (; x + 2 <= width; x += 2) {
+		IUYVY2RGBX_2(src, dst, 0, 0);
+		src += PIXEL2_UYVY;
+		dst += PIXEL2_RGBX;
+	}
+}
+#endif
+
 /** @brief Convert a frame from UYVY to RGBX8888
  * @ingroup frame
  * @param ini UYVY frame
@@ -1093,6 +1192,22 @@ uvc_error_t uvc_uyvy2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	const uint8_t *prgbx_end = prgbx + out->data_bytes - PIXEL8_RGBX;
 
 	// UYVY => RGBX8888
+#if LIBUVC_HAS_ARM_NEON
+	if (LIKELY(in->width >= 16 && !(in->width & 1))) {
+		if (in->step && out->step && (in->step != out->step)) {
+			const int hh = in->height < out->height ? in->height : out->height;
+			const int ww = (in->width < out->width ? in->width : out->width) & ~1;
+			int h;
+			for (h = 0; h < hh; h++) {
+				uyvy2rgbx_neon_line(in->data + in->step * h,
+					out->data + out->step * h, ww);
+			}
+		} else {
+			uyvy2rgbx_neon_line(in->data, out->data, in->width * in->height);
+		}
+		return UVC_SUCCESS;
+	}
+#endif
 #if USE_STRIDE
 	if (in->step && out->step && (in->step != out->step)) {
 		const int hh = in->height < out->height ? in->height : out->height;

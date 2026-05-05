@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <stdlib.h>
 #include <linux/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #if 1	// set 1 if you don't need debug log
@@ -57,6 +58,14 @@ static void consolation_tune_thread_latency(const char *pthread_name_not_null)
 #else
 	(void)pthread_name_not_null;
 #endif
+}
+
+static uint64_t processing_now_ns()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
+		+ static_cast<uint64_t>(ts.tv_nsec);
 }
 
 } // namespace
@@ -126,7 +135,19 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	captureQueu(NULL),
 	mFrameCallbackObj(NULL),
 	mFrameCallbackFunc(NULL),
-	callbackPixelBytes(2) {
+	callbackPixelBytes(2),
+	processingPreviewConvertCount(0),
+	processingPreviewConvertTotalNs(0),
+	processingPreviewConvertMaxNs(0),
+	processingCallbackConvertCount(0),
+	processingCallbackConvertTotalNs(0),
+	processingCallbackConvertMaxNs(0),
+	processingCopyCount(0),
+	processingCopyTotalNs(0),
+	processingCopyMaxNs(0),
+	processingPayloadCount(0),
+	processingPayloadTotalBytes(0),
+	processingPayloadMaxBytes(0) {
 
 	ENTER();
 	pthread_cond_init(&preview_sync, NULL);
@@ -134,6 +155,7 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 //
 	pthread_cond_init(&capture_sync, NULL);
 	pthread_mutex_init(&capture_mutex, NULL);
+	pthread_mutex_init(&processing_stats_mutex, NULL);
 //	
 	pthread_mutex_init(&pool_mutex, NULL);
 	EXIT();
@@ -182,6 +204,7 @@ UVCPreview::~UVCPreview() {
 	pthread_cond_destroy(&preview_sync);
 	pthread_mutex_destroy(&capture_mutex);
 	pthread_cond_destroy(&capture_sync);
+	pthread_mutex_destroy(&processing_stats_mutex);
 	pthread_mutex_destroy(&pool_mutex);
 	EXIT();
 }
@@ -252,6 +275,75 @@ void UVCPreview::clear_pool() {
 }
 
 inline const bool UVCPreview::isRunning() const {return mIsRunning; }
+
+void UVCPreview::recordPreviewConversionTiming(uint64_t duration_ns) {
+	pthread_mutex_lock(&processing_stats_mutex);
+	processingPreviewConvertCount++;
+	processingPreviewConvertTotalNs += duration_ns;
+	if (duration_ns > processingPreviewConvertMaxNs)
+		processingPreviewConvertMaxNs = duration_ns;
+	pthread_mutex_unlock(&processing_stats_mutex);
+}
+
+void UVCPreview::recordCallbackConversionTiming(uint64_t duration_ns) {
+	pthread_mutex_lock(&processing_stats_mutex);
+	processingCallbackConvertCount++;
+	processingCallbackConvertTotalNs += duration_ns;
+	if (duration_ns > processingCallbackConvertMaxNs)
+		processingCallbackConvertMaxNs = duration_ns;
+	pthread_mutex_unlock(&processing_stats_mutex);
+}
+
+void UVCPreview::recordSurfaceCopyTiming(uint64_t duration_ns) {
+	pthread_mutex_lock(&processing_stats_mutex);
+	processingCopyCount++;
+	processingCopyTotalNs += duration_ns;
+	if (duration_ns > processingCopyMaxNs)
+		processingCopyMaxNs = duration_ns;
+	pthread_mutex_unlock(&processing_stats_mutex);
+}
+
+void UVCPreview::recordPayloadBytes(size_t bytes) {
+	pthread_mutex_lock(&processing_stats_mutex);
+	processingPayloadCount++;
+	processingPayloadTotalBytes += bytes;
+	if (bytes > processingPayloadMaxBytes)
+		processingPayloadMaxBytes = bytes;
+	pthread_mutex_unlock(&processing_stats_mutex);
+}
+
+void UVCPreview::getAndResetProcessingStats(uint64_t stats[12]) {
+	pthread_mutex_lock(&processing_stats_mutex);
+	stats[0] = processingPreviewConvertCount;
+	stats[1] = processingPreviewConvertCount
+		? processingPreviewConvertTotalNs / processingPreviewConvertCount : 0;
+	stats[2] = processingPreviewConvertMaxNs;
+	stats[3] = processingCallbackConvertCount;
+	stats[4] = processingCallbackConvertCount
+		? processingCallbackConvertTotalNs / processingCallbackConvertCount : 0;
+	stats[5] = processingCallbackConvertMaxNs;
+	stats[6] = processingCopyCount;
+	stats[7] = processingCopyCount
+		? processingCopyTotalNs / processingCopyCount : 0;
+	stats[8] = processingCopyMaxNs;
+	stats[9] = processingPayloadCount;
+	stats[10] = processingPayloadCount
+		? processingPayloadTotalBytes / processingPayloadCount : 0;
+	stats[11] = processingPayloadMaxBytes;
+	processingPreviewConvertCount = 0;
+	processingPreviewConvertTotalNs = 0;
+	processingPreviewConvertMaxNs = 0;
+	processingCallbackConvertCount = 0;
+	processingCallbackConvertTotalNs = 0;
+	processingCallbackConvertMaxNs = 0;
+	processingCopyCount = 0;
+	processingCopyTotalNs = 0;
+	processingCopyMaxNs = 0;
+	processingPayloadCount = 0;
+	processingPayloadTotalBytes = 0;
+	processingPayloadMaxBytes = 0;
+	pthread_mutex_unlock(&processing_stats_mutex);
+}
 
 int UVCPreview::setPreviewSize(int width, int height, int min_fps, int max_fps, int mode, float bandwidth) {
 	ENTER();
@@ -636,6 +728,7 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame = waitPreviewFrame();
 				if (LIKELY(frame)) {
+					recordPayloadBytes(frame->actual_bytes);
 					addCaptureFrame(frame);
 					frame = NULL;
 				}
@@ -652,16 +745,21 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame_mjpeg = waitPreviewFrame();
 				if (LIKELY(frame_mjpeg)) {
+					recordPayloadBytes(frame_mjpeg->actual_bytes);
 					frame = get_frame(frame_mjpeg->width * frame_mjpeg->height * PREVIEW_PIXEL_BYTES);
 					if (LIKELY(frame)) {
+						uint64_t t_convert = processing_now_ns();
 						result = uvc_mjpeg2rgbx(frame_mjpeg, frame);
+						recordPreviewConversionTiming(processing_now_ns() - t_convert);
 						if (UNLIKELY(result)) {
 							/* fallback: YUYV intermediate (slower but safe if single device glitch) */
 							uvc_frame_t *tmp = get_frame(frame_mjpeg->width * frame_mjpeg->height * 2);
 							if (LIKELY(tmp)) {
+								t_convert = processing_now_ns();
 								result = uvc_mjpeg2yuyv(frame_mjpeg, tmp);
 								if (LIKELY(!result))
 									result = uvc_any2rgbx(tmp, frame);
+								recordPreviewConversionTiming(processing_now_ns() - t_convert);
 								recycle_frame(tmp);
 							} else {
 								result = UVC_ERROR_NO_MEM;
@@ -688,6 +786,7 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame = waitPreviewFrame();
 				if (LIKELY(frame)) {
+					recordPayloadBytes(frame->actual_bytes);
 					frame = draw_preview_one(frame, &mPreviewWindow, uvc_any2rgbx, 4);
 					addCaptureFrame(frame);
 				}
@@ -768,10 +867,14 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 		if (convert_func) {
 			converted = get_frame(frame->width * frame->height * pixcelBytes);
 			if LIKELY(converted) {
+				const uint64_t t_convert = processing_now_ns();
 				b = convert_func(frame, converted);
+				recordPreviewConversionTiming(processing_now_ns() - t_convert);
 				if (!b) {
 					pthread_mutex_lock(&preview_mutex);
+					const uint64_t t_copy = processing_now_ns();
 					copyToSurface(converted, window);
+					recordSurfaceCopyTiming(processing_now_ns() - t_copy);
 					pthread_mutex_unlock(&preview_mutex);
 				} else {
 					LOGE("failed converting");
@@ -780,7 +883,9 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 			}
 		} else {
 			pthread_mutex_lock(&preview_mutex);
+			const uint64_t t_copy = processing_now_ns();
 			copyToSurface(frame, window);
+			recordSurfaceCopyTiming(processing_now_ns() - t_copy);
 			pthread_mutex_unlock(&preview_mutex);
 		}
 	}
@@ -952,11 +1057,16 @@ void UVCPreview::do_capture_surface(JNIEnv *env) {
 
 				bool conv_ok = false;
 				if (LIKELY(converted)) {
+					const uint64_t t_convert = processing_now_ns();
 					int b_conv = uvc_any2rgbx(frame, converted);
+					recordPreviewConversionTiming(processing_now_ns() - t_convert);
 					if (LIKELY(!b_conv)) {
 						conv_ok = true;
-						if (LIKELY(mCaptureWindow))
+						if (LIKELY(mCaptureWindow)) {
+							const uint64_t t_copy = processing_now_ns();
 							copyToSurface(converted, &mCaptureWindow);
+							recordSurfaceCopyTiming(processing_now_ns() - t_copy);
+						}
 					}
 				}
 				if (conv_ok && mFrameCallbackObj && mPixelFormat == PIXEL_FORMAT_RGBX &&
@@ -1045,7 +1155,9 @@ void UVCPreview::do_capture_callback(JNIEnv *env, uvc_frame_t *frame,
 	} else if (conv_fun) {
 		callback_frame = get_frame(pix_callback_bytes);
 		if LIKELY(callback_frame) {
+			const uint64_t t_convert = processing_now_ns();
 			int convert_err = conv_fun(frame, callback_frame);
+			recordCallbackConversionTiming(processing_now_ns() - t_convert);
 			recycle_frame(frame);
 			frame = nullptr;
 			if UNLIKELY(convert_err) {

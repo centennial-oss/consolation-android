@@ -196,6 +196,7 @@ public:
 	int startPreview();
 	int stopPreview();
 	int setCaptureDisplay(ANativeWindow *capture_window);
+	void getAndResetProcessingStats(uint64_t stats[12]);
 
 	int getCtrlSupports(uint64_t *supports);
 	int getProcSupports(uint64_t *supports);

@@ -26,6 +26,7 @@
 #define UVCPREVIEW_H_
 
 #include "libUVCCamera.h"
+#include <stdint.h>
 #include <pthread.h>
 #include <android/native_window.h>
 #include "bounded_pointer_ring.h"
@@ -89,6 +90,19 @@ private:
 	Fields_iframecallback iframecallback_fields;
 	int mPixelFormat;
 	size_t callbackPixelBytes;
+	pthread_mutex_t processing_stats_mutex;
+	uint64_t processingPreviewConvertCount;
+	uint64_t processingPreviewConvertTotalNs;
+	uint64_t processingPreviewConvertMaxNs;
+	uint64_t processingCallbackConvertCount;
+	uint64_t processingCallbackConvertTotalNs;
+	uint64_t processingCallbackConvertMaxNs;
+	uint64_t processingCopyCount;
+	uint64_t processingCopyTotalNs;
+	uint64_t processingCopyMaxNs;
+	uint64_t processingPayloadCount;
+	uint64_t processingPayloadTotalBytes;
+	uint64_t processingPayloadMaxBytes;
 // improve performance by reducing memory allocation
 	pthread_mutex_t pool_mutex;
 	ObjectArray<uvc_frame_t *> mFramePool;
@@ -117,6 +131,10 @@ private:
 	void do_capture_callback(JNIEnv *env, uvc_frame_t *frame,
 		bool fused_rgbx = false, uvc_frame_t *rgbx_ready = NULL);
 	void callbackPixelFormatChanged();
+	void recordPreviewConversionTiming(uint64_t duration_ns);
+	void recordCallbackConversionTiming(uint64_t duration_ns);
+	void recordSurfaceCopyTiming(uint64_t duration_ns);
+	void recordPayloadBytes(size_t bytes);
 public:
 	UVCPreview(uvc_device_handle_t *devh);
 	~UVCPreview();
@@ -129,6 +147,7 @@ public:
 	int stopPreview();
 	inline const bool isCapturing() const;
 	int setCaptureDisplay(ANativeWindow *capture_window);
+	void getAndResetProcessingStats(uint64_t stats[12]);
 };
 
 #endif /* UVCPREVIEW_H_ */
