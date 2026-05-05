@@ -113,6 +113,7 @@ private:
 //
 	void clearDisplay();
 	static void uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args);
+	uvc_frame_t *convertPreviewFrameToRgbx(uvc_frame_t *frame);
 	void addPreviewFrame(uvc_frame_t *frame);
 	uvc_frame_t *waitPreviewFrame();
 	void clearPreviewFrame();

@@ -120,7 +120,7 @@ public class UVCCamera {
 	private static boolean isLoaded;
 	static {
 		if (!isLoaded) {
-			System.loadLibrary("jpeg-turbo1500");
+			System.loadLibrary("jpeg-turbo3141");
 			System.loadLibrary("usb100");
 			System.loadLibrary("uvc");
 			System.loadLibrary("UVCCamera");
@@ -479,6 +479,16 @@ public class UVCCamera {
         	nativeSetFrameCallback(mNativePtr, callback, pixelFormat);
     	}
     }
+
+	public long[] getAndResetProcessingStats() {
+		if (mNativePtr != 0) {
+			final long[] stats = nativeGetAndResetProcessingStats(mNativePtr);
+			if (stats != null) {
+				return stats;
+			}
+		}
+		return new long[12];
+	}
 
     /**
      * start preview
@@ -1116,6 +1126,7 @@ public class UVCCamera {
     private static final native int nativeStopPreview(final long id_camera);
     private static final native int nativeSetPreviewDisplay(final long id_camera, final Surface surface);
     private static final native int nativeSetFrameCallback(final long mNativePtr, final IFrameCallback callback, final int pixelFormat);
+	private static final native long[] nativeGetAndResetProcessingStats(final long mNativePtr);
 
 //**********************************************************************
     /**

@@ -723,6 +723,14 @@ class MainActivity : ComponentActivity() {
                 R.string.telemetry_format,
                 stats.width, stats.height, stats.configuredFps,
                 stats.pixelFormat, stats.fps, stats.droppedFrames, stats.stutter,
+                stats.nativePreviewConversionAvgMs, stats.nativePreviewConversionMaxMs,
+                stats.nativePreviewConversionCount,
+                stats.nativeCallbackConversionAvgMs, stats.nativeCallbackConversionMaxMs,
+                stats.nativeCallbackConversionCount,
+                stats.nativeSurfaceCopyAvgMs, stats.nativeSurfaceCopyMaxMs,
+                stats.nativeSurfaceCopyCount,
+                stats.nativePayloadAvgKb, stats.nativePayloadMaxKb,
+                stats.nativePayloadCount,
             )
             val params = binding.videoStatsOverlay.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
             if (statsPosition == StatsPosition.BOTTOM_LEFT) {

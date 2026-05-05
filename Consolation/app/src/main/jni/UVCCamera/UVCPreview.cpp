@@ -585,7 +585,16 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 		return;
 	}
 	if (LIKELY(preview->isRunning())) {
-		uvc_frame_t *copy = preview->get_frame(frame->data_bytes);
+		preview->recordPayloadBytes(frame->actual_bytes);
+
+		if (preview->frameMode != REQUEST_MODE_H264) {
+			uvc_frame_t *rgbx = preview->convertPreviewFrameToRgbx(frame);
+			if (LIKELY(rgbx))
+				preview->addPreviewFrame(rgbx);
+			return;
+		}
+
+		uvc_frame_t *copy = preview->get_frame(frame->actual_bytes);
 		if (UNLIKELY(!copy)) {
 #if LOCAL_DEBUG
 			LOGE("uvc_callback:unable to allocate duplicate frame!");
@@ -599,6 +608,37 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 		}
 		preview->addPreviewFrame(copy);
 	}
+}
+
+uvc_frame_t *UVCPreview::convertPreviewFrameToRgbx(uvc_frame_t *frame) {
+	uvc_frame_t *rgbx = get_frame(frame->width * frame->height * PREVIEW_PIXEL_BYTES);
+	if (UNLIKELY(!rgbx))
+		return NULL;
+
+	uint64_t t_convert = processing_now_ns();
+	uvc_error_t result = frame->frame_format == UVC_FRAME_FORMAT_MJPEG
+		? uvc_mjpeg2rgbx(frame, rgbx) : uvc_any2rgbx(frame, rgbx);
+	recordPreviewConversionTiming(processing_now_ns() - t_convert);
+
+	if (UNLIKELY(result && frame->frame_format == UVC_FRAME_FORMAT_MJPEG)) {
+		uvc_frame_t *tmp = get_frame(frame->width * frame->height * 2);
+		if (LIKELY(tmp)) {
+			t_convert = processing_now_ns();
+			result = uvc_mjpeg2yuyv(frame, tmp);
+			if (LIKELY(!result))
+				result = uvc_any2rgbx(tmp, rgbx);
+			recordPreviewConversionTiming(processing_now_ns() - t_convert);
+			recycle_frame(tmp);
+		} else {
+			result = UVC_ERROR_NO_MEM;
+		}
+	}
+
+	if (UNLIKELY(result)) {
+		recycle_frame(rgbx);
+		return NULL;
+	}
+	return rgbx;
 }
 
 void UVCPreview::addPreviewFrame(uvc_frame_t *frame) {
@@ -710,7 +750,6 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 	ENTER();
 
 	uvc_frame_t *frame = NULL;
-	uvc_frame_t *frame_mjpeg = NULL;
 	uvc_error_t result = uvc_start_streaming_bandwidth(
 		mDeviceHandle, ctrl, uvc_preview_frame_callback, (void *)this, requestBandwidth, 0);
 
@@ -728,66 +767,17 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame = waitPreviewFrame();
 				if (LIKELY(frame)) {
-					recordPayloadBytes(frame->actual_bytes);
 					addCaptureFrame(frame);
 					frame = NULL;
 				}
 			}
-		} else if (frameMode == REQUEST_MODE_MJPEG) {
-			/*
-			 * MJPEG → RGBX direct path using uvc_mjpeg2rgbx (JCS_EXT_RGBX).
-			 * Root cause of prior SIGSEGV fixed: uvc_mjpeg2rgbx was snapshotting
-			 * out->data / out->step *before* uvc_ensure_frame_size (which may realloc),
-			 * leaving a dangling `data` pointer + wrong stride on first use at a new
-			 * resolution. Both are now captured after ensure_frame_size and out->step
-			 * assignment. Falls back to MJPEG→YUYV→RGBX on any decode error.
-			 */
-			for ( ; LIKELY(isRunning()) ; ) {
-				frame_mjpeg = waitPreviewFrame();
-				if (LIKELY(frame_mjpeg)) {
-					recordPayloadBytes(frame_mjpeg->actual_bytes);
-					frame = get_frame(frame_mjpeg->width * frame_mjpeg->height * PREVIEW_PIXEL_BYTES);
-					if (LIKELY(frame)) {
-						uint64_t t_convert = processing_now_ns();
-						result = uvc_mjpeg2rgbx(frame_mjpeg, frame);
-						recordPreviewConversionTiming(processing_now_ns() - t_convert);
-						if (UNLIKELY(result)) {
-							/* fallback: YUYV intermediate (slower but safe if single device glitch) */
-							uvc_frame_t *tmp = get_frame(frame_mjpeg->width * frame_mjpeg->height * 2);
-							if (LIKELY(tmp)) {
-								t_convert = processing_now_ns();
-								result = uvc_mjpeg2yuyv(frame_mjpeg, tmp);
-								if (LIKELY(!result))
-									result = uvc_any2rgbx(tmp, frame);
-								recordPreviewConversionTiming(processing_now_ns() - t_convert);
-								recycle_frame(tmp);
-							} else {
-								result = UVC_ERROR_NO_MEM;
-							}
-						}
-					} else {
-						result = UVC_ERROR_NO_MEM;
-					}
-					recycle_frame(frame_mjpeg);
-					frame_mjpeg = NULL;
-					if (LIKELY(!result && frame)) {
-						// frame is already RGBX — pass null conv so draw_preview_one
-						// calls copyToSurface directly without an extra alloc/copy.
-						draw_preview_one(frame, &mPreviewWindow, nullptr, PREVIEW_PIXEL_BYTES);
-						addCaptureFrame(frame);
-					} else {
-						if (frame) recycle_frame(frame);
-						frame = NULL;
-					}
-				}
-			}
 		} else {
-			// yuvyv mode
+			// Non-H264 frames are converted to owned RGBX frames in the UVC callback,
+			// so the preview thread only performs the surface copy.
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame = waitPreviewFrame();
 				if (LIKELY(frame)) {
-					recordPayloadBytes(frame->actual_bytes);
-					frame = draw_preview_one(frame, &mPreviewWindow, uvc_any2rgbx, 4);
+					frame = draw_preview_one(frame, &mPreviewWindow, nullptr, PREVIEW_PIXEL_BYTES);
 					addCaptureFrame(frame);
 				}
 			}
@@ -1052,11 +1042,22 @@ void UVCPreview::do_capture_surface(JNIEnv *env) {
 		if (LIKELY(frame)) {
 			bool fused_into_callback = false;
 			if LIKELY(isCapturing()) {
-				if (UNLIKELY(!converted))
-					converted = get_frame(previewBytes);
-
 				bool conv_ok = false;
-				if (LIKELY(converted)) {
+				uvc_frame_t *rgbx_for_callback = NULL;
+				if (frame->frame_format == UVC_FRAME_FORMAT_RGBX) {
+					conv_ok = true;
+					rgbx_for_callback = frame;
+					if (LIKELY(mCaptureWindow)) {
+						const uint64_t t_copy = processing_now_ns();
+						copyToSurface(frame, &mCaptureWindow);
+						recordSurfaceCopyTiming(processing_now_ns() - t_copy);
+					}
+				} else {
+					if (UNLIKELY(!converted))
+						converted = get_frame(previewBytes);
+					rgbx_for_callback = converted;
+				}
+				if (!conv_ok && LIKELY(converted)) {
 					const uint64_t t_convert = processing_now_ns();
 					int b_conv = uvc_any2rgbx(frame, converted);
 					recordPreviewConversionTiming(processing_now_ns() - t_convert);
@@ -1071,7 +1072,7 @@ void UVCPreview::do_capture_surface(JNIEnv *env) {
 				}
 				if (conv_ok && mFrameCallbackObj && mPixelFormat == PIXEL_FORMAT_RGBX &&
 					mFrameCallbackFunc != NULL) {
-					do_capture_callback(env, frame, true, converted);
+					do_capture_callback(env, frame, true, rgbx_for_callback);
 					fused_into_callback = true;
 				}
 			}
@@ -1145,8 +1146,11 @@ void UVCPreview::do_capture_callback(JNIEnv *env, uvc_frame_t *frame,
 
 	if (fused_rgbx && rgbx_ready && (pix_fmt == PIXEL_FORMAT_RGBX)) {
 		callback_frame = rgbx_ready;
-		recycle_frame(frame);
-		skip_recycle_cb_frame = true;
+		if (rgbx_ready != frame) {
+			recycle_frame(frame);
+			frame = nullptr;
+			skip_recycle_cb_frame = true;
+		}
 		jobject buf = env->NewDirectByteBuffer(callback_frame->data,
 			pix_callback_bytes);
 		env->CallVoidMethod(local_cb_obj, on_frame_mid, buf);

@@ -504,6 +504,7 @@ class UvccameraLibPreviewBackend(
             // Simple stutter calculation: reset every second for now
             totalStutter = 0.0
         }
+        val processingStats = uvcCamera?.getAndResetProcessingStats() ?: EMPTY_PROCESSING_STATS
         return TelemetrySnapshot(
             fps = actualFps,
             droppedFrames = droppedFrames,
@@ -513,6 +514,18 @@ class UvccameraLibPreviewBackend(
             configuredFps = currentFpsConfigured,
             pixelFormat = currentPixelFormat,
             backendName = telemetryBackendLabel,
+            nativePreviewConversionCount = processingStats.getOrElse(0) { 0L },
+            nativePreviewConversionAvgMs = nsToMs(processingStats.getOrElse(1) { 0L }),
+            nativePreviewConversionMaxMs = nsToMs(processingStats.getOrElse(2) { 0L }),
+            nativeCallbackConversionCount = processingStats.getOrElse(3) { 0L },
+            nativeCallbackConversionAvgMs = nsToMs(processingStats.getOrElse(4) { 0L }),
+            nativeCallbackConversionMaxMs = nsToMs(processingStats.getOrElse(5) { 0L }),
+            nativeSurfaceCopyCount = processingStats.getOrElse(6) { 0L },
+            nativeSurfaceCopyAvgMs = nsToMs(processingStats.getOrElse(7) { 0L }),
+            nativeSurfaceCopyMaxMs = nsToMs(processingStats.getOrElse(8) { 0L }),
+            nativePayloadCount = processingStats.getOrElse(9) { 0L },
+            nativePayloadAvgKb = bytesToKb(processingStats.getOrElse(10) { 0L }),
+            nativePayloadMaxKb = bytesToKb(processingStats.getOrElse(11) { 0L }),
         )
     }
 
@@ -829,7 +842,7 @@ class UvccameraLibPreviewBackend(
             }, if (selectedFrameFormat == UVCCamera.FRAME_FORMAT_H264) {
                 UVCCamera.PIXEL_FORMAT_RAW
             } else {
-                UVCCamera.PIXEL_FORMAT_RGBX
+                UVCCamera.PIXEL_FORMAT_RAW
             })
 
             t1 = SystemClock.elapsedRealtime()
@@ -1073,6 +1086,9 @@ class UvccameraLibPreviewBackend(
         lastFrameTime = 0L
     }
 
+    private fun nsToMs(ns: Long): Double = ns / 1_000_000.0
+    private fun bytesToKb(bytes: Long): Double = bytes / 1024.0
+
     /** libuvc bandwidth hint [0..1]; lower leaves headroom when stepping up to high fps at HD. */
     private fun previewBandwidthFactor(width: Int, height: Int, fps: Int): Float {
         val pixels = width.toLong() * height.toLong()
@@ -1082,6 +1098,7 @@ class UvccameraLibPreviewBackend(
 
     companion object {
         private const val logTag: String = "UvcLibPreview"
+        private val EMPTY_PROCESSING_STATS = LongArray(12)
 
         /** Filter: `adb logcat -s ConsolationUvcProbe:I` */
         private const val probeLogTag: String = "ConsolationUvcProbe"
