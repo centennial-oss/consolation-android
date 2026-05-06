@@ -670,6 +670,70 @@ static void yuyv2rgbx_neon_line(const uint8_t *src, uint8_t *dst, int width) {
 	}
 }
 
+static void nv12_to_rgbx_neon_two_rows(const uint8_t *y0, const uint8_t *y1,
+		const uint8_t *uv, uint8_t *dst0, uint8_t *dst1, int width) {
+	int x = 0;
+	for (; x + 16 <= width; x += 16) {
+		const uint8x8x2_t y0_pairs = vld2_u8(y0);
+		const uint8x8x2_t y1_pairs = vld2_u8(y1);
+		const uint8x8x2_t uv_pairs = vld2_u8(uv);
+
+		yuv422_to_rgbx_neon_8pairs(dst0, y0_pairs.val[0], uv_pairs.val[0],
+			y0_pairs.val[1], uv_pairs.val[1]);
+		yuv422_to_rgbx_neon_8pairs(dst1, y1_pairs.val[0], uv_pairs.val[0],
+			y1_pairs.val[1], uv_pairs.val[1]);
+
+		y0 += 16;
+		y1 += 16;
+		uv += 16;
+		dst0 += 64;
+		dst1 += 64;
+	}
+	for (; x + 2 <= width; x += 2) {
+		const int u = uv[0] - 128;
+		const int v = uv[1] - 128;
+		const int r = (22987 * v) >> 14;
+		const int g = (-5636 * u - 11698 * v) >> 14;
+		const int b = (29049 * u) >> 14;
+
+		dst0[0] = sat(y0[0] + r);
+		dst0[1] = sat(y0[0] + g);
+		dst0[2] = sat(y0[0] + b);
+		dst0[3] = 0xff;
+		dst0[4] = sat(y0[1] + r);
+		dst0[5] = sat(y0[1] + g);
+		dst0[6] = sat(y0[1] + b);
+		dst0[7] = 0xff;
+
+		dst1[0] = sat(y1[0] + r);
+		dst1[1] = sat(y1[0] + g);
+		dst1[2] = sat(y1[0] + b);
+		dst1[3] = 0xff;
+		dst1[4] = sat(y1[1] + r);
+		dst1[5] = sat(y1[1] + g);
+		dst1[6] = sat(y1[1] + b);
+		dst1[7] = 0xff;
+
+		y0 += 2;
+		y1 += 2;
+		uv += 2;
+		dst0 += 8;
+		dst1 += 8;
+	}
+}
+
+static void nv12_to_rgbx_neon(const uint8_t *y_plane, const uint8_t *uv_plane,
+		uint8_t *rgba, size_t width, size_t height, size_t out_step) {
+	for (size_t y = 0; y + 1 < height; y += 2) {
+		const uint8_t *y0 = y_plane + y * width;
+		const uint8_t *y1 = y0 + width;
+		const uint8_t *uv = uv_plane + (y / 2) * width;
+		uint8_t *dst0 = rgba + y * out_step;
+		uint8_t *dst1 = dst0 + out_step;
+		nv12_to_rgbx_neon_two_rows(y0, y1, uv, dst0, dst1, (int) width);
+	}
+}
+
 #endif
 
 /** @brief Convert a frame from YUYV to RGBX8888
@@ -769,7 +833,7 @@ uvc_error_t uvc_nv122rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	out->width = in->width;
 	out->height = in->height;
 	out->frame_format = UVC_FRAME_FORMAT_RGBX;
-	if (out->library_owns_data)
+	if (out->library_owns_data || out->step < width * PIXEL_RGBX)
 		out->step = in->width * PIXEL_RGBX;
 	out->sequence = in->sequence;
 	out->capture_time = in->capture_time;
@@ -779,6 +843,13 @@ uvc_error_t uvc_nv122rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	const uint8_t * restrict uv_plane = y_plane + width * height;
 	uint8_t * restrict rgba = out->data;
 	const size_t out_step = out->step;
+
+#if LIBUVC_HAS_ARM_NEON
+	if (LIKELY(width >= 16 && !(width & 1) && !(height & 1))) {
+		nv12_to_rgbx_neon(y_plane, uv_plane, rgba, width, height, out_step);
+		return UVC_SUCCESS;
+	}
+#endif
 
 	for (size_t y = 0; y < height; ++y) {
 		const uint8_t *y_row = y_plane + y * width;
