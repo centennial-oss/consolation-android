@@ -1,0 +1,4 @@
+## Upstream lineage and license
+
+- Primary fork used as baseline: https://github.com/alexey-pelykh/UVCCamera  
+- Java glue layer derives from **saki**’s UVCCamera lineage (**Apache License 2.0** headers in packaged `.java`); this project’s package is `org.centennialoss.consolation.uvc` (and `…uvc.util`).
