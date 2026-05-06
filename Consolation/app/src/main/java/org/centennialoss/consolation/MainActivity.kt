@@ -705,6 +705,14 @@ class MainActivity : ComponentActivity() {
         telemetryJob?.cancel()
         telemetryJob = lifecycleScope.launch {
             while (true) {
+                if (
+                    captureEngine.state.value is CaptureState.Running &&
+                    !previewBackend.hasReceivedFirstVideoFrame() &&
+                    previewBackend.consumeLastPreviewStartFailed()
+                ) {
+                    failConnectingSession(getString(R.string.message_uvc_open_failed))
+                    return@launch
+                }
                 val stats = previewBackend.getTelemetry()
                 updateConnectingOverlay(captureEngine.state.value is CaptureState.Running)
                 if (previewBackend.hasReceivedFirstVideoFrame()) {
@@ -1382,6 +1390,10 @@ class MainActivity : ComponentActivity() {
             delay(CONNECTING_RETRY_TIMEOUT_MS)
             if (captureEngine.state.value !is CaptureState.Running) return@launch
             if (previewBackend.hasReceivedFirstVideoFrame()) return@launch
+            if (previewBackend.consumeLastPreviewStartFailed()) {
+                failConnectingSession(getString(R.string.message_uvc_open_failed))
+                return@launch
+            }
             if (hasRetriedConnectingSession) return@launch
 
             hasRetriedConnectingSession = true
@@ -1407,6 +1419,16 @@ class MainActivity : ComponentActivity() {
                 previewBackend.bindPreviewSurface(previewTexture)
             }
         }
+    }
+
+    private fun failConnectingSession(message: String) {
+        cancelConnectingWatchdog()
+        hasRetriedConnectingSession = false
+        lifecycleScope.launch(Dispatchers.IO) {
+            previewBackend.unbindPreviewSurface()
+        }
+        captureEngine.setFailed(message)
+        showMessage(message)
     }
 
     private suspend fun waitForRecentUsbPermissionSettle() {
