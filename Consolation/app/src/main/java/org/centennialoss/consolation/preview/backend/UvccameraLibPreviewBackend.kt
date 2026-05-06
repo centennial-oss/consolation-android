@@ -312,6 +312,29 @@ class UvccameraLibPreviewBackend(
                 "pid=0x${usbDevice.productId.toString(16)}",
         )
 
+        val descriptorSizes = probeSupportedSizesFromUsbDescriptors(usbDevice)
+        if (descriptorSizes.isNotEmpty()) {
+            Log.i(
+                probeLogTag,
+                "probeSupportedSizes: descriptor probe ok count=${descriptorSizes.size} " +
+                    "totalMs=${SystemClock.elapsedRealtime() - t0}",
+            )
+            descriptorSizes.forEachIndexed { index, size ->
+                Log.i(
+                    probeLogTag,
+                    "probeSupportedSizes: descriptor[$index] w=${size.width} h=${size.height} " +
+                        "type=${size.type} frame_type=${size.frame_type} index=${size.index} " +
+                        "frameIntervalType=${size.frameIntervalType}",
+                )
+            }
+            lastProbeOpenFailed = false
+            return descriptorSizes
+        }
+        Log.w(
+            probeLogTag,
+            "probeSupportedSizes: descriptor probe empty, falling back to native libuvc open",
+        )
+
         // Drop any preview native camera and the cached UsbDeviceConnection so we never reuse a
         // stuck libusb session (release_interface errno 22 / open result -99).
         stopUvcStreamingBlocking()
@@ -1062,6 +1085,114 @@ class UvccameraLibPreviewBackend(
         else -> "format-$frameFormat"
     }
 
+    private fun probeSupportedSizesFromUsbDescriptors(usbDevice: UsbDevice): List<Size> {
+        val usbMgr = appContext.getSystemService(Context.USB_SERVICE) as? UsbManager ?: return emptyList()
+        if (!usbMgr.hasPermission(usbDevice)) return emptyList()
+        var conn: UsbDeviceConnection? = null
+        return try {
+            conn = usbMgr.openDevice(usbDevice) ?: return emptyList()
+            val raw = conn.rawDescriptors ?: return emptyList()
+            if (raw.isEmpty()) return emptyList()
+            parseUvcFrameSizesFromRawDescriptors(raw)
+        } catch (e: Exception) {
+            Log.w(probeLogTag, "probeSupportedSizesFromUsbDescriptors: parse failed", e)
+            emptyList()
+        } finally {
+            runCatching { conn?.close() }
+        }
+    }
+
+    private fun parseUvcFrameSizesFromRawDescriptors(raw: ByteArray): List<Size> {
+        val out = mutableListOf<Size>()
+        val seen = HashSet<String>()
+        var currentFrameType = UVCCamera.FRAME_FORMAT_MJPEG
+        var i = 0
+        while (i + 2 < raw.size) {
+            val len = u8(raw, i)
+            if (len <= 2 || i + len > raw.size) {
+                i++
+                continue
+            }
+            val descriptorType = u8(raw, i + 1)
+            val subtype = u8(raw, i + 2)
+            if (descriptorType == USB_DT_CS_INTERFACE) {
+                when (subtype) {
+                    VS_FORMAT_UNCOMPRESSED -> currentFrameType = UVCCamera.FRAME_FORMAT_YUYV
+                    VS_FORMAT_MJPEG -> currentFrameType = UVCCamera.FRAME_FORMAT_MJPEG
+                    VS_FORMAT_FRAME_BASED -> currentFrameType = UVCCamera.FRAME_FORMAT_H264
+                    VS_FRAME_UNCOMPRESSED, VS_FRAME_MJPEG, VS_FRAME_FRAME_BASED -> {
+                        val parsed = parseFrameDescriptor(raw, i, len, subtype, currentFrameType)
+                        if (parsed != null) {
+                            val intervalsHash = parsed.intervals?.contentHashCode() ?: 0
+                            val key = "${parsed.width}x${parsed.height}:${parsed.frame_type}:${parsed.frameIntervalType}:$intervalsHash"
+                            if (seen.add(key)) out.add(parsed)
+                        }
+                    }
+                }
+            }
+            i += len
+        }
+        return out.sortedWith(
+            compareByDescending<Size> { it.width * it.height }.thenByDescending {
+                it.fps?.maxOrNull() ?: 0f
+            },
+        )
+    }
+
+    private fun parseFrameDescriptor(
+        raw: ByteArray,
+        offset: Int,
+        len: Int,
+        subtype: Int,
+        frameType: Int,
+    ): Size? {
+        val minimumLen = when (subtype) {
+            VS_FRAME_FRAME_BASED -> 34
+            else -> 26
+        }
+        if (len < minimumLen) return null
+        val frameIndex = u8(raw, offset + 3)
+        val width = u16(raw, offset + 5)
+        val height = u16(raw, offset + 7)
+        if (width <= 0 || height <= 0) return null
+        val intervalTypeOffset = when (subtype) {
+            VS_FRAME_FRAME_BASED -> 33
+            else -> 25
+        }
+        if (offset + intervalTypeOffset >= raw.size) return null
+        val frameIntervalType = u8(raw, offset + intervalTypeOffset)
+        val intervalsStart = offset + intervalTypeOffset + 1
+        val intervals = if (frameIntervalType > 0) {
+            val needed = frameIntervalType * 4
+            if (intervalsStart + needed > offset + len || intervalsStart + needed > raw.size) return null
+            IntArray(frameIntervalType) { idx -> u32(raw, intervalsStart + idx * 4) }
+                .filter { it > 0 }
+                .toIntArray()
+        } else {
+            if (intervalsStart + 12 > offset + len || intervalsStart + 12 > raw.size) return null
+            intArrayOf(
+                u32(raw, intervalsStart),
+                u32(raw, intervalsStart + 4),
+                u32(raw, intervalsStart + 8),
+            ).filter { it > 0 }.toIntArray()
+        }
+        if (intervals.isEmpty()) return null
+        val nativeType = when (subtype) {
+            VS_FRAME_UNCOMPRESSED -> VS_FORMAT_UNCOMPRESSED
+            VS_FRAME_MJPEG -> VS_FORMAT_MJPEG
+            else -> VS_FORMAT_FRAME_BASED
+        }
+        return Size(nativeType, frameType, frameIndex, width, height, intervals)
+    }
+
+    private fun u8(raw: ByteArray, offset: Int): Int = raw[offset].toInt() and 0xFF
+    private fun u16(raw: ByteArray, offset: Int): Int = u8(raw, offset) or (u8(raw, offset + 1) shl 8)
+    private fun u32(raw: ByteArray, offset: Int): Int =
+        u8(raw, offset) or
+            (u8(raw, offset + 1) shl 8) or
+            (u8(raw, offset + 2) shl 16) or
+            (u8(raw, offset + 3) shl 24)
+
     private fun resetTelemetryCounters() {
         droppedFrames = 0
         frameCount.set(0)
@@ -1123,5 +1254,13 @@ class UvccameraLibPreviewBackend(
 
         /** Extra backoff between probe retries when the card returns open failures. */
         private const val PROBE_RETRY_DELAY_MS = 350L
+
+        private const val USB_DT_CS_INTERFACE = 0x24
+        private const val VS_FORMAT_UNCOMPRESSED = 0x04
+        private const val VS_FRAME_UNCOMPRESSED = 0x05
+        private const val VS_FORMAT_MJPEG = 0x06
+        private const val VS_FRAME_MJPEG = 0x07
+        private const val VS_FORMAT_FRAME_BASED = 0x10
+        private const val VS_FRAME_FRAME_BASED = 0x11
     }
 }
