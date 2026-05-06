@@ -13,6 +13,8 @@ import android.graphics.Outline
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.text.SpannableString
+import android.text.style.ForegroundColorSpan
 import android.util.TypedValue
 import android.view.ContextThemeWrapper
 import android.view.Menu
@@ -50,6 +52,7 @@ import org.centennialoss.consolation.databinding.PlaybackControlsBinding
 import org.centennialoss.consolation.preview.backend.UsbVideoPreviewBackend
 import org.centennialoss.consolation.preview.backend.UsbVideoPreviewBackendFactory
 import org.centennialoss.consolation.usb.UsbCaptureDeviceRepository
+import org.centennialoss.consolation.uvc.UVCCamera
 import org.centennialoss.consolation.logging.AppLog as Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -77,6 +80,7 @@ class MainActivity : ComponentActivity() {
 
     /** User choice: width, height, and frame interval index into [Size.fps]. */
     private var selectedFormat: Size? = null
+    private var selectedPixelFormatPreference: PixelFormatPreference = PixelFormatPreference.AUTO
 
     private var permissionTimeoutJob: Job? = null
     private var telemetryJob: Job? = null
@@ -104,6 +108,14 @@ class MainActivity : ComponentActivity() {
     private var lowFpsBelowThresholdSinceMs: Long = 0L
 
     enum class StatsPosition { OFF, BOTTOM_LEFT, BOTTOM_RIGHT }
+    private enum class PixelFormatPreference(val prefValue: String, val frameFormat: Int?) {
+        AUTO("auto", null),
+        H264("h264", UVCCamera.FRAME_FORMAT_H264),
+        NV12("nv12", UVCCamera.FRAME_FORMAT_NV12),
+        P010("p010", UVCCamera.FRAME_FORMAT_P010),
+        YUYV("yuyv", UVCCamera.FRAME_FORMAT_YUYV),
+        MJPEG("mjpeg", UVCCamera.FRAME_FORMAT_MJPEG),
+    }
 
     private enum class RuntimePermissionAction { REQUEST_USB_PERMISSION, START_WATCH }
 
@@ -206,6 +218,7 @@ class MainActivity : ComponentActivity() {
             val device = devices.getOrNull(position)
             if (device?.id != selectedDevice?.id) {
                 selectedFormat = null
+                selectedPixelFormatPreference = PixelFormatPreference.AUTO
                 probedFormatSizes = emptyList()
                 startup.resolutionDropdown.setText("", false)
             }
@@ -398,7 +411,11 @@ class MainActivity : ComponentActivity() {
      * USB/UVC work must not run on the main thread — native open, probe sleeps, and bandwidth
      * negotiation can exceed the ~5s input ANR budget (seen as Input dispatching timed out).
      */
-    private data class WatchSessionPrep(val format: Size?, val probedUpdate: List<Size>?)
+    private data class WatchSessionPrep(
+        val format: Size?,
+        val probedUpdate: List<Size>?,
+        val pixelPreference: PixelFormatPreference = PixelFormatPreference.AUTO,
+    )
 
     private fun observeState() {
         lifecycleScope.launch {
@@ -479,6 +496,7 @@ class MainActivity : ComponentActivity() {
             if (devices.isEmpty()) {
                 selectedDevice = null
                 selectedFormat = null
+                selectedPixelFormatPreference = PixelFormatPreference.AUTO
                 probedFormatSizes = emptyList()
                 binding.startupScreen.deviceDropdown.setText(getString(R.string.hint_no_capture_devices), false)
                 binding.startupScreen.resolutionDropdown.setText("", false)
@@ -488,6 +506,7 @@ class MainActivity : ComponentActivity() {
                 if (selectedDevice == null || devices.none { it.id == selectedDevice!!.id }) {
                     selectedDevice = devices.first()
                     selectedFormat = null
+                    selectedPixelFormatPreference = PixelFormatPreference.AUTO
                     probedFormatSizes = emptyList()
                     binding.startupScreen.deviceDropdown.setText(selectedDevice?.name, false)
                     binding.startupScreen.resolutionDropdown.setText("", false)
@@ -625,17 +644,38 @@ class MainActivity : ComponentActivity() {
             probedFormatSizes = sizes
             if (sizes.isNotEmpty()) {
                 previewBackend.consumeLastProbeOpenFailed()
-                val defaultFormat =
-                    loadRememberedFormat(device, sizes)
-                        ?: pickDefaultFormat(sizes, selectedDeviceCompatibilityIssue())
+                val remembered = loadRememberedFormat(device, sizes)
+                val compatibilityDefault = pickDefaultFormat(sizes, selectedDeviceCompatibilityIssue())
+                val defaultSeed = remembered?.first
+                        ?: compatibilityDefault
                         ?: sizes.first().let { Size(it) }
+                selectedPixelFormatPreference = remembered?.second ?: PixelFormatPreference.AUTO
+                val defaultFormat = remembered?.first ?: (
+                    resolveFormatChoiceForPreference(
+                        sizes,
+                        defaultSeed.width,
+                        defaultSeed.height,
+                        selectedPixelFormatPreference,
+                        requestedFps = try {
+                            defaultSeed.getCurrentFrameRate()
+                        } catch (_: Exception) {
+                            null
+                        },
+                    ) ?: Size(defaultSeed)
+                    )
+                val defaultSource = when {
+                    remembered != null -> "remembered"
+                    compatibilityDefault != null -> "compatibility_default"
+                    else -> "first_reported"
+                }
                 selectedFormat = defaultFormat
-                val label = formatResolutionLabel(defaultFormat)
+                val label = formatResolutionLabel(defaultFormat, selectedPixelFormatPreference)
                 binding.startupScreen.resolutionDropdown.setText(label, false)
                 updateStartupActions()
                 Log.i(
                     RESOLUTION_PROBE_TAG,
-                    "refreshResolutions: UI updated size=${sizes.size} defaultLabel=$label",
+                    "refreshResolutions: UI updated size=${sizes.size} source=$defaultSource " +
+                        "pref=${selectedPixelFormatPreference.prefValue} defaultLabel=$label",
                 )
             } else {
                 val probeOpenFailed = previewBackend.consumeLastProbeOpenFailed()
@@ -670,23 +710,57 @@ class MainActivity : ComponentActivity() {
         }
         val popup = AppCompatPopupMenu(popupMenuContext(), anchor)
         val menu = popup.menu
-        val choiceIds = mutableMapOf<Int, Triple<Int, Int, Float>>()
+        addMenuHeaderWithDivider(menu, "Resolution")
+        data class MenuChoice(
+            val width: Int,
+            val height: Int,
+            val fps: Float,
+            val pixelPreference: PixelFormatPreference,
+        )
+        val choiceIds = mutableMapOf<Int, MenuChoice>()
         var nextId = MENU_ID_RESOLUTION_BASE
         for (group in groupSizesByResolution(probedFormatSizes)) {
-            val sub: Menu = menu.addSubMenu(Menu.NONE, Menu.NONE, Menu.NONE, "${group.width}x${group.height}")
+            val resolutionSub: Menu =
+                menu.addSubMenu(Menu.NONE, Menu.NONE, Menu.NONE, "${group.width}x${group.height}")
+            addMenuHeaderWithDivider(resolutionSub, "Frame Rate")
             for (fps in group.fpsOptions) {
-                val id = nextId++
-                choiceIds[id] = Triple(group.width, group.height, fps)
-                sub.add(Menu.NONE, id, Menu.NONE, "${fps.roundToInt()} fps")
+                val fpsSub: Menu = resolutionSub.addSubMenu(
+                    Menu.NONE,
+                    Menu.NONE,
+                    Menu.NONE,
+                    "${fps.roundToInt()} fps",
+                )
+                addMenuHeaderWithDivider(fpsSub, "Pixel Format")
+                val formatOptions = supportedFormatPreferencesForResolutionAndFps(
+                    probedFormatSizes,
+                    group.width,
+                    group.height,
+                    fps,
+                )
+                for (formatPreference in formatOptions) {
+                    val id = nextId++
+                    choiceIds[id] = MenuChoice(group.width, group.height, fps, formatPreference)
+                    fpsSub.add(Menu.NONE, id, Menu.NONE, formatMenuLabel(formatPreference))
+                }
             }
         }
         popup.setOnMenuItemClickListener { item ->
-            val triple = choiceIds[item.itemId] ?: return@setOnMenuItemClickListener false
-            val (w, h, fps) = triple
-            selectedFormat = resolveFormatChoice(probedFormatSizes, w, h, fps)
-            selectedDevice?.let { device -> persistFormatForDevice(device, selectedFormat!!) }
+            val choice = choiceIds[item.itemId] ?: return@setOnMenuItemClickListener false
+            val resolved = resolveFormatChoiceForPreference(
+                probedFormatSizes,
+                choice.width,
+                choice.height,
+                choice.pixelPreference,
+                requestedFps = choice.fps,
+            )
+                ?: return@setOnMenuItemClickListener false
+            selectedPixelFormatPreference = choice.pixelPreference
+            selectedFormat = resolved
+            selectedDevice?.let { device ->
+                persistFormatForDevice(device, selectedFormat!!, choice.pixelPreference)
+            }
             binding.startupScreen.resolutionDropdown.setText(
-                formatResolutionLabel(selectedFormat!!),
+                formatResolutionLabel(selectedFormat!!, choice.pixelPreference),
                 false,
             )
             updateStartupActions()
@@ -1298,27 +1372,48 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun persistFormatForDevice(device: CaptureDevice, format: Size) {
+    private fun persistFormatForDevice(
+        device: CaptureDevice,
+        format: Size,
+        pixelPreference: PixelFormatPreference,
+    ) {
         val fps = try {
             format.getCurrentFrameRate().roundToInt().coerceAtLeast(1)
         } catch (_: Exception) {
             return
         }
         prefs.edit()
-            .putString(formatPreferenceKey(device), "${format.width},${format.height},$fps")
+            .putString(
+                formatPreferenceKey(device),
+                "${format.width},${format.height},$fps,${pixelPreference.prefValue}",
+            )
             .apply()
     }
 
-    private fun loadRememberedFormat(device: CaptureDevice, sizes: List<Size>): Size? {
+    private fun loadRememberedFormat(
+        device: CaptureDevice,
+        sizes: List<Size>,
+    ): Pair<Size, PixelFormatPreference>? {
         val parts = prefs.getString(formatPreferenceKey(device), null)
             ?.split(',')
             ?: return null
-        if (parts.size != 3) return null
+        if (parts.size < 3) return null
         val width = parts[0].toIntOrNull() ?: return null
         val height = parts[1].toIntOrNull() ?: return null
         val fps = parts[2].toFloatOrNull() ?: return null
+        val pixelPreference = parts.getOrNull(3)?.let { pref ->
+            PixelFormatPreference.entries.firstOrNull { it.prefValue == pref }
+        } ?: PixelFormatPreference.AUTO
         if (sizes.none { it.width == width && it.height == height }) return null
-        return resolveFormatChoice(sizes, width, height, fps)
+        val resolved =
+            resolveFormatChoiceForPreference(
+                sizes,
+                width,
+                height,
+                pixelPreference,
+                requestedFps = fps,
+            ) ?: return null
+        return resolved to pixelPreference
     }
 
     private fun formatPreferenceKey(device: CaptureDevice): String {
@@ -1340,15 +1435,31 @@ class MainActivity : ComponentActivity() {
 
             var format = snapshotFormat
             var newProbed: List<Size>? = null
+            var pixelPreference = selectedPixelFormatPreference
             if (format == null || snapshotProbedEmpty) {
                 newProbed = previewBackend.probeSupportedSizes(device)
-                format =
-                    loadRememberedFormat(device, newProbed)
+                val remembered = loadRememberedFormat(device, newProbed)
+                val seed =
+                    remembered?.first
                         ?: pickDefaultFormat(newProbed, DeviceCompatibilityIssues.issueFor(device))
                         ?: newProbed.firstOrNull()?.let { Size(it) }
+                pixelPreference = remembered?.second ?: PixelFormatPreference.AUTO
+                format = seed?.let {
+                    resolveFormatChoiceForPreference(
+                        newProbed,
+                        it.width,
+                        it.height,
+                        pixelPreference,
+                        requestedFps = try {
+                            it.getCurrentFrameRate()
+                        } catch (_: Exception) {
+                            null
+                        },
+                    )
+                } ?: seed
             }
             if (format == null) {
-                return@withContext WatchSessionPrep(null, newProbed ?: emptyList())
+                return@withContext WatchSessionPrep(null, newProbed ?: emptyList(), pixelPreference)
             }
 
             val fps = try {
@@ -1356,9 +1467,10 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) {
                 30
             }
+            previewBackend.setPreferredPixelFormat(pixelPreference.frameFormat)
             previewBackend.setPreviewSize(format.width, format.height, fps)
 
-            WatchSessionPrep(format, newProbed)
+            WatchSessionPrep(format, newProbed, pixelPreference)
         }
 
         if (prep.format == null) {
@@ -1370,7 +1482,8 @@ class MainActivity : ComponentActivity() {
 
         prep.probedUpdate?.let { probedFormatSizes = it }
         selectedFormat = prep.format
-        persistFormatForDevice(device, prep.format)
+        selectedPixelFormatPreference = prep.pixelPreference
+        persistFormatForDevice(device, prep.format, selectedPixelFormatPreference)
 
         updateAspectRatio(prep.format.width, prep.format.height)
         hasRetriedConnectingSession = false
@@ -1576,18 +1689,77 @@ class MainActivity : ComponentActivity() {
         private const val DEFAULT_TARGET_FPS = 60f
         private const val DEFAULT_TARGET_FPS_TOLERANCE = 0.75f
 
-        private data class ResolutionGroup(val width: Int, val height: Int, val fpsOptions: List<Float>)
+        private data class ResolutionGroup(
+            val width: Int,
+            val height: Int,
+            val fpsOptions: List<Float>,
+        )
 
         private fun groupSizesByResolution(sizes: List<Size>): List<ResolutionGroup> {
-            val map = linkedMapOf<Pair<Int, Int>, MutableList<Float>>()
+            val map = linkedMapOf<Pair<Int, Int>, MutableList<Size>>()
             for (s in sizes) {
-                val fpsArr = s.fps ?: continue
                 val key = s.width to s.height
-                map.getOrPut(key) { mutableListOf() }.addAll(fpsArr.toList())
+                map.getOrPut(key) { mutableListOf() }.add(s)
             }
             return map.map { (k, v) ->
-                ResolutionGroup(k.first, k.second, v.distinct().sortedDescending())
+                val fpsOptions = v.flatMap { it.fps?.toList().orEmpty() }.distinct().sortedDescending()
+                ResolutionGroup(k.first, k.second, fpsOptions)
             }.sortedByDescending { it.width * it.height }
+        }
+
+        private fun supportedFormatPreferences(sizes: List<Size>): List<PixelFormatPreference> {
+            val supported = sizes.mapNotNull { preferenceForFrameType(it.frame_type) }.toSet()
+            val ordered = listOf(
+                PixelFormatPreference.H264,
+                PixelFormatPreference.NV12,
+                PixelFormatPreference.P010,
+                PixelFormatPreference.YUYV,
+                PixelFormatPreference.MJPEG,
+            ).filter { it in supported }
+            return listOf(PixelFormatPreference.AUTO) + ordered
+        }
+
+        private fun supportedFormatPreferencesForResolutionAndFps(
+            sizes: List<Size>,
+            width: Int,
+            height: Int,
+            fps: Float,
+        ): List<PixelFormatPreference> {
+            val candidates = sizes.filter { size ->
+                if (size.width != width || size.height != height) return@filter false
+                val fpsArray = size.fps ?: return@filter false
+                fpsArray.any { abs(it - fps) <= DEFAULT_TARGET_FPS_TOLERANCE }
+            }
+            return if (candidates.isNotEmpty()) {
+                supportedFormatPreferences(candidates)
+            } else {
+                supportedFormatPreferences(sizes.filter { it.width == width && it.height == height })
+            }
+        }
+
+        private fun preferenceForFrameType(frameType: Int): PixelFormatPreference? = when (frameType) {
+            UVCCamera.FRAME_FORMAT_H264 -> PixelFormatPreference.H264
+            UVCCamera.FRAME_FORMAT_NV12 -> PixelFormatPreference.NV12
+            UVCCamera.FRAME_FORMAT_P010 -> PixelFormatPreference.P010
+            UVCCamera.FRAME_FORMAT_YUYV -> PixelFormatPreference.YUYV
+            UVCCamera.FRAME_FORMAT_MJPEG -> PixelFormatPreference.MJPEG
+            else -> null
+        }
+
+        private fun formatMenuLabel(pref: PixelFormatPreference): String = when (pref) {
+            PixelFormatPreference.AUTO -> "Auto"
+            PixelFormatPreference.H264 -> "H264"
+            PixelFormatPreference.NV12 -> "NV12"
+            PixelFormatPreference.P010 -> "P010"
+            PixelFormatPreference.YUYV -> "YUYV"
+            PixelFormatPreference.MJPEG -> "MJPEG"
+        }
+
+        private fun addMenuHeaderWithDivider(menu: Menu, title: String) {
+            val styled = SpannableString(title).apply {
+                setSpan(ForegroundColorSpan(Color.parseColor("#80FFFFFF")), 0, length, 0)
+            }
+            menu.add(Menu.NONE, Menu.NONE, Menu.NONE, styled).isEnabled = false
         }
 
         private fun pickDefaultFormat(
@@ -1603,7 +1775,13 @@ class MainActivity : ComponentActivity() {
                 val fps = matchingGroup?.fpsOptions?.minByOrNull { abs(it - defaultFormat.frameRate) }
                     ?.takeIf { abs(it - defaultFormat.frameRate) <= DEFAULT_TARGET_FPS_TOLERANCE }
                 if (fps != null) {
-                    return resolveFormatChoice(sizes, defaultFormat.width, defaultFormat.height, fps)
+                    return resolveFormatChoiceForPreference(
+                        sizes,
+                        defaultFormat.width,
+                        defaultFormat.height,
+                        PixelFormatPreference.AUTO,
+                        fps,
+                    )
                 }
             }
 
@@ -1614,26 +1792,71 @@ class MainActivity : ComponentActivity() {
             }
             if (best60p != null) {
                 val (width, height, fps) = best60p
-                return resolveFormatChoice(sizes, width, height, fps)
+                return resolveFormatChoiceForPreference(
+                    sizes,
+                    width,
+                    height,
+                    PixelFormatPreference.AUTO,
+                    fps,
+                )
             }
 
             val best = groups.firstOrNull() ?: return Size(sizes.first())
             val maxFps = best.fpsOptions.maxOrNull() ?: return null
-            return resolveFormatChoice(sizes, best.width, best.height, maxFps)
+            return resolveFormatChoiceForPreference(
+                sizes,
+                best.width,
+                best.height,
+                PixelFormatPreference.AUTO,
+                maxFps,
+            )
         }
 
-        private fun resolveFormatChoice(allSizes: List<Size>, width: Int, height: Int, fps: Float): Size {
-            val candidates = allSizes.filter { it.width == width && it.height == height }
+        private fun resolveFormatChoiceForPreference(
+            allSizes: List<Size>,
+            width: Int,
+            height: Int,
+            preference: PixelFormatPreference,
+            requestedFps: Float?,
+        ): Size? {
+            if (allSizes.isEmpty()) return null
+            val resolutionCandidates = allSizes.filter { it.width == width && it.height == height }
+            if (resolutionCandidates.isEmpty()) return null
+            val prioritized = when (preference) {
+                PixelFormatPreference.AUTO ->
+                    listOf(
+                        UVCCamera.FRAME_FORMAT_H264,
+                        UVCCamera.FRAME_FORMAT_NV12,
+                        UVCCamera.FRAME_FORMAT_P010,
+                        UVCCamera.FRAME_FORMAT_YUYV,
+                        UVCCamera.FRAME_FORMAT_MJPEG,
+                    )
+                else -> listOfNotNull(preference.frameFormat)
+            }
+            val candidates = if (prioritized.isEmpty()) {
+                resolutionCandidates
+            } else {
+                prioritized
+                    .asSequence()
+                    .mapNotNull { fmt ->
+                        resolutionCandidates
+                            .filter { it.frame_type == fmt }
+                            .maxByOrNull { bestAvailableFps(it) }
+                    }
+                    .toList()
+                    .ifEmpty { resolutionCandidates }
+            }
+            val targetFps = requestedFps ?: DEFAULT_TARGET_FPS
             val template = candidates.minByOrNull { size ->
                 val fpsArray = size.fps ?: return@minByOrNull Float.POSITIVE_INFINITY
-                fpsArray.minOfOrNull { abs(it - fps) } ?: Float.POSITIVE_INFINITY
-            } ?: allSizes.first()
+                fpsArray.minOfOrNull { abs(it - targetFps) } ?: Float.POSITIVE_INFINITY
+            } ?: candidates.maxByOrNull { bestAvailableFps(it) } ?: return null
             val copy = Size(template)
             val fpsArray = copy.fps ?: return copy
             var bestIdx = 0
             var bestDiff = Float.POSITIVE_INFINITY
             for (i in fpsArray.indices) {
-                val d = abs(fpsArray[i] - fps)
+                val d = abs(fpsArray[i] - targetFps)
                 if (d < bestDiff) {
                     bestDiff = d
                     bestIdx = i
@@ -1643,13 +1866,20 @@ class MainActivity : ComponentActivity() {
             return copy
         }
 
-        private fun formatResolutionLabel(size: Size): String {
+        private fun bestAvailableFps(size: Size): Float = size.fps?.maxOrNull() ?: 0f
+
+        private fun formatResolutionLabel(size: Size, pref: PixelFormatPreference): String {
             val fps = try {
                 size.getCurrentFrameRate().roundToInt()
             } catch (_: Exception) {
                 0
             }
-            return "${size.width}x${size.height} @ ${fps}p"
+            val base = "${size.width}x${size.height} @ ${fps}p"
+            return if (pref == PixelFormatPreference.AUTO) {
+                base
+            } else {
+                "$base (${formatMenuLabel(pref)})"
+            }
         }
     }
 }

@@ -25,6 +25,7 @@ import org.centennialoss.consolation.preview.UsbPreviewSurfaceHints.applyForUsbP
 import org.centennialoss.consolation.preview.UsbPreviewSurfaceHints.setDefaultBufferSizeIfValid
 import org.centennialoss.consolation.usb.UsbCaptureDeviceRepository
 import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -51,6 +52,7 @@ class UvccameraLibPreviewBackend(
     private var targetWidth = -1
     private var targetHeight = -1
     private var targetFps = -1
+    private var preferredPixelFormatOverride: Int? = null
 
     private var currentWidth = -1
     private var currentHeight = -1
@@ -506,6 +508,10 @@ class UvccameraLibPreviewBackend(
         }
     }
 
+    override fun setPreferredPixelFormat(frameFormat: Int?) {
+        preferredPixelFormatOverride = frameFormat
+    }
+
     override fun setCaptureAudioVolume(linear: Float) {
         captureAudioVolumeLinear = linear.coerceIn(0f, 1f)
         captureAudioRef.get()?.setVolume(captureAudioVolumeLinear)
@@ -751,58 +757,24 @@ class UvccameraLibPreviewBackend(
                     it == UVCCamera.FRAME_FORMAT_NV12 ||
                     it == UVCCamera.FRAME_FORMAT_P010
             }
-            val selectedFrameFormat = if (nativeFrameFormat != null) {
-                try {
-                    try {
-                        camera.setPreviewSize(width, height, minFps, maxFps, nativeFrameFormat, bwFactor)
-                    } catch (e: Exception) {
-                        Log.i(logTag, "playback: ${frameFormatName(nativeFrameFormat)} tight fps range failed, retry 1..$fps", e)
-                        camera.setPreviewSize(width, height, 1, maxFps, nativeFrameFormat, bwFactor)
-                    }
-                    Log.i(
-                        logTag,
-                        "playback: setPreviewSize ${frameFormatName(nativeFrameFormat)} ok " +
-                            "${SystemClock.elapsedRealtime() - t1}ms",
-                    )
-                    nativeFrameFormat
-                } catch (nativeFailure: Exception) {
-                    Log.w(
-                        logTag,
-                        "playback: ${frameFormatName(nativeFrameFormat)} setPreviewSize failed, trying MJPEG",
-                        nativeFailure,
-                    )
-                    null
-                }
+            val lowBandwidthHint = detectLowBandwidthHint(usbDevice)
+            if (lowBandwidthHint != null) {
+                Log.i(logTag, "playback: usb bandwidth hint low=$lowBandwidthHint")
             } else {
-                null
-            } ?: run {
-                t1 = SystemClock.elapsedRealtime()
-                try {
-                    try {
-                        camera.setPreviewSize(width, height, minFps, maxFps, UVCCamera.FRAME_FORMAT_YUYV, bwFactor)
-                    } catch (e: Exception) {
-                        Log.i(logTag, "playback: YUYV tight fps range failed, retry 1..$fps", e)
-                        camera.setPreviewSize(width, height, 1, maxFps, UVCCamera.FRAME_FORMAT_YUYV, bwFactor)
+                Log.i(logTag, "playback: usb bandwidth hint unavailable; auto prefers uncompressed")
+            }
+            val autoOrder = buildAutoFormatOrder(nativeFrameFormat, lowBandwidthHint == true)
+            val selectedOrder = preferredPixelFormatOverride?.let { pref ->
+                listOf(pref) + autoOrder.filter { it != pref }
+            } ?: autoOrder
+            val selectedFrameFormat = selectedOrder.firstNotNullOfOrNull { format ->
+                trySetPreviewSize(camera, width, height, minFps, maxFps, fps, format, bwFactor).also {
+                    if (it != null) {
+                        Log.i(logTag, "playback: using requested order format ${frameFormatName(it)}")
                     }
-                    Log.i(logTag, "playback: setPreviewSize YUYV ok ${SystemClock.elapsedRealtime() - t1}ms")
-                    UVCCamera.FRAME_FORMAT_YUYV
-                } catch (e: Exception) {
-                    Log.w(logTag, "playback: YUYV setPreviewSize failed, trying MJPEG", e)
-                    t1 = SystemClock.elapsedRealtime()
-                    try {
-                        try {
-                            camera.setPreviewSize(width, height, minFps, maxFps, UVCCamera.FRAME_FORMAT_MJPEG, bwFactor)
-                        } catch (e2: Exception) {
-                            Log.i(logTag, "playback: MJPEG tight fps range failed, retry 1..$fps", e2)
-                            camera.setPreviewSize(width, height, 1, maxFps, UVCCamera.FRAME_FORMAT_MJPEG, bwFactor)
-                        }
-                    } catch (e3: Exception) {
-                        Log.e(logTag, "playback: MJPEG setPreviewSize failed", e3)
-                        throw e3
-                    }
-                    Log.i(logTag, "playback: setPreviewSize MJPEG ${SystemClock.elapsedRealtime() - t1}ms")
-                    UVCCamera.FRAME_FORMAT_MJPEG
                 }
+            } ?: run {
+                throw IllegalStateException("no compatible preview format found for ${width}x${height}@${fps}")
             }
 
             currentWidth = width
@@ -1085,6 +1057,76 @@ class UvccameraLibPreviewBackend(
         else -> "format-$frameFormat"
     }
 
+    private fun trySetPreviewSize(
+        camera: UVCCamera,
+        width: Int,
+        height: Int,
+        minFps: Int,
+        maxFps: Int,
+        fps: Int,
+        frameFormat: Int,
+        bwFactor: Float,
+    ): Int? {
+        val t0 = SystemClock.elapsedRealtime()
+        return try {
+            try {
+                camera.setPreviewSize(width, height, minFps, maxFps, frameFormat, bwFactor)
+            } catch (e: Exception) {
+                Log.i(
+                    logTag,
+                    "playback: ${frameFormatName(frameFormat)} tight fps range failed, retry 1..$fps",
+                    e,
+                )
+                camera.setPreviewSize(width, height, 1, maxFps, frameFormat, bwFactor)
+            }
+            Log.i(
+                logTag,
+                "playback: setPreviewSize ${frameFormatName(frameFormat)} ok " +
+                    "${SystemClock.elapsedRealtime() - t0}ms",
+            )
+            frameFormat
+        } catch (e: Exception) {
+            Log.w(logTag, "playback: ${frameFormatName(frameFormat)} setPreviewSize failed", e)
+            null
+        }
+    }
+
+    private fun buildAutoFormatOrder(nativeFrameFormat: Int?, preferCompressed: Boolean): List<Int> {
+        val out = mutableListOf<Int>()
+        nativeFrameFormat?.let { out.add(it) }
+        if (preferCompressed) {
+            out.add(UVCCamera.FRAME_FORMAT_MJPEG)
+            out.add(UVCCamera.FRAME_FORMAT_YUYV)
+        } else {
+            out.add(UVCCamera.FRAME_FORMAT_YUYV)
+            out.add(UVCCamera.FRAME_FORMAT_MJPEG)
+        }
+        return out.distinct()
+    }
+
+    /**
+     * Uses device descriptor bcdUSB as a hint only:
+     * - true: USB 2.x or older advertised capability (prefer compressed in auto mode)
+     * - false: USB 3.x+ capability (prefer uncompressed in auto mode)
+     * - null: unknown (prefer uncompressed in auto mode)
+     */
+    private fun detectLowBandwidthHint(usbDevice: UsbDevice): Boolean? {
+        val usbMgr = appContext.getSystemService(Context.USB_SERVICE) as? UsbManager ?: return null
+        if (!usbMgr.hasPermission(usbDevice)) return null
+        var conn: UsbDeviceConnection? = null
+        return try {
+            conn = usbMgr.openDevice(usbDevice) ?: return null
+            val raw = conn.rawDescriptors ?: return null
+            if (raw.size < 4) return null
+            val bcdUsb = (u8(raw, 2) or (u8(raw, 3) shl 8))
+            bcdUsb < 0x0300
+        } catch (_: Exception) {
+            null
+        } finally {
+            runCatching { conn?.close() }
+        }
+    }
+
     private fun probeSupportedSizesFromUsbDescriptors(usbDevice: UsbDevice): List<Size> {
         val usbMgr = appContext.getSystemService(Context.USB_SERVICE) as? UsbManager ?: return emptyList()
         if (!usbMgr.hasPermission(usbDevice)) return emptyList()
@@ -1117,9 +1159,13 @@ class UvccameraLibPreviewBackend(
             val subtype = u8(raw, i + 2)
             if (descriptorType == USB_DT_CS_INTERFACE) {
                 when (subtype) {
-                    VS_FORMAT_UNCOMPRESSED -> currentFrameType = UVCCamera.FRAME_FORMAT_YUYV
+                    VS_FORMAT_UNCOMPRESSED ->
+                        currentFrameType = parseFrameTypeFromFormatGuid(raw, i, len, subtype)
+                            ?: UVCCamera.FRAME_FORMAT_YUYV
                     VS_FORMAT_MJPEG -> currentFrameType = UVCCamera.FRAME_FORMAT_MJPEG
-                    VS_FORMAT_FRAME_BASED -> currentFrameType = UVCCamera.FRAME_FORMAT_H264
+                    VS_FORMAT_FRAME_BASED ->
+                        currentFrameType = parseFrameTypeFromFormatGuid(raw, i, len, subtype)
+                            ?: UVCCamera.FRAME_FORMAT_H264
                     VS_FRAME_UNCOMPRESSED, VS_FRAME_MJPEG, VS_FRAME_FRAME_BASED -> {
                         val parsed = parseFrameDescriptor(raw, i, len, subtype, currentFrameType)
                         if (parsed != null) {
@@ -1137,6 +1183,29 @@ class UvccameraLibPreviewBackend(
                 it.fps?.maxOrNull() ?: 0f
             },
         )
+    }
+
+    /**
+     * Parse format GUID from VS_FORMAT_UNCOMPRESSED / VS_FORMAT_FRAME_BASED and map known values
+     * to our preview frame format constants.
+     */
+    private fun parseFrameTypeFromFormatGuid(
+        raw: ByteArray,
+        offset: Int,
+        len: Int,
+        subtype: Int,
+    ): Int? {
+        if (subtype != VS_FORMAT_UNCOMPRESSED && subtype != VS_FORMAT_FRAME_BASED) return null
+        // For these format descriptors, guidFormat starts at byte 5 (16 bytes).
+        if (len < 21 || offset + 21 > raw.size) return null
+        val fourcc = String(raw, offset + 5, 4, StandardCharsets.US_ASCII)
+        return when (fourcc) {
+            "YUY2", "UYVY", "YVYU" -> UVCCamera.FRAME_FORMAT_YUYV
+            "NV12" -> UVCCamera.FRAME_FORMAT_NV12
+            "P010" -> UVCCamera.FRAME_FORMAT_P010
+            "H264", "AVC1" -> UVCCamera.FRAME_FORMAT_H264
+            else -> null
+        }
     }
 
     private fun parseFrameDescriptor(
