@@ -1394,30 +1394,12 @@ class MainActivity : ComponentActivity() {
                 failConnectingSession(getString(R.string.message_uvc_open_failed))
                 return@launch
             }
-            if (hasRetriedConnectingSession) return@launch
-
-            hasRetriedConnectingSession = true
             Log.w(
                 PLAYBACK_DIAG_TAG,
-                "connecting watchdog: no first frame after ${CONNECTING_RETRY_TIMEOUT_MS}ms; retrying preview open",
+                "connecting watchdog: no first frame after ${CONNECTING_RETRY_TIMEOUT_MS}ms; failing session " +
+                    "for selected mode ${format.width}x${format.height}",
             )
-            val fps = try {
-                format.getCurrentFrameRate().roundToInt().coerceAtLeast(1)
-            } catch (_: Exception) {
-                30
-            }
-            withContext(Dispatchers.IO) {
-                previewBackend.unbindPreviewSurface()
-                previewBackend.configureSession(device)
-                previewBackend.setPreviewSize(format.width, format.height, fps)
-            }
-            if (captureEngine.state.value !is CaptureState.Running) return@launch
-            if (selectedDevice?.id != device.id) return@launch
-            updateAspectRatio(format.width, format.height)
-            previewTexture.isVisible = true
-            previewTexture.doOnLayout {
-                previewBackend.bindPreviewSurface(previewTexture)
-            }
+            failConnectingSession(getString(R.string.message_uvc_no_frames_after_start))
         }
     }
 
@@ -1425,10 +1407,13 @@ class MainActivity : ComponentActivity() {
         cancelConnectingWatchdog()
         hasRetriedConnectingSession = false
         lifecycleScope.launch(Dispatchers.IO) {
+            // Force a hard native reset before returning to startup so the next Play attempt
+            // does not block in stopUvcStreamingBlocking waiting for a wedged teardown.
+            previewBackend.prepareForUsbRemoval()
             previewBackend.unbindPreviewSurface()
         }
         captureEngine.setFailed(message)
-        showMessage(message)
+        showBlockingErrorDialog(message)
     }
 
     private suspend fun waitForRecentUsbPermissionSettle() {
@@ -1481,6 +1466,41 @@ class MainActivity : ComponentActivity() {
 
     private fun showMessage(message: String) {
         Snackbar.make(binding.root, message, Snackbar.LENGTH_SHORT).show()
+    }
+
+    private fun showBlockingErrorDialog(message: String) {
+        if (isFinishing || isDestroyed) return
+        val content = modalPanel()
+        content.addView(modalWarningHeader(getString(R.string.error_dialog_title)))
+        content.addView(modalDivider())
+        content.addView(modalBody(message, topMarginDp = 2))
+
+        val dialog = Dialog(this)
+        dialog.setCancelable(false)
+        dialog.setCanceledOnTouchOutside(false)
+
+        val scroll = ScrollView(this).apply {
+            isFillViewport = false
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            addView(content)
+        }
+        val okButton = modalPillButton(getString(android.R.string.ok)) {
+            dialog.dismiss()
+        }
+        content.addView(
+            LinearLayout(this).apply {
+                gravity = android.view.Gravity.END
+                setPadding(0, dp(10), 0, 0)
+                addView(okButton)
+            },
+        )
+        dialog.setContentView(scroll)
+        dialog.show()
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.setLayout(
+            minOf(resources.displayMetrics.widthPixels - dp(32), dp(640)),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+        )
     }
 
     private fun loadSettingsFromPrefs() {

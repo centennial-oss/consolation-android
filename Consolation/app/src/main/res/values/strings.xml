@@ -25,6 +25,7 @@
     <string name="state_ready">ready</string>
     <string name="state_running">running</string>
     <string name="state_failed">failed: %1$s</string>
+    <string name="error_dialog_title">Playback Error</string>
     <string name="connecting_capture_card">Connecting to Capture Card…</string>
     <string name="telemetry_format">%1$dx%2$d @ %3$dp %4$s | Actual: %5$dfps | Drops: %6$d | Latency: %7$.0fms | Payload: %8$s</string>
     <string name="low_fps_warning">Low FPS detected. Tap for info.</string>
@@ -84,6 +85,9 @@
     <string name="message_usb_device_not_found">USB device is not connected or no longer matches the selected entry.</string>
     <string name="message_uvc_open_failed">
         Could not start UVC preview on this USB path. Try a direct port (no hub), a different cable or hub, or unplug and replug the capture device.
+    </string>
+    <string name="message_uvc_no_frames_after_start">
+        No video frames were received from the capture card. It may be in an unsupported source mode (for example source output does not match selected resolution/frame rate). Set the source and selected mode to a compatible pair, then try again.
     </string>
     <string name="audio_playback_failed_title">Audio Playback Failed</string>
     <string name="audio_playback_failed_message">

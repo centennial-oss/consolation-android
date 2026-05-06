@@ -779,29 +779,29 @@ class UvccameraLibPreviewBackend(
                 t1 = SystemClock.elapsedRealtime()
                 try {
                     try {
-                        camera.setPreviewSize(width, height, minFps, maxFps, UVCCamera.FRAME_FORMAT_MJPEG, bwFactor)
+                        camera.setPreviewSize(width, height, minFps, maxFps, UVCCamera.FRAME_FORMAT_YUYV, bwFactor)
                     } catch (e: Exception) {
-                        Log.i(logTag, "playback: MJPEG tight fps range failed, retry 1..$fps", e)
-                        camera.setPreviewSize(width, height, 1, maxFps, UVCCamera.FRAME_FORMAT_MJPEG, bwFactor)
+                        Log.i(logTag, "playback: YUYV tight fps range failed, retry 1..$fps", e)
+                        camera.setPreviewSize(width, height, 1, maxFps, UVCCamera.FRAME_FORMAT_YUYV, bwFactor)
                     }
-                    Log.i(logTag, "playback: setPreviewSize MJPEG ok ${SystemClock.elapsedRealtime() - t1}ms")
-                    UVCCamera.FRAME_FORMAT_MJPEG
+                    Log.i(logTag, "playback: setPreviewSize YUYV ok ${SystemClock.elapsedRealtime() - t1}ms")
+                    UVCCamera.FRAME_FORMAT_YUYV
                 } catch (e: Exception) {
-                    Log.w(logTag, "playback: MJPEG setPreviewSize failed, trying YUYV", e)
+                    Log.w(logTag, "playback: YUYV setPreviewSize failed, trying MJPEG", e)
                     t1 = SystemClock.elapsedRealtime()
                     try {
                         try {
-                            camera.setPreviewSize(width, height, minFps, maxFps, UVCCamera.FRAME_FORMAT_YUYV, bwFactor)
+                            camera.setPreviewSize(width, height, minFps, maxFps, UVCCamera.FRAME_FORMAT_MJPEG, bwFactor)
                         } catch (e2: Exception) {
-                            Log.i(logTag, "playback: YUYV tight fps range failed, retry 1..$fps", e2)
-                            camera.setPreviewSize(width, height, 1, maxFps, UVCCamera.FRAME_FORMAT_YUYV, bwFactor)
+                            Log.i(logTag, "playback: MJPEG tight fps range failed, retry 1..$fps", e2)
+                            camera.setPreviewSize(width, height, 1, maxFps, UVCCamera.FRAME_FORMAT_MJPEG, bwFactor)
                         }
                     } catch (e3: Exception) {
-                        Log.e(logTag, "playback: YUYV setPreviewSize failed", e3)
+                        Log.e(logTag, "playback: MJPEG setPreviewSize failed", e3)
                         throw e3
                     }
-                    Log.i(logTag, "playback: setPreviewSize YUYV ${SystemClock.elapsedRealtime() - t1}ms")
-                    UVCCamera.FRAME_FORMAT_YUYV
+                    Log.i(logTag, "playback: setPreviewSize MJPEG ${SystemClock.elapsedRealtime() - t1}ms")
+                    UVCCamera.FRAME_FORMAT_MJPEG
                 }
             }
 
