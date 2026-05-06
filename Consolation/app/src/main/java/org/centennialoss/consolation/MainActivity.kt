@@ -91,6 +91,9 @@ class MainActivity : ComponentActivity() {
 
     private var lastResolutionRefreshDeviceId: String? = null
     private var lastResolutionRefreshHadUsbPermission: Boolean = false
+    private var resolutionProbeJob: Job? = null
+    private var probingResolutionDeviceId: String? = null
+    private var isResolutionProbeInProgress = false
 
     // Settings
     private var isStatsVisible = false
@@ -582,7 +585,7 @@ class MainActivity : ComponentActivity() {
         val device = selectedDevice
         val hasDevice = device != null
         val hasUsbPermission = device?.let { deviceRepository.hasPermission(it) } == true
-        val hasResolution = selectedFormat != null
+        val hasResolution = selectedFormat != null && !isResolutionProbeInProgress
         val needsAccess = hasDevice && (
             !hasUsbPermission ||
                 !hasRuntimeCameraPermission() ||
@@ -604,6 +607,10 @@ class MainActivity : ComponentActivity() {
     private fun refreshResolutions() {
         val device = selectedDevice ?: run {
             Log.d(RESOLUTION_PROBE_TAG, "refreshResolutions: skip (no selected device)")
+            resolutionProbeJob?.cancel()
+            resolutionProbeJob = null
+            probingResolutionDeviceId = null
+            isResolutionProbeInProgress = false
             updateStartupActions()
             return
         }
@@ -612,6 +619,10 @@ class MainActivity : ComponentActivity() {
                 RESOLUTION_PROBE_TAG,
                 "refreshResolutions: skip (no USB permission) id=${device.id} name=${device.name}",
             )
+            resolutionProbeJob?.cancel()
+            resolutionProbeJob = null
+            probingResolutionDeviceId = null
+            isResolutionProbeInProgress = false
             binding.startupScreen.resolutionDropdown.setAdapter(null)
             binding.startupScreen.resolutionDropdown.setText("", false)
             probedFormatSizes = emptyList()
@@ -620,7 +631,22 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        if (resolutionProbeJob?.isActive == true && probingResolutionDeviceId == device.id) {
+            Log.d(
+                RESOLUTION_PROBE_TAG,
+                "refreshResolutions: skip duplicate in-flight probe id=${device.id}",
+            )
+            return
+        }
+
+        resolutionProbeJob?.cancel()
+        resolutionProbeJob = null
+        probingResolutionDeviceId = device.id
+        isResolutionProbeInProgress = true
+        selectedFormat = null
+        probedFormatSizes = emptyList()
         updateStartupActions()
+        binding.startupScreen.resolutionDropdown.setAdapter(null)
         binding.startupScreen.resolutionDropdown.setText(
             getString(R.string.state_checking_formats),
             false,
@@ -630,7 +656,7 @@ class MainActivity : ComponentActivity() {
             RESOLUTION_PROBE_TAG,
             "refreshResolutions: scheduling probe id=${device.id} name=${device.name}",
         )
-        lifecycleScope.launch {
+        resolutionProbeJob = lifecycleScope.launch {
             val sizes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 previewBackend.probeSupportedSizes(device)
             }
@@ -638,6 +664,13 @@ class MainActivity : ComponentActivity() {
                 Log.i(
                     RESOLUTION_PROBE_TAG,
                     "refreshResolutions: discard stale probe id=${device.id} selected=${selectedDevice?.id}",
+                )
+                return@launch
+            }
+            if (probingResolutionDeviceId != device.id) {
+                Log.i(
+                    RESOLUTION_PROBE_TAG,
+                    "refreshResolutions: discard superseded probe id=${device.id} active=${probingResolutionDeviceId}",
                 )
                 return@launch
             }
@@ -699,6 +732,18 @@ class MainActivity : ComponentActivity() {
                     "refreshResolutions: probe returned empty list id=${device.id} name=${device.name} " +
                         "probeOpenFailed=$probeOpenFailed",
                 )
+            }
+        }.also { job ->
+            job.invokeOnCompletion {
+                runOnUiThread {
+                    if (resolutionProbeJob != job) {
+                        return@runOnUiThread
+                    }
+                    resolutionProbeJob = null
+                    probingResolutionDeviceId = null
+                    isResolutionProbeInProgress = false
+                    updateStartupActions()
+                }
             }
         }
     }
