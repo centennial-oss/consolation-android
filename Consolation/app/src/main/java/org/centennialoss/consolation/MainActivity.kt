@@ -59,6 +59,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private lateinit var binding: ActivityMainBinding
@@ -722,15 +723,9 @@ class MainActivity : ComponentActivity() {
             binding.videoStatsOverlay.text = getString(
                 R.string.telemetry_format,
                 stats.width, stats.height, stats.configuredFps,
-                stats.pixelFormat, stats.fps, stats.droppedFrames, stats.stutter,
-                stats.nativePreviewConversionAvgMs, stats.nativePreviewConversionMaxMs,
-                stats.nativePreviewConversionCount,
-                stats.nativeCallbackConversionAvgMs, stats.nativeCallbackConversionMaxMs,
-                stats.nativeCallbackConversionCount,
-                stats.nativeSurfaceCopyAvgMs, stats.nativeSurfaceCopyMaxMs,
-                stats.nativeSurfaceCopyCount,
-                stats.nativePayloadAvgKb, stats.nativePayloadMaxKb,
-                stats.nativePayloadCount,
+                stats.pixelFormat, stats.fps, stats.droppedFrames,
+                stats.nativePreviewConversionAvgMs,
+                formatTelemetryPayloadLabel(stats.nativePayloadAvgKb),
             )
             val params = binding.videoStatsOverlay.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
             if (statsPosition == StatsPosition.BOTTOM_LEFT) {
@@ -741,6 +736,18 @@ class MainActivity : ComponentActivity() {
                 params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
             }
             binding.videoStatsOverlay.layoutParams = params
+        }
+    }
+
+    /** Average native payload size for overlay: KiB until 1024 KiB, then MiB. */
+    private fun formatTelemetryPayloadLabel(avgKb: Double): String {
+        if (avgKb <= 0.0 || avgKb.isNaN()) {
+            return "0 KB"
+        }
+        return if (avgKb >= 1024.0) {
+            String.format(Locale.US, "%.2f MB", avgKb / 1024.0)
+        } else {
+            String.format(Locale.US, "%.0f KB", avgKb)
         }
     }
 

@@ -68,7 +68,6 @@ class UvccameraLibPreviewBackend(
     private var actualFps = 0
     private var droppedFrames = 0
     private var lastFrameTime = 0L
-    private var totalStutter = 0.0
 
     /**
      * Device last passed to [USBMonitor.openDevice] for preview; kept so we can
@@ -501,31 +500,18 @@ class UvccameraLibPreviewBackend(
         if (elapsed >= 1000) {
             actualFps = (frameCount.getAndSet(0) * 1000 / elapsed).toInt()
             lastTelemetryTime = now
-            // Simple stutter calculation: reset every second for now
-            totalStutter = 0.0
         }
         val processingStats = uvcCamera?.getAndResetProcessingStats() ?: EMPTY_PROCESSING_STATS
         return TelemetrySnapshot(
             fps = actualFps,
             droppedFrames = droppedFrames,
-            stutter = totalStutter,
             width = currentWidth,
             height = currentHeight,
             configuredFps = currentFpsConfigured,
             pixelFormat = currentPixelFormat,
             backendName = telemetryBackendLabel,
-            nativePreviewConversionCount = processingStats.getOrElse(0) { 0L },
             nativePreviewConversionAvgMs = nsToMs(processingStats.getOrElse(1) { 0L }),
-            nativePreviewConversionMaxMs = nsToMs(processingStats.getOrElse(2) { 0L }),
-            nativeCallbackConversionCount = processingStats.getOrElse(3) { 0L },
-            nativeCallbackConversionAvgMs = nsToMs(processingStats.getOrElse(4) { 0L }),
-            nativeCallbackConversionMaxMs = nsToMs(processingStats.getOrElse(5) { 0L }),
-            nativeSurfaceCopyCount = processingStats.getOrElse(6) { 0L },
-            nativeSurfaceCopyAvgMs = nsToMs(processingStats.getOrElse(7) { 0L }),
-            nativeSurfaceCopyMaxMs = nsToMs(processingStats.getOrElse(8) { 0L }),
-            nativePayloadCount = processingStats.getOrElse(9) { 0L },
             nativePayloadAvgKb = bytesToKb(processingStats.getOrElse(10) { 0L }),
-            nativePayloadMaxKb = bytesToKb(processingStats.getOrElse(11) { 0L }),
         )
     }
 
@@ -834,7 +820,6 @@ class UvccameraLibPreviewBackend(
                     val frameTimeMs = (now - lastFrameTime) / 1_000_000.0
                     val expectedTimeMs = 1000.0 / currentFpsConfigured
                     if (frameTimeMs > expectedTimeMs * 1.5) {
-                        totalStutter += (frameTimeMs - expectedTimeMs)
                         droppedFrames++
                     }
                 }
@@ -1079,7 +1064,6 @@ class UvccameraLibPreviewBackend(
 
     private fun resetTelemetryCounters() {
         droppedFrames = 0
-        totalStutter = 0.0
         frameCount.set(0)
         lastTelemetryTime = System.currentTimeMillis()
         actualFps = 0

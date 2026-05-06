@@ -8,7 +8,6 @@ class DebugLatencyTelemetry : LatencyTelemetry {
         return TelemetrySnapshot(
             fps = 0,
             droppedFrames = 0,
-            stutter = 0.0,
             width = 0,
             height = 0,
             configuredFps = 0,

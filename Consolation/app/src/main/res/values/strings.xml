@@ -26,7 +26,7 @@
     <string name="state_running">running</string>
     <string name="state_failed">failed: %1$s</string>
     <string name="connecting_capture_card">Connecting to Capture Card…</string>
-    <string name="telemetry_format">%1$dx%2$d @ %3$dp %4$s | Actual: %5$dfps | Drops: %6$d | Stutter: %7$.1f ms\nPrev: %8$.2f/%9$.2f n=%10$d | Cb: %11$.2f/%12$.2f n=%13$d\nCopy: %14$.2f/%15$.2f n=%16$d | Payload: %17$.0f/%18$.0f KB n=%19$d</string>
+    <string name="telemetry_format">%1$dx%2$d @ %3$dp %4$s | Actual: %5$dfps | Drops: %6$d | Latency: %7$.0fms | Payload: %8$s</string>
     <string name="low_fps_warning">Low FPS detected. Tap for info.</string>
     <string name="low_fps_info_title">Low FPS Warning</string>
     <string name="low_fps_info_message">The actual frame rate is lower than requested. This can be caused by USB bandwidth limitations, high system load, or capture card limitations. Try a lower resolution or a different USB port.</string>
