@@ -962,6 +962,7 @@ int UVCPreview::prepare_preview(uvc_stream_ctrl_t *ctrl) {
 	uvc_error_t result;
 
 	ENTER();
+	uvc_set_rgbx_converter_backend(UVC_RGBX_CONVERTER_BACKEND_INTERNAL);
 	result = uvc_get_stream_ctrl_format_size_fps(mDeviceHandle, ctrl,
 		request_mode_to_frame_format(requestMode),
 		requestWidth, requestHeight, requestMinFps, requestMaxFps

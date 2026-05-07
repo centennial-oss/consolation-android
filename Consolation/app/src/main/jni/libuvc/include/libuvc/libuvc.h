@@ -115,6 +115,11 @@ enum uvc_frame_format {
 	UVC_FRAME_FORMAT_COUNT,
 };
 
+typedef enum uvc_rgbx_converter_backend {
+	UVC_RGBX_CONVERTER_BACKEND_INTERNAL = 0,
+	UVC_RGBX_CONVERTER_BACKEND_LIBYUV = 1,
+} uvc_rgbx_converter_backend_t;
+
 /* UVC_COLOR_FORMAT_* have been replaced with UVC_FRAME_FORMAT_*. Please use
  * UVC_FRAME_FORMAT_* instead of using these. */
 #define UVC_COLOR_FORMAT_UNKNOWN UVC_FRAME_FORMAT_UNKNOWN
@@ -796,6 +801,7 @@ void uvc_print_stream_ctrl(uvc_stream_ctrl_t *ctrl, FILE *stream);
 uvc_frame_t *uvc_allocate_frame(size_t data_bytes);
 void uvc_free_frame(uvc_frame_t *frame);
 void uvc_cleanup_frame_caches(void);
+void uvc_set_rgbx_converter_backend(uvc_rgbx_converter_backend_t backend);
 
 uvc_error_t uvc_duplicate_frame(uvc_frame_t *in, uvc_frame_t *out);
 //----------------------------------------------------------------------
