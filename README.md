@@ -28,7 +28,7 @@ Read the full privacy policy at [PRIVACY.md](PRIVACY.md) or <https://centennialo
 
 Any capture device that appears to the Android OS as a USB Video Class (UVC) capture device should work with Consolation.
 
-Consolation has been tested by the developers on a Samsung Galaxy S8 Ultra (SM-X900) with these capture devices:
+Consolation has been tested by the developers on a Samsung Galaxy Tab S8 Ultra (SM-X900) with these capture devices:
 
 - Elgato HD60 X - 👌 🚀
 - Acer USB 3.0 Video Capture Card (model OCB5B0) - 👌 🚀
