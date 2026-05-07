@@ -700,6 +700,8 @@ static void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
 		tmp_buf = strmh->holdbuf;
 		strmh->hold_bfh_err = strmh->bfh_err;	// XXX
 		strmh->hold_bytes = strmh->got_bytes;
+		/* Timestamp when a full frame is assembled and published (EOF/FID boundary). */
+		strmh->hold_start_monotonic_ns = uvc_diag_now_ns();
 		strmh->holdbuf = strmh->outbuf;
 		strmh->outbuf = tmp_buf;
 		strmh->hold_last_scr = strmh->last_scr;
@@ -712,6 +714,7 @@ static void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
 
 	strmh->seq++;
 	strmh->got_bytes = 0;
+	strmh->frame_start_monotonic_ns = 0;
 	strmh->last_scr = 0;
 	strmh->pts = 0;
 	strmh->bfh_err = 0;	// XXX
@@ -1772,6 +1775,7 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
 	frame->data = strmh->holdbuf;
 	frame->data_bytes = strmh->hold_bytes ? strmh->hold_bytes : 1;
 	frame->library_owns_data = 0;
+	frame->arrival_monotonic_ns = strmh->hold_start_monotonic_ns;
 
 	/** @todo set the frame time */
 }

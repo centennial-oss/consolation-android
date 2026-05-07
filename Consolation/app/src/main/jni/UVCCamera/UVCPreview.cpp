@@ -145,6 +145,9 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	processingCopyCount(0),
 	processingCopyTotalNs(0),
 	processingCopyMaxNs(0),
+	processingEndToEndLatencyCount(0),
+	processingEndToEndLatencyTotalNs(0),
+	processingEndToEndLatencyMaxNs(0),
 	processingPayloadCount(0),
 	processingPayloadTotalBytes(0),
 	processingPayloadMaxBytes(0),
@@ -305,6 +308,18 @@ void UVCPreview::recordSurfaceCopyTiming(uint64_t duration_ns) {
 	pthread_mutex_unlock(&processing_stats_mutex);
 }
 
+void UVCPreview::recordEndToEndLatencyTiming(uint64_t start_ns, uint64_t end_ns) {
+	if (!start_ns || end_ns <= start_ns)
+		return;
+	const uint64_t duration_ns = end_ns - start_ns;
+	pthread_mutex_lock(&processing_stats_mutex);
+	processingEndToEndLatencyCount++;
+	processingEndToEndLatencyTotalNs += duration_ns;
+	if (duration_ns > processingEndToEndLatencyMaxNs)
+		processingEndToEndLatencyMaxNs = duration_ns;
+	pthread_mutex_unlock(&processing_stats_mutex);
+}
+
 void UVCPreview::recordPayloadBytes(size_t bytes) {
 	pthread_mutex_lock(&processing_stats_mutex);
 	processingPayloadCount++;
@@ -317,8 +332,8 @@ void UVCPreview::recordPayloadBytes(size_t bytes) {
 void UVCPreview::getAndResetProcessingStats(uint64_t stats[12]) {
 	pthread_mutex_lock(&processing_stats_mutex);
 	stats[0] = processingPreviewConvertCount;
-	stats[1] = processingPreviewConvertCount
-		? processingPreviewConvertTotalNs / processingPreviewConvertCount : 0;
+	stats[1] = processingEndToEndLatencyCount
+		? processingEndToEndLatencyTotalNs / processingEndToEndLatencyCount : 0;
 	stats[2] = processingPreviewConvertMaxNs;
 	stats[3] = processingCallbackConvertCount;
 	stats[4] = processingCallbackConvertCount
@@ -341,6 +356,9 @@ void UVCPreview::getAndResetProcessingStats(uint64_t stats[12]) {
 	processingCopyCount = 0;
 	processingCopyTotalNs = 0;
 	processingCopyMaxNs = 0;
+	processingEndToEndLatencyCount = 0;
+	processingEndToEndLatencyTotalNs = 0;
+	processingEndToEndLatencyMaxNs = 0;
 	processingPayloadCount = 0;
 	processingPayloadTotalBytes = 0;
 	processingPayloadMaxBytes = 0;
@@ -603,8 +621,11 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 		preview->recordPayloadBytes(frame->actual_bytes);
 
 		if (preview->frameMode != REQUEST_MODE_H264) {
+			uint64_t preview_post_ns = 0;
 			const bool preview_rendered = preview->renderFrameDirectToSurface(frame,
-				&preview->mPreviewWindow, &preview->preview_mutex);
+				&preview->mPreviewWindow, &preview->preview_mutex, &preview_post_ns);
+			if (preview_rendered && preview_post_ns)
+				preview->recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, preview_post_ns);
 			bool capture_window_present = false;
 			pthread_mutex_lock(&preview->capture_mutex);
 			capture_window_present = preview->mCaptureWindow != NULL;
@@ -654,13 +675,15 @@ uvc_frame_t *UVCPreview::createFrameNotification(uvc_frame_t *frame) {
 	notification->step = 0;
 	notification->sequence = frame->sequence;
 	notification->capture_time = frame->capture_time;
+	notification->arrival_monotonic_ns = frame->arrival_monotonic_ns;
 	notification->source = frame->source;
 	notification->actual_bytes = notification->data ? 1 : 0;
 	return notification;
 }
 
 bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
-	ANativeWindow **window, pthread_mutex_t *window_mutex) {
+	ANativeWindow **window, pthread_mutex_t *window_mutex,
+	uint64_t *before_post_ns) {
 	bool rendered = false;
 
 	pthread_mutex_lock(window_mutex);
@@ -689,6 +712,8 @@ bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
 				recordPreviewConversionTiming(processing_now_ns() - t_convert);
 				rendered = result == UVC_SUCCESS;
 			}
+			if (rendered && before_post_ns)
+				*before_post_ns = processing_now_ns();
 			ANativeWindow_unlockAndPost(target);
 		}
 	}
@@ -725,6 +750,7 @@ uvc_frame_t *UVCPreview::convertPreviewFrameToRgbx(uvc_frame_t *frame) {
 		recycle_frame(rgbx);
 		return NULL;
 	}
+	rgbx->arrival_monotonic_ns = frame->arrival_monotonic_ns;
 	return rgbx;
 }
 
@@ -837,6 +863,20 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 	ENTER();
 
 	uvc_frame_t *frame = NULL;
+	JavaVM *vm = getVM();
+	JNIEnv *env = nullptr;
+	bool preview_thread_attached = false;
+	if (vm) {
+		const jint gotEnv = vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+		if (gotEnv == JNI_EDETACHED) {
+			if (vm->AttachCurrentThread(&env, NULL) == 0)
+				preview_thread_attached = true;
+			else
+				env = nullptr;
+		} else if (gotEnv != JNI_OK) {
+			env = nullptr;
+		}
+	}
 	const uint64_t t_start_streaming = processing_now_ns();
 	uvc_error_t result = uvc_start_streaming_bandwidth(
 		mDeviceHandle, ctrl, uvc_preview_frame_callback, (void *)this, requestBandwidth, 0);
@@ -848,11 +888,6 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 		streamingStartMonotonicNs = processing_now_ns();
 		firstFrameLogged = false;
 		clearPreviewFrame();
-		if (pthread_create(&capture_thread, NULL, capture_thread_func, (void *)this) != 0)
-			LOGW("UVCPreview::do_preview pthread_create capture_thread failed");
-		else
-			capture_thread_joinable = true;
-
 #if LOCAL_DEBUG
 		LOGI("Streaming...");
 #endif
@@ -860,8 +895,16 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame = waitPreviewFrame();
 				if (LIKELY(frame)) {
-					addCaptureFrame(frame);
-					frame = NULL;
+					if (capture_thread_joinable) {
+						addCaptureFrame(frame);
+						frame = NULL;
+					} else if (env) {
+						do_capture_callback(env, frame);
+						frame = NULL;
+					} else {
+						recycle_frame(frame);
+						frame = NULL;
+					}
 				}
 			}
 		} else {
@@ -873,7 +916,13 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 					if (frame->frame_format != UVC_FRAME_FORMAT_UNKNOWN)
 						frame = draw_preview_one(frame, &mPreviewWindow, nullptr,
 							PREVIEW_PIXEL_BYTES);
-					addCaptureFrame(frame);
+					if (capture_thread_joinable) {
+						addCaptureFrame(frame);
+					} else if (env) {
+						do_capture_callback(env, frame);
+					} else if (frame) {
+						recycle_frame(frame);
+					}
 				}
 			}
 		}
@@ -889,6 +938,8 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 	} else {
 		uvc_perror(result, "failed start_streaming");
 	}
+	if (preview_thread_attached && vm)
+		vm->DetachCurrentThread();
 
 	EXIT();
 }
@@ -905,7 +956,8 @@ static void copyFrame(const uint8_t *src, uint8_t *dest, const int row_bytes,
 
 
 // transfer specific frame data to the Surface(ANativeWindow)
-int copyToSurface(uvc_frame_t *frame, ANativeWindow **window) {
+int copyToSurface(uvc_frame_t *frame, ANativeWindow **window,
+	uint64_t *before_post_ns = NULL) {
 	// ENTER();
 	int result = 0;
 	if (LIKELY(*window)) {
@@ -928,6 +980,8 @@ int copyToSurface(uvc_frame_t *frame, ANativeWindow **window) {
 			const int transfer_h =
 				std::min((int) frame->height, buffer.height);
 			copyFrame(src, dest, w, transfer_h, src_step, dest_step);
+			if (before_post_ns)
+				*before_post_ns = processing_now_ns();
 			ANativeWindow_unlockAndPost(*window);
 		} else {
 			result = -1;
@@ -959,8 +1013,12 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 				if (!b) {
 					pthread_mutex_lock(&preview_mutex);
 					const uint64_t t_copy = processing_now_ns();
-					copyToSurface(converted, window);
-					recordSurfaceCopyTiming(processing_now_ns() - t_copy);
+					uint64_t before_post_ns = 0;
+					if (copyToSurface(converted, window, &before_post_ns) == 0) {
+						const uint64_t t_end = before_post_ns ? before_post_ns : processing_now_ns();
+						recordSurfaceCopyTiming(t_end - t_copy);
+						recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, t_end);
+					}
 					pthread_mutex_unlock(&preview_mutex);
 				} else {
 					LOGE("failed converting");
@@ -970,8 +1028,12 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 		} else {
 			pthread_mutex_lock(&preview_mutex);
 			const uint64_t t_copy = processing_now_ns();
-			copyToSurface(frame, window);
-			recordSurfaceCopyTiming(processing_now_ns() - t_copy);
+			uint64_t before_post_ns = 0;
+			if (copyToSurface(frame, window, &before_post_ns) == 0) {
+				const uint64_t t_end = before_post_ns ? before_post_ns : processing_now_ns();
+				recordSurfaceCopyTiming(t_end - t_copy);
+				recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, t_end);
+			}
 			pthread_mutex_unlock(&preview_mutex);
 		}
 	}
@@ -1014,6 +1076,13 @@ int UVCPreview::setCaptureDisplay(ANativeWindow *capture_window) {
 					ANativeWindow_release(mCaptureWindow);
 					mCaptureWindow = NULL;
 				}
+			}
+		}
+		if (mCaptureWindow && isRunning() && !capture_thread_joinable) {
+			if (pthread_create(&capture_thread, NULL, capture_thread_func, (void *)this) != 0) {
+				LOGW("UVCPreview::setCaptureDisplay pthread_create capture_thread failed");
+			} else {
+				capture_thread_joinable = true;
 			}
 		}
 	}

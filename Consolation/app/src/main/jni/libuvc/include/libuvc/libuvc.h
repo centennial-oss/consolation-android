@@ -481,6 +481,8 @@ typedef struct uvc_frame {
 	uint32_t sequence;
 	/** Estimate of system time when the device started capturing the image */
 	struct timeval capture_time;
+	/** CLOCK_MONOTONIC ns when libuvc completed assembly of this frame payload. */
+	uint64_t arrival_monotonic_ns;
 	/** Handle on the device that produced the image.
 	 * @warning You must not call any uvc_* functions during a callback. */
 	uvc_device_handle_t *source;

@@ -851,7 +851,7 @@ class MainActivity : ComponentActivity() {
                 R.string.telemetry_format,
                 stats.width, stats.height, stats.configuredFps,
                 stats.pixelFormat, stats.fps, stats.droppedFrames,
-                stats.nativePreviewConversionAvgMs,
+                stats.nativeEndToEndLatencyAvgMs,
                 formatTelemetryPayloadLabel(stats.nativePayloadAvgKb),
             )
             val params = binding.videoStatsOverlay.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams

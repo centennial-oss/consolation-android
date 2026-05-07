@@ -539,7 +539,7 @@ class UvccameraLibPreviewBackend(
             configuredFps = currentFpsConfigured,
             pixelFormat = currentPixelFormat,
             backendName = telemetryBackendLabel,
-            nativePreviewConversionAvgMs = nsToMs(processingStats.getOrElse(1) { 0L }),
+            nativeEndToEndLatencyAvgMs = nsToMs(processingStats.getOrElse(1) { 0L }),
             nativePayloadAvgKb = bytesToKb(processingStats.getOrElse(10) { 0L }),
         )
     }
