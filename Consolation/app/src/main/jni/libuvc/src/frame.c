@@ -50,6 +50,7 @@
  */
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
+#include "libyuv/convert_argb.h"
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
 #define LIBUVC_HAS_ARM_NEON 1
@@ -58,6 +59,11 @@
 #endif
 
 #define USE_STRIDE 1
+
+static inline uvc_error_t libyuv_result_to_uvc_error(int result) {
+	return result == 0 ? UVC_SUCCESS : UVC_ERROR_INVALID_PARAM;
+}
+
 /** @internal */
 uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes) {
 	if (UNLIKELY(!need_bytes))
@@ -758,63 +764,11 @@ uvc_error_t uvc_yuyv2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	out->capture_time = in->capture_time;
 	out->source = in->source;
 
-	uint8_t *pyuv = in->data;
-	const uint8_t *pyuv_end = pyuv + in->data_bytes - PIXEL8_YUYV;
-	uint8_t *prgbx = out->data;
-	const uint8_t *prgbx_end = prgbx + out->data_bytes - PIXEL8_RGBX;
-
-	// YUYV => RGBX8888
-#if LIBUVC_HAS_ARM_NEON
-	if (LIKELY(in->width >= 16 && !(in->width & 1))) {
-		if (in->step && out->step && (in->step != out->step)) {
-			const int hh = in->height < out->height ? in->height : out->height;
-			const int ww = (in->width < out->width ? in->width : out->width) & ~1;
-			int h;
-			for (h = 0; h < hh; h++) {
-				yuyv2rgbx_neon_line(in->data + in->step * h,
-					out->data + out->step * h, ww);
-			}
-		} else {
-			yuyv2rgbx_neon_line(in->data, out->data, in->width * in->height);
-		}
-		return UVC_SUCCESS;
-	}
-#endif
-#if USE_STRIDE
-	if (in->step && out->step && (in->step != out->step)) {
-		const int hh = in->height < out->height ? in->height : out->height;
-		const int ww = in->width < out->width ? in->width : out->width;
-		int h, w;
-		for (h = 0; h < hh; h++) {
-			w = 0;
-			pyuv = in->data + in->step * h;
-			prgbx = out->data + out->step * h;
-			for (; (prgbx <= prgbx_end) && (pyuv <= pyuv_end) && (w < ww) ;) {
-				IYUYV2RGBX_8(pyuv, prgbx, 0, 0);
-
-				prgbx += PIXEL8_RGBX;
-				pyuv += PIXEL8_YUYV;
-				w += 8;
-			}
-		}
-	} else {
-		// compressed format? XXX if only one of the frame in / out has step, this may lead to crash...
-		for (; (prgbx <= prgbx_end) && (pyuv <= pyuv_end) ;) {
-			IYUYV2RGBX_8(pyuv, prgbx, 0, 0);
-
-			prgbx += PIXEL8_RGBX;
-			pyuv += PIXEL8_YUYV;
-		}
-	}
-#else
-	for (; (prgbx <= prgbx_end) && (pyuv <= pyuv_end) ;) {
-		IYUYV2RGBX_8(pyuv, prgbx, 0, 0);
-
-		prgbx += PIXEL8_RGBX;
-		pyuv += PIXEL8_YUYV;
-	}
-#endif
-	return UVC_SUCCESS;
+	const int src_stride_yuy2 = in->step ? (int) in->step : (int) in->width * PIXEL_YUYV;
+	const int dst_stride_rgbx = out->step ? (int) out->step : (int) in->width * PIXEL_RGBX;
+	const int result = YUY2ToARGBMatrix(in->data, src_stride_yuy2, out->data,
+		dst_stride_rgbx, &kYvuI601Constants, (int) in->width, (int) in->height);
+	return libyuv_result_to_uvc_error(result);
 }
 
 /** @brief Convert a frame from NV12 to RGBX8888 */
@@ -844,44 +798,9 @@ uvc_error_t uvc_nv122rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	const uint8_t * restrict uv_plane = y_plane + width * height;
 	uint8_t * restrict rgba = out->data;
 	const size_t out_step = out->step;
-
-#if LIBUVC_HAS_ARM_NEON
-	if (LIKELY(width >= 16 && !(width & 1) && !(height & 1))) {
-		nv12_to_rgbx_neon(y_plane, uv_plane, rgba, width, height, out_step);
-		return UVC_SUCCESS;
-	}
-#endif
-
-	for (size_t y = 0; y < height; ++y) {
-		const uint8_t *y_row = y_plane + y * width;
-		const uint8_t *uv_row = uv_plane + (y / 2) * width;
-		uint8_t *out_row = rgba + y * out_step;
-		for (size_t x = 0; x < width; x += 2) {
-			const int u = uv_row[0] - 128;
-			const int v = uv_row[1] - 128;
-			const int r = (22987 * v) >> 14;
-			const int g = (-5636 * u - 11698 * v) >> 14;
-			const int b = (29049 * u) >> 14;
-
-			const int yy0 = y_row[0];
-			out_row[0] = sat(yy0 + r);
-			out_row[1] = sat(yy0 + g);
-			out_row[2] = sat(yy0 + b);
-			out_row[3] = 0xff;
-
-			const int yy1 = y_row[1];
-			out_row[4] = sat(yy1 + r);
-			out_row[5] = sat(yy1 + g);
-			out_row[6] = sat(yy1 + b);
-			out_row[7] = 0xff;
-
-			y_row += 2;
-			uv_row += 2;
-			out_row += 8;
-		}
-	}
-
-	return UVC_SUCCESS;
+	const int result = NV12ToABGR(y_plane, (int) width, uv_plane, (int) width,
+		rgba, (int) out_step, (int) width, (int) height);
+	return libyuv_result_to_uvc_error(result);
 }
 
 /** @brief Convert a frame from P010 to RGBX8888 */
@@ -911,39 +830,10 @@ uvc_error_t uvc_p0102rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	const uint8_t * restrict uv_plane = y_plane + width * height * 2;
 	uint8_t * restrict rgba = out->data;
 	const size_t out_step = out->step;
-
-	for (size_t y = 0; y < height; ++y) {
-		const uint8_t *y_row = y_plane + y * width * 2;
-		const uint8_t *uv_row = uv_plane + (y / 2) * width * 2;
-		uint8_t *out_row = rgba + y * out_step;
-		/* Process two pixels per iteration: each UV pair covers a horizontal chroma block,
-		   so r/g/b offsets are shared and computed only once per pair. */
-		for (size_t x = 0; x < width; x += 2) {
-			const int u = (((int)uv_row[0] | ((int)uv_row[1] << 8)) >> 8) - 128;
-			const int v = (((int)uv_row[2] | ((int)uv_row[3] << 8)) >> 8) - 128;
-			const int r = (22987 * v) >> 14;
-			const int g = (-5636 * u - 11698 * v) >> 14;
-			const int b = (29049 * u) >> 14;
-
-			const int yy0 = ((int)y_row[0] | ((int)y_row[1] << 8)) >> 8;
-			out_row[0] = sat(yy0 + r);
-			out_row[1] = sat(yy0 + g);
-			out_row[2] = sat(yy0 + b);
-			out_row[3] = 0xff;
-
-			const int yy1 = ((int)y_row[2] | ((int)y_row[3] << 8)) >> 8;
-			out_row[4] = sat(yy1 + r);
-			out_row[5] = sat(yy1 + g);
-			out_row[6] = sat(yy1 + b);
-			out_row[7] = 0xff;
-
-			y_row += 4;
-			uv_row += 4;
-			out_row += 8;
-		}
-	}
-
-	return UVC_SUCCESS;
+	const int result = P010ToARGBMatrix((const uint16_t *) y_plane, (int) width,
+		(const uint16_t *) uv_plane, (int) width, rgba, (int) out_step,
+		&kYvuI601Constants, (int) width, (int) height);
+	return libyuv_result_to_uvc_error(result);
 }
 
 #define IYUYV2BGR_2(pyuv, pbgr, ax, bx) { \

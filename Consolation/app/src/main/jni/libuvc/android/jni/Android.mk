@@ -41,12 +41,14 @@ include $(CLEAR_VARS)
 LOCAL_C_INCLUDES += \
 	$(LOCAL_PATH)/.. \
 	$(LOCAL_PATH)/include \
-	$(LOCAL_PATH)/include/libuvc
+	$(LOCAL_PATH)/include/libuvc \
+	$(LOCAL_PATH)/../libyuv/include
 
 LOCAL_EXPORT_C_INCLUDES := \
 	$(LOCAL_PATH)/ \
 	$(LOCAL_PATH)/include \
-	$(LOCAL_PATH)/include/libuvc
+	$(LOCAL_PATH)/include/libuvc \
+	$(LOCAL_PATH)/../libyuv/include
 
 LOCAL_CFLAGS := $(LOCAL_C_INCLUDES:%=-I%)
 LOCAL_CFLAGS += -DANDROID_NDK
@@ -66,6 +68,7 @@ endif
 #LOCAL_STATIC_LIBRARIES += jpeg-turbo3141_static
 LOCAL_SHARED_LIBRARIES += jpeg-turbo3141
 LOCAL_SHARED_LIBRARIES += usb100
+LOCAL_STATIC_LIBRARIES += libyuv_static
 
 LOCAL_SRC_FILES := \
 	src/ctrl.c \
@@ -87,6 +90,7 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_EXPORT_LDLIBS += -llog
 
 LOCAL_WHOLE_STATIC_LIBRARIES = libuvc_static
+LOCAL_STATIC_LIBRARIES += libyuv_static
 LOCAL_DISABLE_FATAL_LINKER_WARNINGS := true
 
 LOCAL_MODULE := uvc
