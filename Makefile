@@ -1,6 +1,9 @@
 .PHONY: build build-release test lint clean clean-build clear-config-cache generate-android-build-info generate-android-build-info-manual
 
 APP_NAME := Consolation
+APP_VERSION ?= $(shell awk -F= '/^consolation\.build\.version=/{print $$2}' build.properties)
+RELEASE_APK_PATH := Consolation/app/build/outputs/apk/release
+RELEASE_BUNDLE_PATH := Consolation/app/build/outputs/bundle/release
 BUNDLE_ID ?= org.centennialoss.consolation
 APPICON_BG := assets/app-icon-background-large.png
 APPICON_TRANSPARENT_SRC := assets/app-icon-large-transparent.png
@@ -24,9 +27,11 @@ build: test
 
 build-release: test
 	cd Consolation && ./gradlew :app:assembleRelease
+	mv "$(RELEASE_APK_PATH)/app-release.apk" "$(RELEASE_APK_PATH)/$(APP_NAME)-$(APP_VERSION)-android.apk"
 
 bundle-release: test build-release
 	cd Consolation && ./gradlew :app:bundleRelease
+	mv "$(RELEASE_BUNDLE_PATH)/app-release.aab" "$(RELEASE_BUNDLE_PATH)/$(APP_NAME)-$(APP_VERSION)-android.aab"
 
 test: lint
 	cd Consolation && ./gradlew :app:testDebugUnitTest
