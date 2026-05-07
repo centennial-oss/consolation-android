@@ -31,8 +31,8 @@ Any capture device that appears to the Android OS as a USB Video Class (UVC) cap
 Consolation has been tested by the developers on a Samsung Galaxy S8 Ultra (SM-X900) with these capture devices:
 
 - Elgato HD60 X - 👌 🚀
-- Acer USB 3.0 Video Capture Card (model OCB5B0) - 👍
-- WANKEDA 4K Capture Card 1080p 60FPS for Streaming (1da603d4) - 👍
+- Acer USB 3.0 Video Capture Card (model OCB5B0) - 👌 🚀
+- WANKEDA 4K Capture Card 1080p 60FPS for Streaming (1da603d4) - 👌 🚀
 - UGREEN Full HD 1080p Capture Card (model 40189) -  ⚠️ max 30p @ 1920x1080
 
 ## Requirements
