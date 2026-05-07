@@ -158,6 +158,7 @@ uvc_error_t uvc_duplicate_frame(uvc_frame_t *in, uvc_frame_t *out) {
 		out->step = in->step;
 	out->sequence = in->sequence;
 	out->capture_time = in->capture_time;
+	out->arrival_monotonic_ns = in->arrival_monotonic_ns;
 	out->source = in->source;
 	out->actual_bytes = copy_bytes;
 

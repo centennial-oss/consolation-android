@@ -272,6 +272,7 @@ struct uvc_stream_handle {
   uint32_t seq, hold_seq;
   uint32_t pts, hold_pts;
   uint32_t last_scr, hold_last_scr;
+  uint64_t frame_start_monotonic_ns, hold_start_monotonic_ns;
   size_t got_bytes, hold_bytes;
   size_t size_buf;	// XXX add for boundary check
   uint8_t *outbuf, *holdbuf;
@@ -352,4 +353,3 @@ uvc_error_t uvc_release_if(uvc_device_handle_t *devh, int idx);
 
 #endif // !def(LIBUVC_INTERNAL_H)
 /** @endcond */
-

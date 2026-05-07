@@ -90,6 +90,12 @@ private:
 	Fields_iframecallback iframecallback_fields;
 	int mPixelFormat;
 	size_t callbackPixelBytes;
+	jobject mPreviewFrameCallbackObj;
+	Fields_iframecallback preview_iframecallback_fields;
+	int mPreviewPixelFormat;
+	size_t previewCallbackPixelBytes;
+	volatile bool preview_frame_callback_enabled;
+	volatile bool capture_frame_callback_enabled;
 	pthread_mutex_t processing_stats_mutex;
 	uint64_t processingPreviewConvertCount;
 	uint64_t processingPreviewConvertTotalNs;
@@ -100,15 +106,23 @@ private:
 	uint64_t processingCopyCount;
 	uint64_t processingCopyTotalNs;
 	uint64_t processingCopyMaxNs;
+	uint64_t processingEndToEndLatencyCount;
+	uint64_t processingEndToEndLatencyTotalNs;
+	uint64_t processingEndToEndLatencyMaxNs;
 	uint64_t processingPayloadCount;
 	uint64_t processingPayloadTotalBytes;
 	uint64_t processingPayloadMaxBytes;
+	uint64_t processingPreviewQueueDropCount;
+	uint64_t processingPreviewQueueDepthSampleCount;
+	uint64_t processingPreviewQueueDepthTotalMilli;
 	volatile uint64_t streamingStartMonotonicNs;
 	volatile bool firstFrameLogged;
 // improve performance by reducing memory allocation
 	pthread_mutex_t pool_mutex;
 	ObjectArray<uvc_frame_t *> mFramePool;
+	ObjectArray<uvc_frame_t *> mNotificationFramePool;
 	uvc_frame_t *get_frame(size_t data_bytes);
+	uvc_frame_t *get_notification_frame();
 	void recycle_frame(uvc_frame_t *frame);
 	void init_pool(size_t data_bytes);
 	void clear_pool();
@@ -117,7 +131,7 @@ private:
 	static void uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args);
 	uvc_frame_t *convertPreviewFrameToRgbx(uvc_frame_t *frame);
 	bool renderFrameDirectToSurface(uvc_frame_t *frame, ANativeWindow **window,
-		pthread_mutex_t *window_mutex);
+		pthread_mutex_t *window_mutex, uint64_t *before_post_ns = NULL);
 	uvc_frame_t *createFrameNotification(uvc_frame_t *frame);
 	void addPreviewFrame(uvc_frame_t *frame);
 	uvc_frame_t *waitPreviewFrame();
@@ -136,11 +150,16 @@ private:
 	void do_capture_idle_loop(JNIEnv *env);
 	void do_capture_callback(JNIEnv *env, uvc_frame_t *frame,
 		bool fused_rgbx = false, uvc_frame_t *rgbx_ready = NULL);
+	void do_preview_frame_callback(JNIEnv *env, uvc_frame_t *frame);
 	void callbackPixelFormatChanged();
+	bool hasCaptureConsumers() const;
+	bool hasPreviewFrameCallback() const;
 	void recordPreviewConversionTiming(uint64_t duration_ns);
 	void recordCallbackConversionTiming(uint64_t duration_ns);
 	void recordSurfaceCopyTiming(uint64_t duration_ns);
+	void recordEndToEndLatencyTiming(uint64_t start_ns, uint64_t end_ns);
 	void recordPayloadBytes(size_t bytes);
+	void recordPreviewQueueDepthSample(uint64_t depth_frames);
 public:
 	UVCPreview(uvc_device_handle_t *devh);
 	~UVCPreview();
@@ -148,12 +167,13 @@ public:
 	inline const bool isRunning() const;
 	int setPreviewSize(int width, int height, int min_fps, int max_fps, int mode, float bandwidth = 1.0f);
 	int setPreviewDisplay(ANativeWindow *preview_window);
+	int setPreviewFrameCallback(JNIEnv *env, jobject frame_callback_obj, int pixel_format);
 	int setFrameCallback(JNIEnv *env, jobject frame_callback_obj, int pixel_format);
 	int startPreview();
 	int stopPreview();
 	inline const bool isCapturing() const;
 	int setCaptureDisplay(ANativeWindow *capture_window);
-	void getAndResetProcessingStats(uint64_t stats[12]);
+	void getAndResetProcessingStats(uint64_t stats[14]);
 };
 
 #endif /* UVCPREVIEW_H_ */

@@ -490,6 +490,19 @@ public class UVCCamera {
     	}
     }
 
+	/**
+	 * Set a callback that is part of preview delivery, not capture delivery.
+	 *
+	 * H.264 preview delivers encoded frames through this callback. Other preview formats may
+	 * deliver lightweight rendered-frame notifications so apps can count frames without entering
+	 * the capture path.
+	 */
+	public void setPreviewFrameCallback(final IFrameCallback callback, final int pixelFormat) {
+		if (mNativePtr != 0) {
+			nativeSetPreviewFrameCallback(mNativePtr, callback, pixelFormat);
+		}
+	}
+
 	public long[] getAndResetProcessingStats() {
 		if (mNativePtr != 0) {
 			final long[] stats = nativeGetAndResetProcessingStats(mNativePtr);
@@ -497,7 +510,7 @@ public class UVCCamera {
 				return stats;
 			}
 		}
-		return new long[12];
+		return new long[14];
 	}
 
     /**
@@ -513,6 +526,7 @@ public class UVCCamera {
      * stop preview
      */
     public synchronized void stopPreview() {
+    	setPreviewFrameCallback(null, 0);
     	setFrameCallback(null, 0);
     	if (mCtrlBlock != null) {
     		nativeStopPreview(mNativePtr);
@@ -1135,6 +1149,7 @@ public class UVCCamera {
     private static final native int nativeStartPreview(final long id_camera);
     private static final native int nativeStopPreview(final long id_camera);
     private static final native int nativeSetPreviewDisplay(final long id_camera, final Surface surface);
+    private static final native int nativeSetPreviewFrameCallback(final long mNativePtr, final IFrameCallback callback, final int pixelFormat);
     private static final native int nativeSetFrameCallback(final long mNativePtr, final IFrameCallback callback, final int pixelFormat);
 	private static final native long[] nativeGetAndResetProcessingStats(final long mNativePtr);
 

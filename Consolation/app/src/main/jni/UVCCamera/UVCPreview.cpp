@@ -136,6 +136,11 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	mFrameCallbackObj(NULL),
 	mFrameCallbackFunc(NULL),
 	callbackPixelBytes(2),
+	mPreviewFrameCallbackObj(NULL),
+	mPreviewPixelFormat(PIXEL_FORMAT_RAW),
+	previewCallbackPixelBytes(1),
+	preview_frame_callback_enabled(false),
+	capture_frame_callback_enabled(false),
 	processingPreviewConvertCount(0),
 	processingPreviewConvertTotalNs(0),
 	processingPreviewConvertMaxNs(0),
@@ -145,9 +150,15 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	processingCopyCount(0),
 	processingCopyTotalNs(0),
 	processingCopyMaxNs(0),
+	processingEndToEndLatencyCount(0),
+	processingEndToEndLatencyTotalNs(0),
+	processingEndToEndLatencyMaxNs(0),
 	processingPayloadCount(0),
 	processingPayloadTotalBytes(0),
 	processingPayloadMaxBytes(0),
+	processingPreviewQueueDropCount(0),
+	processingPreviewQueueDepthSampleCount(0),
+	processingPreviewQueueDepthTotalMilli(0),
 	streamingStartMonotonicNs(0),
 	firstFrameLogged(false) {
 
@@ -160,6 +171,8 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	pthread_mutex_init(&processing_stats_mutex, NULL);
 //	
 	pthread_mutex_init(&pool_mutex, NULL);
+	iframecallback_fields.onFrame = nullptr;
+	preview_iframecallback_fields.onFrame = nullptr;
 	EXIT();
 }
 
@@ -187,8 +200,13 @@ UVCPreview::~UVCPreview() {
 			mFrameCallbackObj = nullptr;
 			iframecallback_fields.onFrame = nullptr;
 		}
+		if LIKELY(mPreviewFrameCallbackObj) {
+			jni_env->DeleteGlobalRef(mPreviewFrameCallbackObj);
+			mPreviewFrameCallbackObj = nullptr;
+			preview_iframecallback_fields.onFrame = nullptr;
+		}
 		pthread_mutex_unlock(&capture_mutex);
-	} else if UNLIKELY(mFrameCallbackObj)
+	} else if UNLIKELY(mFrameCallbackObj || mPreviewFrameCallbackObj)
 		LOGW("UVCPreview::~UVCPreview: no JNIEnv for GlobalRef cleanup");
 	if (attached_for_cleanup && jvm)
 		jvm->DetachCurrentThread();
@@ -233,7 +251,34 @@ uvc_frame_t *UVCPreview::get_frame(size_t data_bytes) {
 	return frame;
 }
 
+uvc_frame_t *UVCPreview::get_notification_frame() {
+	uvc_frame_t *frame = NULL;
+	pthread_mutex_lock(&pool_mutex);
+	{
+		if (!mNotificationFramePool.isEmpty()) {
+			frame = mNotificationFramePool.last();
+		}
+	}
+	pthread_mutex_unlock(&pool_mutex);
+	if UNLIKELY(!frame) {
+		frame = uvc_allocate_frame(1);
+	}
+	return frame;
+}
+
 void UVCPreview::recycle_frame(uvc_frame_t *frame) {
+	if (UNLIKELY(frame && frame->data_bytes <= 1 && frame->library_owns_data)) {
+		pthread_mutex_lock(&pool_mutex);
+		if (LIKELY(mNotificationFramePool.size() < FRAME_POOL_SZ)) {
+			mNotificationFramePool.put(frame);
+			frame = NULL;
+		}
+		pthread_mutex_unlock(&pool_mutex);
+		if (UNLIKELY(frame)) {
+			uvc_free_frame(frame);
+		}
+		return;
+	}
 	pthread_mutex_lock(&pool_mutex);
 	if (LIKELY(mFramePool.size() < FRAME_POOL_SZ)) {
 		mFramePool.put(frame);
@@ -271,6 +316,11 @@ void UVCPreview::clear_pool() {
 			uvc_free_frame(mFramePool[i]);
 		}
 		mFramePool.clear();
+		const int notification_n = mNotificationFramePool.size();
+		for (int i = 0; i < notification_n; i++) {
+			uvc_free_frame(mNotificationFramePool[i]);
+		}
+		mNotificationFramePool.clear();
 	}
 	pthread_mutex_unlock(&pool_mutex);
 	EXIT();
@@ -305,6 +355,18 @@ void UVCPreview::recordSurfaceCopyTiming(uint64_t duration_ns) {
 	pthread_mutex_unlock(&processing_stats_mutex);
 }
 
+void UVCPreview::recordEndToEndLatencyTiming(uint64_t start_ns, uint64_t end_ns) {
+	if (!start_ns || end_ns <= start_ns)
+		return;
+	const uint64_t duration_ns = end_ns - start_ns;
+	pthread_mutex_lock(&processing_stats_mutex);
+	processingEndToEndLatencyCount++;
+	processingEndToEndLatencyTotalNs += duration_ns;
+	if (duration_ns > processingEndToEndLatencyMaxNs)
+		processingEndToEndLatencyMaxNs = duration_ns;
+	pthread_mutex_unlock(&processing_stats_mutex);
+}
+
 void UVCPreview::recordPayloadBytes(size_t bytes) {
 	pthread_mutex_lock(&processing_stats_mutex);
 	processingPayloadCount++;
@@ -314,11 +376,18 @@ void UVCPreview::recordPayloadBytes(size_t bytes) {
 	pthread_mutex_unlock(&processing_stats_mutex);
 }
 
-void UVCPreview::getAndResetProcessingStats(uint64_t stats[12]) {
+void UVCPreview::recordPreviewQueueDepthSample(uint64_t depth_frames) {
+	pthread_mutex_lock(&processing_stats_mutex);
+	processingPreviewQueueDepthSampleCount++;
+	processingPreviewQueueDepthTotalMilli += depth_frames * 1000ULL;
+	pthread_mutex_unlock(&processing_stats_mutex);
+}
+
+void UVCPreview::getAndResetProcessingStats(uint64_t stats[14]) {
 	pthread_mutex_lock(&processing_stats_mutex);
 	stats[0] = processingPreviewConvertCount;
-	stats[1] = processingPreviewConvertCount
-		? processingPreviewConvertTotalNs / processingPreviewConvertCount : 0;
+	stats[1] = processingEndToEndLatencyCount
+		? processingEndToEndLatencyTotalNs / processingEndToEndLatencyCount : 0;
 	stats[2] = processingPreviewConvertMaxNs;
 	stats[3] = processingCallbackConvertCount;
 	stats[4] = processingCallbackConvertCount
@@ -332,6 +401,9 @@ void UVCPreview::getAndResetProcessingStats(uint64_t stats[12]) {
 	stats[10] = processingPayloadCount
 		? processingPayloadTotalBytes / processingPayloadCount : 0;
 	stats[11] = processingPayloadMaxBytes;
+	stats[12] = processingPreviewQueueDropCount;
+	stats[13] = processingPreviewQueueDepthSampleCount
+		? processingPreviewQueueDepthTotalMilli / processingPreviewQueueDepthSampleCount : 0;
 	processingPreviewConvertCount = 0;
 	processingPreviewConvertTotalNs = 0;
 	processingPreviewConvertMaxNs = 0;
@@ -341,9 +413,15 @@ void UVCPreview::getAndResetProcessingStats(uint64_t stats[12]) {
 	processingCopyCount = 0;
 	processingCopyTotalNs = 0;
 	processingCopyMaxNs = 0;
+	processingEndToEndLatencyCount = 0;
+	processingEndToEndLatencyTotalNs = 0;
+	processingEndToEndLatencyMaxNs = 0;
 	processingPayloadCount = 0;
 	processingPayloadTotalBytes = 0;
 	processingPayloadMaxBytes = 0;
+	processingPreviewQueueDropCount = 0;
+	processingPreviewQueueDepthSampleCount = 0;
+	processingPreviewQueueDepthTotalMilli = 0;
 	pthread_mutex_unlock(&processing_stats_mutex);
 }
 
@@ -428,6 +506,53 @@ int UVCPreview::setFrameCallback(JNIEnv *env, jobject frame_callback_obj, int pi
 			mPixelFormat = pixel_format;
 			callbackPixelFormatChanged();
 		}
+		capture_frame_callback_enabled = mFrameCallbackObj != NULL;
+	}
+	pthread_mutex_unlock(&capture_mutex);
+	RETURN(0, int);
+}
+
+int UVCPreview::setPreviewFrameCallback(JNIEnv *env, jobject frame_callback_obj, int pixel_format) {
+	ENTER();
+	pthread_mutex_lock(&capture_mutex);
+	{
+		if (!env->IsSameObject(mPreviewFrameCallbackObj, frame_callback_obj)) {
+			preview_iframecallback_fields.onFrame = NULL;
+			if (mPreviewFrameCallbackObj) {
+				env->DeleteGlobalRef(mPreviewFrameCallbackObj);
+			}
+			mPreviewFrameCallbackObj = frame_callback_obj;
+			if (frame_callback_obj) {
+				preview_iframecallback_fields.onFrame =
+					consolation_resolve_iframe_on_frame_mid(env, frame_callback_obj);
+				env->ExceptionClear();
+				if (!preview_iframecallback_fields.onFrame) {
+					LOGE("Can't find preview IFrameCallback#onFrame");
+					env->DeleteGlobalRef(frame_callback_obj);
+					mPreviewFrameCallbackObj = frame_callback_obj = NULL;
+				}
+			}
+		}
+		mPreviewPixelFormat = pixel_format;
+		const size_t sz = requestWidth * requestHeight;
+		switch (mPreviewPixelFormat) {
+		case PIXEL_FORMAT_RGBX:
+			previewCallbackPixelBytes = sz * 4;
+			break;
+		case PIXEL_FORMAT_YUV20SP:
+		case PIXEL_FORMAT_NV21:
+			previewCallbackPixelBytes = (sz * 3) / 2;
+			break;
+		case PIXEL_FORMAT_RAW:
+			previewCallbackPixelBytes = 0;
+			break;
+		case PIXEL_FORMAT_YUV:
+		case PIXEL_FORMAT_RGB565:
+		default:
+			previewCallbackPixelBytes = sz * 2;
+			break;
+		}
+		preview_frame_callback_enabled = mPreviewFrameCallbackObj != NULL;
 	}
 	pthread_mutex_unlock(&capture_mutex);
 	RETURN(0, int);
@@ -466,6 +591,14 @@ void UVCPreview::callbackPixelFormatChanged() {
 		callbackPixelBytes = (sz * 3) / 2;
 		break;
 	}
+}
+
+bool UVCPreview::hasCaptureConsumers() const {
+	return capture_thread_joinable || capture_frame_callback_enabled;
+}
+
+bool UVCPreview::hasPreviewFrameCallback() const {
+	return preview_frame_callback_enabled;
 }
 
 void UVCPreview::clearDisplay() {
@@ -540,7 +673,8 @@ int UVCPreview::stopPreview() {
 	if (LIKELY(b)) {
 		mIsRunning = false;
 		pthread_cond_signal(&preview_sync);
-		pthread_cond_signal(&capture_sync);
+		if (capture_thread_joinable)
+			pthread_cond_signal(&capture_sync);
 		if (capture_thread_joinable) {
 			if (pthread_join(capture_thread, NULL) != EXIT_SUCCESS) {
 				LOGW("UVCPreview::terminate capture thread: pthread_join failed");
@@ -572,6 +706,8 @@ int UVCPreview::stopPreview() {
 //**********************************************************************
 //
 //**********************************************************************
+int copyToSurface(uvc_frame_t *frame, ANativeWindow **window, uint64_t *after_post_ns);
+
 void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args) {
 	UVCPreview *preview = reinterpret_cast<UVCPreview *>(vptr_args);
 	if UNLIKELY(!preview->isRunning() || !frame || !frame->frame_format || !frame->data || !frame->data_bytes) return;
@@ -603,17 +739,40 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 		preview->recordPayloadBytes(frame->actual_bytes);
 
 		if (preview->frameMode != REQUEST_MODE_H264) {
-			const bool preview_rendered = preview->renderFrameDirectToSurface(frame,
-				&preview->mPreviewWindow, &preview->preview_mutex);
-			bool capture_window_present = false;
-			pthread_mutex_lock(&preview->capture_mutex);
-			capture_window_present = preview->mCaptureWindow != NULL;
-			pthread_mutex_unlock(&preview->capture_mutex);
-			const bool capture_rendered = !capture_window_present ||
-				preview->renderFrameDirectToSurface(frame, &preview->mCaptureWindow,
-					&preview->capture_mutex);
+			const bool has_preview_callback = preview->hasPreviewFrameCallback();
+			const bool has_capture_consumers = preview->hasCaptureConsumers();
+			uint64_t preview_post_ns = 0;
+			bool preview_rendered = false;
 
-			if (preview_rendered && capture_rendered) {
+			if (UNLIKELY(preview->capture_thread_joinable)) {
+				uvc_frame_t *rgbx = preview->convertPreviewFrameToRgbx(frame);
+				if (LIKELY(rgbx)) {
+					pthread_mutex_lock(&preview->preview_mutex);
+					const uint64_t t_copy = processing_now_ns();
+					if (copyToSurface(rgbx, &preview->mPreviewWindow, &preview_post_ns) == 0) {
+						const uint64_t t_end = preview_post_ns ? preview_post_ns : processing_now_ns();
+						preview->recordSurfaceCopyTiming(t_end - t_copy);
+						preview->recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, t_end);
+					}
+					pthread_mutex_unlock(&preview->preview_mutex);
+
+					if (preview->capture_thread_joinable) {
+						preview->addCaptureFrame(rgbx);
+					} else {
+						preview->addPreviewFrame(rgbx);
+					}
+					return;
+				}
+			}
+
+			preview_rendered = preview->renderFrameDirectToSurface(frame,
+				&preview->mPreviewWindow, &preview->preview_mutex, &preview_post_ns);
+			if (preview_rendered && preview_post_ns)
+				preview->recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, preview_post_ns);
+
+			if (preview_rendered) {
+				if (!has_preview_callback && !has_capture_consumers)
+					return;
 				uvc_frame_t *notification = preview->createFrameNotification(frame);
 				if (LIKELY(notification)) {
 					preview->addPreviewFrame(notification);
@@ -626,6 +785,9 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 				preview->addPreviewFrame(rgbx);
 			return;
 		}
+
+		if (!preview->hasPreviewFrameCallback() && !preview->hasCaptureConsumers())
+			return;
 
 		uvc_frame_t *copy = preview->get_frame(frame->actual_bytes);
 		if (UNLIKELY(!copy)) {
@@ -644,7 +806,7 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 }
 
 uvc_frame_t *UVCPreview::createFrameNotification(uvc_frame_t *frame) {
-	uvc_frame_t *notification = get_frame(1);
+	uvc_frame_t *notification = get_notification_frame();
 	if (UNLIKELY(!notification))
 		return NULL;
 
@@ -654,13 +816,15 @@ uvc_frame_t *UVCPreview::createFrameNotification(uvc_frame_t *frame) {
 	notification->step = 0;
 	notification->sequence = frame->sequence;
 	notification->capture_time = frame->capture_time;
+	notification->arrival_monotonic_ns = frame->arrival_monotonic_ns;
 	notification->source = frame->source;
 	notification->actual_bytes = notification->data ? 1 : 0;
 	return notification;
 }
 
 bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
-	ANativeWindow **window, pthread_mutex_t *window_mutex) {
+	ANativeWindow **window, pthread_mutex_t *window_mutex,
+	uint64_t *after_post_ns) {
 	bool rendered = false;
 
 	pthread_mutex_lock(window_mutex);
@@ -690,6 +854,8 @@ bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
 				rendered = result == UVC_SUCCESS;
 			}
 			ANativeWindow_unlockAndPost(target);
+			if (rendered && after_post_ns)
+				*after_post_ns = processing_now_ns();
 		}
 	}
 	pthread_mutex_unlock(window_mutex);
@@ -725,6 +891,7 @@ uvc_frame_t *UVCPreview::convertPreviewFrameToRgbx(uvc_frame_t *frame) {
 		recycle_frame(rgbx);
 		return NULL;
 	}
+	rgbx->arrival_monotonic_ns = frame->arrival_monotonic_ns;
 	return rgbx;
 }
 
@@ -733,8 +900,12 @@ void UVCPreview::addPreviewFrame(uvc_frame_t *frame) {
 	pthread_mutex_lock(&preview_mutex);
 	if (isRunning()) {
 		uvc_frame_t *drop = preview_frame_ring.enqueue_drop_oldest_if_full(frame);
-		if UNLIKELY(drop)
+		if UNLIKELY(drop) {
+			pthread_mutex_lock(&processing_stats_mutex);
+			processingPreviewQueueDropCount++;
+			pthread_mutex_unlock(&processing_stats_mutex);
 			recycle_frame(drop);
+		}
 		frame = nullptr;
 		pthread_cond_signal(&preview_sync);
 	}
@@ -749,8 +920,10 @@ uvc_frame_t *UVCPreview::waitPreviewFrame() {
 	{
 		while (isRunning() && preview_frame_ring.empty())
 			pthread_cond_wait(&preview_sync, &preview_mutex);
-		if (LIKELY(isRunning() && !preview_frame_ring.empty()))
+		if (LIKELY(isRunning() && !preview_frame_ring.empty())) {
 			frame = preview_frame_ring.dequeue();
+			recordPreviewQueueDepthSample(static_cast<uint64_t>(preview_frame_ring.size()));
+		}
 	}
 	pthread_mutex_unlock(&preview_mutex);
 	return frame;
@@ -837,6 +1010,20 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 	ENTER();
 
 	uvc_frame_t *frame = NULL;
+	JavaVM *vm = getVM();
+	JNIEnv *env = nullptr;
+	bool preview_thread_attached = false;
+	if (vm) {
+		const jint gotEnv = vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+		if (gotEnv == JNI_EDETACHED) {
+			if (vm->AttachCurrentThread(&env, NULL) == 0)
+				preview_thread_attached = true;
+			else
+				env = nullptr;
+		} else if (gotEnv != JNI_OK) {
+			env = nullptr;
+		}
+	}
 	const uint64_t t_start_streaming = processing_now_ns();
 	uvc_error_t result = uvc_start_streaming_bandwidth(
 		mDeviceHandle, ctrl, uvc_preview_frame_callback, (void *)this, requestBandwidth, 0);
@@ -848,11 +1035,6 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 		streamingStartMonotonicNs = processing_now_ns();
 		firstFrameLogged = false;
 		clearPreviewFrame();
-		if (pthread_create(&capture_thread, NULL, capture_thread_func, (void *)this) != 0)
-			LOGW("UVCPreview::do_preview pthread_create capture_thread failed");
-		else
-			capture_thread_joinable = true;
-
 #if LOCAL_DEBUG
 		LOGI("Streaming...");
 #endif
@@ -860,8 +1042,19 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame = waitPreviewFrame();
 				if (LIKELY(frame)) {
-					addCaptureFrame(frame);
-					frame = NULL;
+					if (preview_frame_callback_enabled && env) {
+						do_preview_frame_callback(env, frame);
+						frame = NULL;
+					} else if (capture_thread_joinable) {
+						addCaptureFrame(frame);
+						frame = NULL;
+					} else if (capture_frame_callback_enabled && env) {
+						do_capture_callback(env, frame);
+						frame = NULL;
+					} else {
+						recycle_frame(frame);
+						frame = NULL;
+					}
 				}
 			}
 		} else {
@@ -870,14 +1063,39 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 			for ( ; LIKELY(isRunning()) ; ) {
 				frame = waitPreviewFrame();
 				if (LIKELY(frame)) {
+					if (frame->frame_format == UVC_FRAME_FORMAT_UNKNOWN) {
+						if (preview_frame_callback_enabled && env) {
+							do_preview_frame_callback(env, frame);
+							frame = NULL;
+						} else if (capture_thread_joinable) {
+							addCaptureFrame(frame);
+							frame = NULL;
+						} else if (capture_frame_callback_enabled && env) {
+							do_capture_callback(env, frame);
+							frame = NULL;
+						} else {
+							recycle_frame(frame);
+							frame = NULL;
+						}
+						continue;
+					}
 					if (frame->frame_format != UVC_FRAME_FORMAT_UNKNOWN)
 						frame = draw_preview_one(frame, &mPreviewWindow, nullptr,
 							PREVIEW_PIXEL_BYTES);
-					addCaptureFrame(frame);
+					if (capture_thread_joinable) {
+						addCaptureFrame(frame);
+					} else if (capture_frame_callback_enabled && env) {
+						do_capture_callback(env, frame);
+					} else if (preview_frame_callback_enabled && env) {
+						do_preview_frame_callback(env, frame);
+					} else if (frame) {
+						recycle_frame(frame);
+					}
 				}
 			}
 		}
-		pthread_cond_signal(&capture_sync);
+		if (capture_thread_joinable)
+			pthread_cond_signal(&capture_sync);
 #if LOCAL_DEBUG
 		LOGI("preview_thread_func:wait for all callbacks complete");
 #endif
@@ -889,6 +1107,8 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 	} else {
 		uvc_perror(result, "failed start_streaming");
 	}
+	if (preview_thread_attached && vm)
+		vm->DetachCurrentThread();
 
 	EXIT();
 }
@@ -905,7 +1125,8 @@ static void copyFrame(const uint8_t *src, uint8_t *dest, const int row_bytes,
 
 
 // transfer specific frame data to the Surface(ANativeWindow)
-int copyToSurface(uvc_frame_t *frame, ANativeWindow **window) {
+int copyToSurface(uvc_frame_t *frame, ANativeWindow **window,
+	uint64_t *after_post_ns = NULL) {
 	// ENTER();
 	int result = 0;
 	if (LIKELY(*window)) {
@@ -929,6 +1150,8 @@ int copyToSurface(uvc_frame_t *frame, ANativeWindow **window) {
 				std::min((int) frame->height, buffer.height);
 			copyFrame(src, dest, w, transfer_h, src_step, dest_step);
 			ANativeWindow_unlockAndPost(*window);
+			if (after_post_ns)
+				*after_post_ns = processing_now_ns();
 		} else {
 			result = -1;
 		}
@@ -959,8 +1182,12 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 				if (!b) {
 					pthread_mutex_lock(&preview_mutex);
 					const uint64_t t_copy = processing_now_ns();
-					copyToSurface(converted, window);
-					recordSurfaceCopyTiming(processing_now_ns() - t_copy);
+					uint64_t after_post_ns = 0;
+					if (copyToSurface(converted, window, &after_post_ns) == 0) {
+						const uint64_t t_end = after_post_ns ? after_post_ns : processing_now_ns();
+						recordSurfaceCopyTiming(t_end - t_copy);
+						recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, t_end);
+					}
 					pthread_mutex_unlock(&preview_mutex);
 				} else {
 					LOGE("failed converting");
@@ -970,8 +1197,12 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 		} else {
 			pthread_mutex_lock(&preview_mutex);
 			const uint64_t t_copy = processing_now_ns();
-			copyToSurface(frame, window);
-			recordSurfaceCopyTiming(processing_now_ns() - t_copy);
+			uint64_t after_post_ns = 0;
+			if (copyToSurface(frame, window, &after_post_ns) == 0) {
+				const uint64_t t_end = after_post_ns ? after_post_ns : processing_now_ns();
+				recordSurfaceCopyTiming(t_end - t_copy);
+				recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, t_end);
+			}
 			pthread_mutex_unlock(&preview_mutex);
 		}
 	}
@@ -1014,6 +1245,13 @@ int UVCPreview::setCaptureDisplay(ANativeWindow *capture_window) {
 					ANativeWindow_release(mCaptureWindow);
 					mCaptureWindow = NULL;
 				}
+			}
+		}
+		if (mCaptureWindow && isRunning() && !capture_thread_joinable) {
+			if (pthread_create(&capture_thread, NULL, capture_thread_func, (void *)this) != 0) {
+				LOGW("UVCPreview::setCaptureDisplay pthread_create capture_thread failed");
+			} else {
+				capture_thread_joinable = true;
 			}
 		}
 	}
@@ -1188,6 +1426,59 @@ void UVCPreview::do_capture_surface(JNIEnv *env) {
 		mCaptureWindow = NULL;
 	}
 
+	EXIT();
+}
+
+/**
+ * call preview-frame callback if one is registered. This is intentionally separate from
+ * capture callbacks so preview-only apps can observe frames without enabling capture work.
+ */
+void UVCPreview::do_preview_frame_callback(JNIEnv *env, uvc_frame_t *frame) {
+	ENTER();
+
+	if UNLIKELY(!frame) {
+		EXIT();
+		return;
+	}
+
+	jobject local_cb_obj = nullptr;
+	jmethodID on_frame_mid = nullptr;
+	size_t callback_bytes = 0;
+
+	pthread_mutex_lock(&capture_mutex);
+	if LIKELY(mPreviewFrameCallbackObj) {
+		local_cb_obj = env->NewLocalRef(mPreviewFrameCallbackObj);
+		on_frame_mid = preview_iframecallback_fields.onFrame;
+		callback_bytes = previewCallbackPixelBytes;
+	}
+	pthread_mutex_unlock(&capture_mutex);
+
+	if UNLIKELY(env->ExceptionCheck()) {
+		env->ExceptionClear();
+		recycle_frame(frame);
+		if (local_cb_obj)
+			env->DeleteLocalRef(local_cb_obj);
+		EXIT();
+		return;
+	}
+
+	if UNLIKELY(local_cb_obj == nullptr || on_frame_mid == nullptr) {
+		recycle_frame(frame);
+		if (local_cb_obj)
+			env->DeleteLocalRef(local_cb_obj);
+		EXIT();
+		return;
+	}
+
+	const size_t frame_bytes = frame->actual_bytes > 0 ? frame->actual_bytes : frame->data_bytes;
+	const size_t direct_bytes = callback_bytes > 0
+		? std::min(callback_bytes, frame_bytes) : frame_bytes;
+	jobject buf = env->NewDirectByteBuffer(frame->data, direct_bytes);
+	env->CallVoidMethod(local_cb_obj, on_frame_mid, buf);
+	env->ExceptionClear();
+	env->DeleteLocalRef(buf);
+	env->DeleteLocalRef(local_cb_obj);
+	recycle_frame(frame);
 	EXIT();
 }
 
