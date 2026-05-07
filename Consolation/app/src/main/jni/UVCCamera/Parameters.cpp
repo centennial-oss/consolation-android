@@ -443,10 +443,12 @@ char *UVCDiags::getSupportedSize(const uvc_device_handle_t *deviceHandle) {
 			{
 				char guid[33];
 				guidToHex(fmt_desc->guidFormat, guid);
+#ifndef APP_NATIVE_LOG_SILENT
 				__android_log_print(ANDROID_LOG_INFO, CONSOL_UVC_NATIVE_TAG,
 					"getSupportedSize: stream_if=%d format subtype=0x%02x formatIndex=%u frameFormat=%d guid=%s",
 					stream_idx, fmt_desc->bDescriptorSubtype, fmt_desc->bFormatIndex,
 					previewModeForGuid(fmt_desc->guidFormat), guid);
+#endif
 			}
 		}
 	}
@@ -469,9 +471,11 @@ char *UVCDiags::getSupportedSize(const uvc_device_handle_t *deviceHandle) {
 						continue;
 					}
 					if (!fmt_desc->frame_descs) {
+#ifndef APP_NATIVE_LOG_SILENT
 						__android_log_print(ANDROID_LOG_WARN, CONSOL_UVC_NATIVE_TAG,
 							"getSupportedSize: skip formatIndex=%u subtype=0x%02x (no frame_descs)",
 							fmt_desc->bFormatIndex, st);
+#endif
 						continue;
 					}
 

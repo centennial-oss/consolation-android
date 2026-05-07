@@ -35,6 +35,7 @@ interface UsbVideoPreviewBackend : PreviewRenderer {
      */
     fun consumeLastProbeOpenFailed(): Boolean = false
     fun setPreviewSize(width: Int, height: Int, fps: Int)
+    fun setPreferredPixelFormat(frameFormat: Int?) = Unit
 
     /**
      * Linear gain 0f–1f for USB capture audio played through [UsbCaptureAudioLoop].

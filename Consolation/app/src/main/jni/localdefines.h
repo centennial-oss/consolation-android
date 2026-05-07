@@ -49,7 +49,13 @@
 #define THREAD_PRIORITY_AUDIO			-16
 #define THREAD_PRIORITY_URGENT_AUDIO	-19
 
-#define USE_LOGALL	// If you don't need to all LOG, comment out this line and select follows
+/*
+ * Gradle `assembleRelease` adds APP_CPPFLAGS+=-DAPP_NATIVE_LOG_SILENT
+ * (Consolation/app/build.gradle.kts). Omitted USE_LOG* → utilbase.h makes LOGx no-ops.
+ */
+#ifdef APP_NATIVE_LOG_SILENT
+#elif 1
+#define USE_LOGALL	/* If you don't need all LOG, comment out USE_LOGALL and select individual levels */
 //#define USE_LOGV
 //#define USE_LOGD
 #define USE_LOGI
@@ -64,6 +70,7 @@
 #ifdef LOG_NDEBUG
 #undef USE_LOGALL
 #endif
+#endif /* !APP_NATIVE_LOG_SILENT */
 
 // Absolute class name of Java object
 // if you change the package name of UVCCamera library, you must fix these

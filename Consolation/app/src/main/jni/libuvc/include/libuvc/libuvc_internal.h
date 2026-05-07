@@ -285,6 +285,21 @@ struct uvc_stream_handle {
   uint8_t *transfer_bufs[LIBUVC_NUM_TRANSFER_BUFS];
   struct uvc_frame frame;
   enum uvc_frame_format frame_format;
+
+  /** Set to 1 once the first bulk/iso payload with real video data has been
+   *  received.  Used to suppress clear_halt on ERR packets that arrive before
+   *  streaming is established — many devices set ERR=1 on their startup header
+   *  to signal "no prior frame was complete", which is not a real stall. */
+  uint8_t first_video_payload_received;
+
+  /** CLOCK_MONOTONIC ns when streaming transfers were submitted (diag); 0 = unset */
+  uint64_t diag_xfer_epoch_ns;
+  uint8_t diag_logged_first_xfer_done;
+  uint8_t diag_logged_first_xfer_issue;
+  uint8_t diag_logged_first_payload;
+  uint8_t diag_logged_first_swap;
+  /** Bulk-only: count TIMEOUT completions before first video payload */
+  uint16_t diag_bulk_timeout_count_before_payload;
 };
 
 /** Handle on an open UVC device

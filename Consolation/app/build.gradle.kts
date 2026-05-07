@@ -107,10 +107,17 @@ android {
             isDebuggable = false
             isJniDebuggable = false
             isProfileable = false
+            /* R8 minify strips AppLog.v/d/i and matching android.util.Log calls (see proguard-rules.pro). */
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            /* utilbase.h: strip LOGx for all JNI modules that include localdefines.h */
+            externalNativeBuild {
+                ndkBuild {
+                    arguments += listOf("APP_CPPFLAGS+=-DAPP_NATIVE_LOG_SILENT")
+                }
+            }
         }
     }
     compileOptions {

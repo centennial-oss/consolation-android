@@ -42,11 +42,19 @@
 #include <linux/time.h>
 #include <unistd.h>
 #include <string.h>
+#include <time.h>
 #include "UVCCamera.h"
 #include "Parameters.h"
 #include "libuvc_internal.h"
 
 #define	LOCAL_DEBUG 0
+
+static uint64_t uvc_diag_now_ns() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
+		static_cast<uint64_t>(ts.tv_nsec);
+}
 
 //**********************************************************************
 //
@@ -136,14 +144,17 @@ void UVCCamera::clearCameraParams() {
  */
 int UVCCamera::connect(int vid, int pid, int fd, int busnum, int devaddr, const char *usbfs) {
 	ENTER();
+	const uint64_t t_connect_start = uvc_diag_now_ns();
 	uvc_error_t result = UVC_ERROR_BUSY;
 	if (!mDeviceHandle && fd) {
 		if (mUsbFs)
 			free(mUsbFs);
 		mUsbFs = strdup(usbfs);
 		if (UNLIKELY(!mContext)) {
+			const uint64_t t_uvc_init = uvc_diag_now_ns();
 			result = uvc_init2(&mContext, NULL, mUsbFs);
-//			libusb_set_debug(mContext->usb_ctx, LIBUSB_LOG_LEVEL_DEBUG);
+			LOGI("startup-diag:uvc_init2 done in %llu ms result=%d",
+				(unsigned long long)((uvc_diag_now_ns() - t_uvc_init) / 1000000ULL), result);
 			if (UNLIKELY(result < 0)) {
 				LOGD("failed to init libuvc");
 				RETURN(result, int);
@@ -153,11 +164,16 @@ int UVCCamera::connect(int vid, int pid, int fd, int busnum, int devaddr, const 
 		clearCameraParams();
 		fd = dup(fd);
 		// 指定したvid,idを持つデバイスを検索, 見つかれば0を返してmDeviceに見つかったデバイスをセットする(既に1回uvc_ref_deviceを呼んである)
-//		result = uvc_find_device2(mContext, &mDevice, vid, pid, NULL, fd);
+		const uint64_t t_get_device = uvc_diag_now_ns();
 		result = uvc_get_device_with_fd(mContext, &mDevice, vid, pid, NULL, fd, busnum, devaddr);
+		LOGI("startup-diag:uvc_get_device_with_fd done in %llu ms result=%d",
+			(unsigned long long)((uvc_diag_now_ns() - t_get_device) / 1000000ULL), result);
 		if (LIKELY(!result)) {
 			// カメラのopen処理
+			const uint64_t t_open = uvc_diag_now_ns();
 			result = uvc_open(mDevice, &mDeviceHandle);
+			LOGI("startup-diag:uvc_open done in %llu ms result=%d",
+				(unsigned long long)((uvc_diag_now_ns() - t_open) / 1000000ULL), result);
 			if (LIKELY(!result)) {
 				// open出来た時
 #if LOCAL_DEBUG
@@ -167,11 +183,12 @@ int UVCCamera::connect(int vid, int pid, int fd, int busnum, int devaddr, const 
 				mStatusCallback = new UVCStatusCallback(mDeviceHandle);
 				mButtonCallback = new UVCButtonCallback(mDeviceHandle);
 				mPreview = new UVCPreview(mDeviceHandle);
+				LOGI("startup-diag:UVCCamera::connect total=%llu ms",
+					(unsigned long long)((uvc_diag_now_ns() - t_connect_start) / 1000000ULL));
 			} else {
 				// open出来なかった時
 				LOGE("could not open camera:err=%d", result);
 				uvc_unref_device(mDevice);
-//				SAFE_DELETE(mDevice);	// 参照カウンタが0ならuvc_unref_deviceでmDeviceがfreeされるから不要 XXX クラッシュ, 既に破棄されているのを再度破棄しようとしたからみたい
 				mDevice = NULL;
 				mDeviceHandle = NULL;
 				close(fd);
@@ -287,7 +304,11 @@ int UVCCamera::startPreview() {
 
 	int result = EXIT_FAILURE;
 	if (mDeviceHandle) {
-		return mPreview->startPreview();
+		const uint64_t t_start = uvc_diag_now_ns();
+		result = mPreview->startPreview();
+		LOGI("startup-diag:UVCCamera::startPreview call returned in %llu ms result=%d",
+			(unsigned long long)((uvc_diag_now_ns() - t_start) / 1000000ULL), result);
+		return result;
 	}
 	RETURN(result, int);
 }
@@ -859,7 +880,6 @@ int UVCCamera::setScanningMode(int mode) {
 	ENTER();
 	int r = UVC_ERROR_ACCESS;
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_SCANNING)) {
-//		LOGI("ae:%d", mode);
 		r = uvc_set_scanning_mode(mDeviceHandle, mode/* & 0xff*/);
 	}
 	RETURN(r, int);
@@ -873,7 +893,6 @@ int UVCCamera::getScanningMode() {
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_SCANNING)) {
 		uint8_t mode;
 		r = uvc_get_scanning_mode(mDeviceHandle, &mode, UVC_GET_CUR);
-//		LOGI("ae:%d", mode);
 		if (LIKELY(!r)) {
 			r = mode;
 		}
@@ -897,7 +916,6 @@ int UVCCamera::setExposureMode(int mode) {
 	ENTER();
 	int r = UVC_ERROR_ACCESS;
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_AE)) {
-//		LOGI("ae:%d", mode);
 		r = uvc_set_ae_mode(mDeviceHandle, mode/* & 0xff*/);
 	}
 	RETURN(r, int);
@@ -911,7 +929,6 @@ int UVCCamera::getExposureMode() {
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_AE)) {
 		uint8_t mode;
 		r = uvc_get_ae_mode(mDeviceHandle, &mode, UVC_GET_CUR);
-//		LOGI("ae:%d", mode);
 		if (LIKELY(!r)) {
 			r = mode;
 		}
@@ -935,7 +952,6 @@ int UVCCamera::setExposurePriority(int priority) {
 	ENTER();
 	int r = UVC_ERROR_ACCESS;
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_AE_PRIORITY)) {
-//		LOGI("ae priority:%d", priority);
 		r = uvc_set_ae_priority(mDeviceHandle, priority/* & 0xff*/);
 	}
 	RETURN(r, int);
@@ -949,7 +965,6 @@ int UVCCamera::getExposurePriority() {
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_AE_PRIORITY)) {
 		uint8_t priority;
 		r = uvc_get_ae_priority(mDeviceHandle, &priority, UVC_GET_CUR);
-//		LOGI("ae priority:%d", priority);
 		if (LIKELY(!r)) {
 			r = priority;
 		}
@@ -973,7 +988,6 @@ int UVCCamera::setExposure(int ae_abs) {
 	ENTER();
 	int r = UVC_ERROR_ACCESS;
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_AE_ABS)) {
-//		LOGI("ae_abs:%d", ae_abs);
 		r = uvc_set_exposure_abs(mDeviceHandle, ae_abs/* & 0xff*/);
 	}
 	RETURN(r, int);
@@ -987,7 +1001,6 @@ int UVCCamera::getExposure() {
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_AE_ABS)) {
 		int ae_abs;
 		r = uvc_get_exposure_abs(mDeviceHandle, &ae_abs, UVC_GET_CUR);
-//		LOGI("ae_abs:%d", ae_abs);
 		if (LIKELY(!r)) {
 			r = ae_abs;
 		}
@@ -1011,7 +1024,6 @@ int UVCCamera::setExposureRel(int ae_rel) {
 	ENTER();
 	int r = UVC_ERROR_ACCESS;
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_AE_REL)) {
-//		LOGI("ae_rel:%d", ae_rel);
 		r = uvc_set_exposure_rel(mDeviceHandle, ae_rel/* & 0xff*/);
 	}
 	RETURN(r, int);
@@ -1025,7 +1037,6 @@ int UVCCamera::getExposureRel() {
 	if LIKELY((mDeviceHandle) && (mCtrlSupports & CTRL_AE_REL)) {
 		int ae_rel;
 		r = uvc_get_exposure_rel(mDeviceHandle, &ae_rel, UVC_GET_CUR);
-//		LOGI("ae_rel:%d", ae_rel);
 		if (LIKELY(!r)) {
 			r = ae_rel;
 		}
@@ -1140,44 +1151,6 @@ int UVCCamera::getFocusRel() {
 	}
 	RETURN(0, int);
 }
-
-//======================================================================
-/*
-// フォーカス(シンプル)調整
-int UVCCamera::updateFocusSimpleLimit(int &min, int &max, int &def) {
-	ENTER();
-	int ret = UVC_ERROR_ACCESS;
-	if (mCtrlSupports & CTRL_FOCUS_SIMPLE) {
-		UPDATE_CTRL_VALUES(mFocusSimple, uvc_get_focus_simple_range);
-	}
-	RETURN(ret, int);
-}
-
-// フォーカス(シンプル)を設定
-int UVCCamera::setFocusSimple(int focus) {
-	ENTER();
-	int ret = UVC_ERROR_ACCESS;
-	if (mCtrlSupports & CTRL_FOCUS_SIMPLE) {
-		ret = internalSetCtrlValue(mFocusSimple, focus, uvc_get_focus_simple_range, uvc_set_focus_simple_range);
-	}
-	RETURN(ret, int);
-}
-
-// フォーカス(シンプル)の現在値を取得
-int UVCCamera::getFocusSimple() {
-	ENTER();
-	if (mCtrlSupports & CTRL_FOCUS_SIMPLE) {
-		int ret = update_ctrl_values(mDeviceHandle, mFocusSimple, uvc_get_focus_abs);
-		if (LIKELY(!ret)) {	// 正常に最小・最大値を取得出来た時
-			uint8_t value;
-			ret = uvc_get_focus_simple_range(mDeviceHandle, &value, UVC_GET_CUR);
-			if (LIKELY(!ret))
-				return value;
-		}
-	}
-	RETURN(0, int);
-}
-*/
 
 //======================================================================
 // 絞り(絶対値)調整
@@ -1483,54 +1456,6 @@ int UVCCamera::getPrivacy() {
 }
 
 //======================================================================
-/*
-// DigitalWindow
-int UVCCamera::updateDigitalWindowLimit(...not defined...) {
-	ENTER();
-	// FIXME not implemented yet
-	RETURN(UVC_ERROR_ACCESS, int);
-}
-
-// DigitalWindowを設定
-int UVCCamera::setDigitalWindow(int top, int reft, int bottom, int right) {
-	ENTER();
-	// FIXME not implemented yet
-	RETURN(UVC_ERROR_ACCESS, int);
-}
-
-// DigitalWindowの現在値を取得
-int UVCCamera::getDigitalWindow(int &top, int &reft, int &bottom, int &right) {
-	ENTER();
-	// FIXME not implemented yet
-	RETURN(UVC_ERROR_ACCESS, int);
-}
-*/
-
-//======================================================================
-/*
-// DigitalRoi
-int UVCCamera::updateDigitalRoiLimit(...not defined...) {
-	ENTER();
-	// FIXME not implemented yet
-	RETURN(UVC_ERROR_ACCESS, int);
-}
-
-// DigitalRoiを設定
-int UVCCamera::setDigitalRoi(int top, int reft, int bottom, int right) {
-	ENTER();
-	// FIXME not implemented yet
-	RETURN(UVC_ERROR_ACCESS, int);
-}
-
-// DigitalRoiの現在値を取得
-int UVCCamera::getDigitalRoi(int &top, int &reft, int &bottom, int &right) {
-	ENTER();
-	// FIXME not implemented yet
-	RETURN(UVC_ERROR_ACCESS, int);
-}
-*/
-
-//======================================================================
 // backlight_compensation
 int UVCCamera::updateBacklightCompLimit(int &min, int &max, int &def) {
 	ENTER();
@@ -1725,7 +1650,6 @@ int UVCCamera::setGain(int gain) {
 	ENTER();
 	int ret = UVC_ERROR_IO;
 	if (mPUSupports & PU_GAIN) {
-//		LOGI("gain:%d", gain);
 		ret = internalSetCtrlValue(mGain, gain, uvc_get_gain, uvc_set_gain);
 	}
 	RETURN(ret, int);
@@ -1739,7 +1663,6 @@ int UVCCamera::getGain() {
 		if (LIKELY(!ret)) {	// 正常に最小・最大値を取得出来た時
 			uint16_t value;
 			ret = uvc_get_gain(mDeviceHandle, &value, UVC_GET_CUR);
-//			LOGI("gain:%d", value);
 			if (LIKELY(!ret))
 				return value;
 		}
@@ -1905,7 +1828,6 @@ int UVCCamera::setGamma(int gamma) {
 	ENTER();
 	int ret = UVC_ERROR_IO;
 	if (mPUSupports & PU_GAMMA) {
-//		LOGI("gamma:%d", gamma);
 		ret = internalSetCtrlValue(mGamma, gamma, uvc_get_gamma, uvc_set_gamma);
 	}
 	RETURN(ret, int);
@@ -1919,7 +1841,6 @@ int UVCCamera::getGamma() {
 		if (LIKELY(!ret)) {	// 正常に最小・最大値を取得出来た時
 			uint16_t value;
 			ret = uvc_get_gamma(mDeviceHandle, &value, UVC_GET_CUR);
-//			LOGI("gamma:%d", ret);
 			if (LIKELY(!ret))
 				return value;
 		}
@@ -2170,7 +2091,6 @@ int UVCCamera::setDigitalMultiplier(int multiplier) {
 	ENTER();
 	int ret = UVC_ERROR_IO;
 	if (mPUSupports & PU_DIGITAL_MULT) {
-//		LOGI("multiplier:%d", multiplier);
 		ret = internalSetCtrlValue(mMultiplier, multiplier, uvc_get_digital_multiplier, uvc_set_digital_multiplier);
 	}
 	RETURN(ret, int);
@@ -2184,7 +2104,6 @@ int UVCCamera::getDigitalMultiplier() {
 		if (LIKELY(!ret)) {	// 正常に最小・最大値を取得出来た時
 			uint16_t multiplier;
 			ret = uvc_get_digital_multiplier(mDeviceHandle, &multiplier, UVC_GET_CUR);
-//			LOGI("multiplier:%d", multiplier);
 			if (LIKELY(!ret))
 				return multiplier;
 		}
@@ -2208,7 +2127,6 @@ int UVCCamera::setDigitalMultiplierLimit(int multiplier_limit) {
 	ENTER();
 	int ret = UVC_ERROR_IO;
 	if (mPUSupports & PU_DIGITAL_LIMIT) {
-//		LOGI("multiplier limit:%d", multiplier_limit);
 		ret = internalSetCtrlValue(mMultiplierLimit, multiplier_limit, uvc_get_digital_multiplier_limit, uvc_set_digital_multiplier_limit);
 	}
 	RETURN(ret, int);
@@ -2222,7 +2140,6 @@ int UVCCamera::getDigitalMultiplierLimit() {
 		if (LIKELY(!ret)) {	// 正常に最小・最大値を取得出来た時
 			uint16_t multiplier_limit;
 			ret = uvc_get_digital_multiplier_limit(mDeviceHandle, &multiplier_limit, UVC_GET_CUR);
-//			LOGI("multiplier_limit:%d", multiplier_limit);
 			if (LIKELY(!ret))
 				return multiplier_limit;
 		}
@@ -2245,7 +2162,6 @@ int UVCCamera::setAnalogVideoStandard(int standard) {
 	ENTER();
 	int ret = UVC_ERROR_IO;
 	if (mPUSupports & PU_AVIDEO_STD) {
-//		LOGI("standard:%d", standard);
 		ret = internalSetCtrlValue(mAnalogVideoStandard, standard, uvc_get_analog_video_standard, uvc_set_analog_video_standard);
 	}
 	RETURN(ret, int);
@@ -2258,7 +2174,6 @@ int UVCCamera::getAnalogVideoStandard() {
 		if (LIKELY(!ret)) {	// 正常に最小・最大値を取得出来た時
 			uint8_t standard;
 			ret = uvc_get_analog_video_standard(mDeviceHandle, &standard, UVC_GET_CUR);
-//			LOGI("standard:%d", standard);
 			if (LIKELY(!ret))
 				return standard;
 		}
@@ -2281,7 +2196,6 @@ int UVCCamera::setAnalogVideoLockState(int state) {
 	ENTER();
 	int ret = UVC_ERROR_IO;
 	if (mPUSupports & PU_AVIDEO_LOCK) {
-//		LOGI("status:%d", status);
 		ret = internalSetCtrlValue(mAnalogVideoLockState, state, uvc_get_analog_video_lockstate, uvc_set_analog_video_lockstate);
 	}
 	RETURN(ret, int);
@@ -2294,7 +2208,6 @@ int UVCCamera::getAnalogVideoLockState() {
 		if (LIKELY(!ret)) {	// 正常に最小・最大値を取得出来た時
 			uint8_t status;
 			ret = uvc_get_analog_video_lockstate(mDeviceHandle, &status, UVC_GET_CUR);
-//			LOGI("status:%d", status);
 			if (LIKELY(!ret))
 				return status;
 		}

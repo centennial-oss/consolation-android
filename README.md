@@ -31,8 +31,8 @@ Any capture device that appears to the Android OS as a USB Video Class (UVC) cap
 Consolation has been tested by the developers on a Samsung Galaxy S8 Ultra (SM-X900) with these capture devices:
 
 - Elgato HD60 X - 👌 🚀
-- Acer USB 3.0 Video Capture Card (model OCB5B0) - 👍
-- WANKEDA 4K Capture Card 1080p 60FPS for Streaming (1da603d4) - 👍
+- Acer USB 3.0 Video Capture Card (model OCB5B0) - 👌 🚀
+- WANKEDA 4K Capture Card 1080p 60FPS for Streaming (1da603d4) - 👌 🚀
 - UGREEN Full HD 1080p Capture Card (model 40189) -  ⚠️ max 30p @ 1920x1080
 
 ## Requirements
@@ -56,24 +56,28 @@ You can make a debug build with `make build` and a release build with `make buil
 
 ## Acknowledgements
 
+### libjpeg-turbo
+We use [libjpeg-turbo v3.1.4.1](https://github.com/libjpeg-turbo/libjpeg-turbo) unmodified to decode the MJPEG pixel format.
+
 ### UVCCamera and libuvc
 
 We vendored <https://github.com/alexey-pelykh/UVCCamera> into Consolation for Android. Alexey's project is a fork of <https://github.com/saki4510t/UVCCamera> which has gone dormant. We thank both projects for helping make Consolation for Android possible.
 
 UVCCamera depends on <https://github.com/libuvc/libuvc>, which we have also vendored.
 
+#### UVCCamera and libuvc Improvements
+
 We have significantly modified our vendored UVCCamera and libuvc libs for stability and performance. These mods are in the codebase at [Consolation/app/src/main/jni/UVCCamera](Consolation/app/src/main/jni/UVCCamera) and [Consolation/app/src/main/jni/libuvc](Consolation/app/src/main/jni/libuvc):
 * eliminated nearly all frame copies, resulting in significant lag reduction
 * added support for H.264, NV12, and P010 input pixel formats
 * fixed defects in yuyv2iyuv and any2yuv frame handlers
+* added support for input pixel format probe
+* fixed protocol defects causing some capture cards to incur unnecessary startup delays
 * numerous other performance improvements for a true real-time experience on modern Android devices with modern capture cards
-
-### libjpeg-turbo
-We use [libjpeg-turbo v3.1.4.1](https://github.com/libjpeg-turbo/libjpeg-turbo) unmodified to decode the MJPEG pixel format.
 
 ### libusb
 
-We vendored <https://github.com/libusb/libusb> v1.0.18 and made a number of improvements on the code paths used by Consolation, including:
+We used UVCCamera's vendored <https://github.com/libusb/libusb> v1.0.18 and made a number of stability improvements on the code paths used by Consolation, including:
 * improved device auto-detection and hot re-plug recovery
 * better heap memory safety on hot and error paths
 * fixed `itransfer->lock` deadlocks on error branch
@@ -84,7 +88,15 @@ These changes are at [Consolation/app/src/main/jni/libusb](Consolation/app/src/m
 
 ### Upstreaming
 
-We intend to contribute these improvements back to their respective base projects so everyone can take advantage of their benefits.
+We really would like to contribute our changes back to their upstreams. But after significant research, we've determined that the lift is too great and our time is better spent improving the core Consolation project and continuing to maintain our modifications inside of this project. As this project is open source, anyone is welcome to attempt to port our improvements back to their respective upstreams or other forks.
+
+We _may_ publish our own separate disconnected fork of UVCCamera - specific to Android video capture and complete with our modified libusb and libuvc packages - that can be used as a drop-in replacement to take advantage of all of the stability and performance improvements we've introduced. Stay tuned.
+
+#### Rationale for Upstreaming Declination
+
+* Our modified version of libusb is based on a 2014 release that was bundled with the original version of UVCCamera, and was already heavily modified to get working with Android. The latest release of libusb (1.0.29) is not compatible with Android, despite viable [Pull Requests that add support having gone unmerged for years](https://github.com/libusb/libusb/pull/1164). Since other users have worked hard to make Android happen in the mainline libusb project, only to see their efforts go unacknowledged by that project's maintainers; we would not expect to be treated any differently.
+* libuvc has not been updated in nearly 3 years with dozens of open PRs piling up, so it is unlikely that our overhaul would ever be incorporated into that apparently dormant or abandoned project.
+* Alexey's UVCCamera fork has gained little traction since its creation in late 2024, is largely unchanged from Saki's original project, and has not seen a new release in over a year (and just a few months after the fork was created). It appears to be headed towards dormancy.
 
 ## Contributor Disclosure
 

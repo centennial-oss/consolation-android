@@ -189,7 +189,7 @@
     <methods>;
 }
 
-# Strip debug/info app logs from release bytecode.
+# Strip debug/info app logs from release bytecode (R8 when minifyRelease is enabled).
 -assumenosideeffects class org.centennialoss.consolation.logging.AppLog {
     public int v(java.lang.String,java.lang.String);
     public int v(java.lang.String,java.lang.String,java.lang.Throwable);
@@ -197,4 +197,15 @@
     public int d(java.lang.String,java.lang.String,java.lang.Throwable);
     public int i(java.lang.String,java.lang.String);
     public int i(java.lang.String,java.lang.String,java.lang.Throwable);
+}
+
+# Same policy for direct android.util.Log (e.g. vendored UVCCamera / USBMonitor Java).
+-assumenosideeffects class android.util.Log {
+    public static int v(java.lang.String,java.lang.String);
+    public static int v(java.lang.String,java.lang.String,java.lang.Throwable);
+    public static int d(java.lang.String,java.lang.String);
+    public static int d(java.lang.String,java.lang.String,java.lang.Throwable);
+    public static int i(java.lang.String,java.lang.String);
+    public static int i(java.lang.String,java.lang.String,java.lang.Throwable);
+    public static int println(int,java.lang.String,java.lang.String);
 }

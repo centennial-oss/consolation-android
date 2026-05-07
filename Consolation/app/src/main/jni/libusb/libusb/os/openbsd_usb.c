@@ -176,20 +176,19 @@ obsd_get_device_list(struct libusb_context * ctx,
 			 * XXX If ugen(4) is attached to the USB device
 			 * it will be used.
 			 */
+			udevname = NULL;
+			for (j = 0; j < USB_MAX_DEVNAMES; j++)
+				if (!strncmp("ugen", di.udi_devnames[j], 4)) {
+					udevname = strdup(di.udi_devnames[j]);
+					break;
+				}
+
 			session_id = (di.udi_bus << 8 | di.udi_addr);
 			dev = usbi_get_device_by_session_id(ctx, session_id);
 
 			if (dev == NULL) {
-				udevname = NULL;
-				for (j = 0; j < USB_MAX_DEVNAMES; j++)
-					if (!strncmp("ugen", di.udi_devnames[j], 4)) {
-						udevname = strdup(di.udi_devnames[j]);
-						break;
-					}
-
 				dev = usbi_alloc_device(ctx, session_id);
 				if (dev == NULL) {
-					free(udevname);
 					close(fd);
 					return (LIBUSB_ERROR_NO_MEM);
 				}
@@ -224,7 +223,6 @@ obsd_get_device_list(struct libusb_context * ctx,
 
 			ddd = discovered_devs_append(*discdevs, dev);
 			if (ddd == NULL) {
-				libusb_unref_device(dev);
 				close(fd);
 				return (LIBUSB_ERROR_NO_MEM);
 			}

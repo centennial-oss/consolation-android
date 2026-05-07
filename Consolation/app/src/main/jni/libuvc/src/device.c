@@ -60,6 +60,7 @@
 
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
+#include <time.h>
 
 #define UVC_DETACH_ATTACH 0	// set this 1 attach/detach kernel driver by libuvc, set this 0 automatically attach/detach by libusb
 
@@ -76,6 +77,11 @@ uvc_error_t uvc_parse_vc_extension_unit(uvc_device_t *dev,
 		uvc_device_info_t *info, const unsigned char *block, size_t block_size);
 uvc_error_t uvc_parse_vc_header(uvc_device_t *dev, uvc_device_info_t *info,
 		const unsigned char *block, size_t block_size);
+static uint64_t uvc_diag_now_ns(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+}
 uvc_error_t uvc_parse_vc_input_terminal(uvc_device_t *dev,
 		uvc_device_info_t *info, const unsigned char *block, size_t block_size);
 uvc_error_t uvc_parse_vc_processing_unit(uvc_device_t *dev,
@@ -285,8 +291,12 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 	struct libusb_device_descriptor desc;
 
 	UVC_ENTER();
+	const uint64_t t_open_start = uvc_diag_now_ns();
 
+	const uint64_t t_libusb_open = uvc_diag_now_ns();
 	ret = libusb_open(dev->usb_dev, &usb_devh);
+	LOGI("startup-diag:libuvc uvc_open/libusb_open %llu ms ret=%d",
+		(unsigned long long)((uvc_diag_now_ns() - t_libusb_open) / 1000000ULL), ret);
 	UVC_DEBUG("libusb_open() = %d", ret);
 
 	if (UNLIKELY(ret != UVC_SUCCESS)) {
@@ -304,7 +314,10 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 	internal_devh->dev = dev;
 	internal_devh->usb_devh = usb_devh;
 	internal_devh->reset_on_release_if = 0;	// XXX
+	const uint64_t t_dev_info = uvc_diag_now_ns();
 	ret = uvc_get_device_info(dev, &(internal_devh->info));
+	LOGI("startup-diag:libuvc uvc_get_device_info %llu ms ret=%d",
+		(unsigned long long)((uvc_diag_now_ns() - t_dev_info) / 1000000ULL), ret);
 	pthread_mutex_init(&internal_devh->status_mutex, NULL);	// XXX saki
 
 	if (UNLIKELY(ret != UVC_SUCCESS))
@@ -315,8 +328,13 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 #endif
 	UVC_DEBUG("claiming control interface %d",
 			internal_devh->info->ctrl_if.bInterfaceNumber);
+	const uint64_t t_claim_ctrl_if = uvc_diag_now_ns();
 	ret = uvc_claim_if(internal_devh,
 			internal_devh->info->ctrl_if.bInterfaceNumber);
+	LOGI("startup-diag:libuvc claim ctrl if=%d took %llu ms ret=%d",
+		internal_devh->info->ctrl_if.bInterfaceNumber,
+		(unsigned long long)((uvc_diag_now_ns() - t_claim_ctrl_if) / 1000000ULL),
+		ret);
 	if (UNLIKELY(ret != UVC_SUCCESS))
 		goto fail;
 
@@ -335,7 +353,10 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 				internal_devh->info->ctrl_if.bEndpointAddress,
 				internal_devh->status_buf, sizeof(internal_devh->status_buf),
 				_uvc_status_callback, internal_devh, 0);
+		const uint64_t t_submit_status = uvc_diag_now_ns();
 		ret = libusb_submit_transfer(internal_devh->status_xfer);
+		LOGI("startup-diag:libuvc status transfer submit %llu ms ret=%d",
+			(unsigned long long)((uvc_diag_now_ns() - t_submit_status) / 1000000ULL), ret);
 		UVC_DEBUG("libusb_submit_transfer() = %d", ret);
 
 		if (UNLIKELY(ret)) {
@@ -348,13 +369,18 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 
 	if (dev->ctx->own_usb_ctx && dev->ctx->open_devices == NULL) {
 		/* Since this is our first device, we need to spawn the event handler thread */
+		const uint64_t t_handler_thread = uvc_diag_now_ns();
 		ret = uvc_start_handler_thread(dev->ctx);
+		LOGI("startup-diag:libuvc start handler thread %llu ms ret=%d",
+			(unsigned long long)((uvc_diag_now_ns() - t_handler_thread) / 1000000ULL), ret);
 		if (UNLIKELY(ret != UVC_SUCCESS))
 			goto fail;
 	}
 
 	DL_APPEND(dev->ctx->open_devices, internal_devh);
 	*devh = internal_devh;
+	LOGI("startup-diag:libuvc uvc_open total %llu ms ret=%d",
+		(unsigned long long)((uvc_diag_now_ns() - t_open_start) / 1000000ULL), ret);
 
 	UVC_EXIT(ret);
 
