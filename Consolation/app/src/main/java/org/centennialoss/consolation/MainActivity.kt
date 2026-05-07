@@ -1729,7 +1729,7 @@ class MainActivity : ComponentActivity() {
 
         private const val LOW_FPS_MIN_DELTA = 10
         private const val LOW_FPS_SUSTAIN_MS = 3_000L
-        private const val CONNECTING_RETRY_TIMEOUT_MS = 10_000L
+        private const val CONNECTING_RETRY_TIMEOUT_MS = 7_000L
         private const val POST_USB_PERMISSION_SETTLE_MS = 1_500L
         private const val DEFAULT_TARGET_FPS = 60f
         private const val DEFAULT_TARGET_FPS_TOLERANCE = 0.75f

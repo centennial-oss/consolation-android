@@ -1093,11 +1093,18 @@ class UvccameraLibPreviewBackend(
 
     private fun buildAutoFormatOrder(nativeFrameFormat: Int?, preferCompressed: Boolean): List<Int> {
         val out = mutableListOf<Int>()
-        nativeFrameFormat?.let { out.add(it) }
+        // Keep native hints, but don't allow YUYV to preempt NV12 in AUTO mode.
+        nativeFrameFormat
+            ?.takeUnless { it == UVCCamera.FRAME_FORMAT_YUYV }
+            ?.let { out.add(it) }
         if (preferCompressed) {
             out.add(UVCCamera.FRAME_FORMAT_MJPEG)
+            out.add(UVCCamera.FRAME_FORMAT_NV12)
+            out.add(UVCCamera.FRAME_FORMAT_P010)
             out.add(UVCCamera.FRAME_FORMAT_YUYV)
         } else {
+            out.add(UVCCamera.FRAME_FORMAT_NV12)
+            out.add(UVCCamera.FRAME_FORMAT_P010)
             out.add(UVCCamera.FRAME_FORMAT_YUYV)
             out.add(UVCCamera.FRAME_FORMAT_MJPEG)
         }
