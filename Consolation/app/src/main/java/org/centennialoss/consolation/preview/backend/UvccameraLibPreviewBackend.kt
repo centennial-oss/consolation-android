@@ -997,7 +997,20 @@ class UvccameraLibPreviewBackend(
         uvcCamera = null
         loggedFirstVideoFrame.set(false)
         resetTelemetryCounters()
+        
+        val dev = monitorCachedUsbDevice
         monitorCachedUsbDevice = null
+        if (dev != null) {
+            runCatching {
+                ensureUsbMonitor().releaseCachedDevice(dev)
+                Thread.sleep(POST_USB_RELEASE_SETTLE_MS)
+                val resetRc = kernelUsbResetIfPossible(dev)
+                if (resetRc != 0) {
+                    Log.w(logTag, "playback: USBFS_RESET on stop rc=$resetRc")
+                }
+            }.onFailure { Log.e(logTag, "playback: USB reset on stop failed", it) }
+        }
+        
         Log.i(
             logTag,
             "playback: stopUvcStreaming done totalMs=${SystemClock.elapsedRealtime() - tWhole}",
