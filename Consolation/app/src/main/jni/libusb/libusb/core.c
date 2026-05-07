@@ -53,6 +53,7 @@
 #ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
 #endif
+#include <time.h>
 #ifdef HAVE_SYSLOG_H
 #include <syslog.h>
 #endif
@@ -63,6 +64,12 @@
 
 #include "libusbi.h"
 #include "hotplug.h"
+
+static uint64_t libusb_diag_now_ns(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+}
 
 #if defined(OS_ANDROID)	// XXX for non rooted android device
 const struct usbi_os_backend * const usbi_backend = &android_usbfs_backend;
@@ -1192,6 +1199,7 @@ int API_EXPORTED libusb_open(libusb_device *dev, libusb_device_handle **handle) 
 	struct libusb_context *ctx = DEVICE_CTX(dev);
 	struct libusb_device_handle *_handle;
 	size_t priv_size = usbi_backend->device_handle_priv_size;
+	const uint64_t t_open = libusb_diag_now_ns();
 	int r;
 	usbi_dbg("open (bus/addr)=(%d.%d)", dev->bus_number, dev->device_address);
 
@@ -1214,7 +1222,13 @@ int API_EXPORTED libusb_open(libusb_device *dev, libusb_device_handle **handle) 
 	_handle->claimed_interfaces = 0;
 	memset(&_handle->os_priv, 0, priv_size);
 
+	const uint64_t t_backend_open = libusb_diag_now_ns();
 	r = usbi_backend->open(_handle);
+	LOGI("startup-diag:libusb backend open %llu ms ret=%d bus=%u addr=%u",
+		(unsigned long long)((libusb_diag_now_ns() - t_backend_open) / 1000000ULL),
+		r,
+		dev->bus_number,
+		dev->device_address);
 	if (UNLIKELY(r < 0)) {
 		usbi_dbg("open %d.%d returns %d", dev->bus_number, dev->device_address, r);
 		libusb_unref_device(dev);
@@ -1237,6 +1251,10 @@ int API_EXPORTED libusb_open(libusb_device *dev, libusb_device_handle **handle) 
 	 * or infinite timeout. We want to interrupt that iteration of the loop,
 	 * so that it picks up the new fd, and then continues. */
 	usbi_fd_notification(ctx);
+	LOGI("startup-diag:libusb_open total %llu ms bus=%u addr=%u",
+		(unsigned long long)((libusb_diag_now_ns() - t_open) / 1000000ULL),
+		dev->bus_number,
+		dev->device_address);
 
 	return LIBUSB_SUCCESS;
 }
@@ -1605,6 +1623,7 @@ int API_EXPORTED libusb_claim_interface(libusb_device_handle *dev,
 	ENTER();
 
 	int r = LIBUSB_SUCCESS;
+	const uint64_t t_claim = libusb_diag_now_ns();
 
 	usbi_dbg("interface %d", interface_number);
 	LOGD("interface %d", interface_number);
@@ -1637,6 +1656,10 @@ int API_EXPORTED libusb_claim_interface(libusb_device_handle *dev,
 		LOGV("already claimed");
 	}
 	usbi_mutex_unlock(&dev->lock);
+	LOGI("startup-diag:libusb_claim_interface if=%d took %llu ms ret=%d",
+		interface_number,
+		(unsigned long long)((libusb_diag_now_ns() - t_claim) / 1000000ULL),
+		r);
 
 	RETURN(r, int);
 }
@@ -1713,6 +1736,7 @@ int API_EXPORTED libusb_release_interface(libusb_device_handle *dev,
  */
 int API_EXPORTED libusb_set_interface_alt_setting(libusb_device_handle *dev,
 		int interface_number, int alternate_setting) {
+	const uint64_t t_alt = libusb_diag_now_ns();
 
 	usbi_dbg("interface %d altsetting %d", interface_number, alternate_setting);
 	if (interface_number >= USB_MAXINTERFACES)
@@ -1732,8 +1756,14 @@ int API_EXPORTED libusb_set_interface_alt_setting(libusb_device_handle *dev,
 	}
 	usbi_mutex_unlock(&dev->lock);
 
-	return usbi_backend->set_interface_altsetting(dev, interface_number,
+	const int ret = usbi_backend->set_interface_altsetting(dev, interface_number,
 			alternate_setting);
+	LOGI("startup-diag:libusb_set_interface_alt_setting if=%d alt=%d took %llu ms ret=%d",
+		interface_number,
+		alternate_setting,
+		(unsigned long long)((libusb_diag_now_ns() - t_alt) / 1000000ULL),
+		ret);
+	return ret;
 }
 
 /** \ingroup dev
@@ -2464,6 +2494,7 @@ static void usbi_log_str(struct libusb_context *ctx,
 	MultiByteToWideChar(CP_UTF8, 0, str, -1, wbuf, sizeof(wbuf));
 	OutputDebugStringW(wbuf);
 #elif defined(__ANDROID__)
+#ifndef APP_NATIVE_LOG_SILENT
 	int priority = ANDROID_LOG_UNKNOWN;
 	switch (level) {
 	case LIBUSB_LOG_LEVEL_NONE: break;	// XXX add to avoid warning when compiling with clang
@@ -2473,6 +2504,10 @@ static void usbi_log_str(struct libusb_context *ctx,
 	case LIBUSB_LOG_LEVEL_DEBUG: priority = ANDROID_LOG_DEBUG; break;
 	}
 	__android_log_write(priority, "libusb", str);
+#else
+	(void) level;
+	(void) str;
+#endif
 #elif defined(HAVE_SYSLOG_FUNC)
 	int syslog_level = LOG_INFO;
 	switch (level) {

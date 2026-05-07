@@ -147,7 +147,9 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	processingCopyMaxNs(0),
 	processingPayloadCount(0),
 	processingPayloadTotalBytes(0),
-	processingPayloadMaxBytes(0) {
+	processingPayloadMaxBytes(0),
+	streamingStartMonotonicNs(0),
+	firstFrameLogged(false) {
 
 	ENTER();
 	pthread_cond_init(&preview_sync, NULL);
@@ -573,6 +575,19 @@ int UVCPreview::stopPreview() {
 void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args) {
 	UVCPreview *preview = reinterpret_cast<UVCPreview *>(vptr_args);
 	if UNLIKELY(!preview->isRunning() || !frame || !frame->frame_format || !frame->data || !frame->data_bytes) return;
+	if (!preview->firstFrameLogged) {
+		preview->firstFrameLogged = true;
+		const uint64_t t0 = preview->streamingStartMonotonicNs;
+		if (t0 > 0) {
+			const uint64_t elapsed_ms = (processing_now_ns() - t0) / 1000000ULL;
+			LOGI("startup-diag:first frame received after %llu ms format=%d size=%ux%u bytes=%zu",
+				(unsigned long long)elapsed_ms,
+				frame->frame_format,
+				frame->width,
+				frame->height,
+				frame->actual_bytes);
+		}
+	}
 	if (UNLIKELY(
 		((frame->frame_format != UVC_FRAME_FORMAT_MJPEG) && (frame->actual_bytes < preview->frameBytes))
 		|| (frame->width != preview->frameWidth) || (frame->height != preview->frameHeight) )) {
@@ -822,10 +837,16 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 	ENTER();
 
 	uvc_frame_t *frame = NULL;
+	const uint64_t t_start_streaming = processing_now_ns();
 	uvc_error_t result = uvc_start_streaming_bandwidth(
 		mDeviceHandle, ctrl, uvc_preview_frame_callback, (void *)this, requestBandwidth, 0);
+	const uint64_t start_streaming_elapsed_ms = (processing_now_ns() - t_start_streaming) / 1000000ULL;
+	LOGI("startup-diag:uvc_start_streaming_bandwidth done in %llu ms result=%d",
+		(unsigned long long)start_streaming_elapsed_ms, result);
 
 	if (LIKELY(!result)) {
+		streamingStartMonotonicNs = processing_now_ns();
+		firstFrameLogged = false;
 		clearPreviewFrame();
 		if (pthread_create(&capture_thread, NULL, capture_thread_func, (void *)this) != 0)
 			LOGW("UVCPreview::do_preview pthread_create capture_thread failed");
@@ -861,6 +882,7 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 		LOGI("preview_thread_func:wait for all callbacks complete");
 #endif
 		uvc_stop_streaming(mDeviceHandle);
+		LOGI("startup-diag:uvc_stop_streaming called");
 #if LOCAL_DEBUG
 		LOGI("Streaming finished");
 #endif

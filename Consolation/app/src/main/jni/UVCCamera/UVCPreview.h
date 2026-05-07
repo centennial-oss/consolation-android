@@ -103,6 +103,8 @@ private:
 	uint64_t processingPayloadCount;
 	uint64_t processingPayloadTotalBytes;
 	uint64_t processingPayloadMaxBytes;
+	volatile uint64_t streamingStartMonotonicNs;
+	volatile bool firstFrameLogged;
 // improve performance by reducing memory allocation
 	pthread_mutex_t pool_mutex;
 	ObjectArray<uvc_frame_t *> mFramePool;

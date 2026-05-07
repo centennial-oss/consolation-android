@@ -58,6 +58,7 @@
 #endif
 
 #include <assert.h>		// XXX add assert for debugging
+#include <time.h>
 
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
@@ -68,6 +69,120 @@ uvc_frame_desc_t *uvc_find_frame_desc(uvc_device_handle_t *devh,
 		uint16_t format_id, uint16_t frame_id);
 static void *_uvc_user_caller(void *arg);
 static void _uvc_populate_frame(uvc_stream_handle_t *strmh);
+static uint64_t uvc_diag_now_ns(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+}
+
+/** Matches libusb_fill_{bulk,iso}_transfer timeout_ms in this file */
+#ifndef LIBUVC_STREAM_XFER_TIMEOUT_MS
+#define LIBUVC_STREAM_XFER_TIMEOUT_MS 5000
+#endif
+
+static const char *stream_libusb_xfer_status_str(int status) {
+	switch (status) {
+	case 0: return "COMPLETED";
+	case 1: return "ERROR";
+	case 2: return "TIMED_OUT";
+	case 3: return "CANCELLED";
+	case 4: return "STALL";
+	case 5: return "NO_DEVICE";
+	case 6: return "OVERFLOW";
+	default: return "UNKNOWN";
+	}
+}
+
+static void xfer_diag_arm(uvc_stream_handle_t *strmh) {
+	strmh->diag_xfer_epoch_ns = uvc_diag_now_ns();
+	strmh->diag_logged_first_xfer_done = 0;
+	strmh->diag_logged_first_xfer_issue = 0;
+	strmh->diag_logged_first_payload = 0;
+	strmh->diag_logged_first_swap = 0;
+	strmh->diag_bulk_timeout_count_before_payload = 0;
+	LOGI(
+		"startup-diag:libuvc xfer submit arm ep=0x%02x xfer_timeout_ms=%u "
+		"(no log lines until a usb callback: complete, timeout, or error)",
+		strmh->stream_if ? strmh->stream_if->bEndpointAddress : 0,
+		(unsigned)LIBUVC_STREAM_XFER_TIMEOUT_MS);
+}
+
+static void diag_first_xfer_completed(uvc_stream_handle_t *strmh,
+		struct libusb_transfer *xfer) {
+	if (!strmh->diag_xfer_epoch_ns || strmh->diag_logged_first_xfer_done)
+		return;
+	strmh->diag_logged_first_xfer_done = 1;
+	const uint64_t ms =
+		(uvc_diag_now_ns() - strmh->diag_xfer_epoch_ns) / 1000000ULL;
+	if (!xfer->num_iso_packets) {
+		LOGI(
+			"startup-diag:libuvc first xfer COMPLETED bulk actual_length=%u after %llu ms%s",
+			(unsigned)xfer->actual_length,
+			(unsigned long long)ms,
+			xfer->actual_length < (unsigned)(strmh->cur_ctrl.dwMaxPayloadTransferSize / 4)
+				? " (!=full maxPacket; bulk IN waits up to xfer_timeout_ms for data)"
+				: "");
+	} else {
+		unsigned nonempty = 0;
+		unsigned total_raw = 0;
+		int pk;
+		for (pk = 0; pk < xfer->num_iso_packets; ++pk) {
+			const struct libusb_iso_packet_descriptor *pkt =
+				xfer->iso_packet_desc + pk;
+			total_raw += (unsigned)pkt->actual_length;
+			if (pkt->actual_length)
+				nonempty++;
+		}
+		LOGI(
+			"startup-diag:libuvc first xfer COMPLETED iso pkts=%u nonempty=%u "
+			"total_raw_bytes=%u after %llu ms",
+			(unsigned)xfer->num_iso_packets,
+			nonempty,
+			total_raw,
+			(unsigned long long)ms);
+	}
+}
+
+static void diag_first_xfer_issue(uvc_stream_handle_t *strmh,
+		struct libusb_transfer *xfer) {
+	if (!strmh->diag_xfer_epoch_ns || strmh->diag_logged_first_xfer_issue)
+		return;
+	strmh->diag_logged_first_xfer_issue = 1;
+	const uint64_t ms =
+		(uvc_diag_now_ns() - strmh->diag_xfer_epoch_ns) / 1000000ULL;
+	LOGI(
+		"startup-diag:libuvc first xfer status=%d %s after %llu ms (bulk xfer_timeout_ms=%u)",
+		(int)xfer->status,
+		stream_libusb_xfer_status_str((int)xfer->status),
+		(unsigned long long)ms,
+		(unsigned)LIBUVC_STREAM_XFER_TIMEOUT_MS);
+}
+
+static void diag_first_payload(uvc_stream_handle_t *strmh,
+		size_t nbytes, const char *path) {
+	if (!strmh->diag_xfer_epoch_ns || !nbytes || strmh->diag_logged_first_payload)
+		return;
+	strmh->diag_logged_first_payload = 1;
+	const uint64_t ms =
+		(uvc_diag_now_ns() - strmh->diag_xfer_epoch_ns) / 1000000ULL;
+	LOGI(
+		"startup-diag:libuvc first video payload (%s) nbytes=%zu after %llu ms",
+		path,
+		nbytes,
+		(unsigned long long)ms);
+}
+
+static void diag_first_swap(uvc_stream_handle_t *strmh) {
+	if (!strmh->diag_xfer_epoch_ns || strmh->diag_logged_first_swap)
+		return;
+	strmh->diag_logged_first_swap = 1;
+	const uint64_t ms =
+		(uvc_diag_now_ns() - strmh->diag_xfer_epoch_ns) / 1000000ULL;
+	LOGI(
+		"startup-diag:libuvc first frame ready (_uvc_swap_buffers) got_bytes=%zu after %llu ms",
+		strmh->got_bytes,
+		(unsigned long long)ms);
+}
 
 struct format_table_entry {
 	enum uvc_frame_format format;
@@ -577,6 +692,8 @@ uvc_error_t uvc_probe_stream_ctrl(uvc_device_handle_t *devh,
 static void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
 	uint8_t *tmp_buf;
 
+	diag_first_swap(strmh);
+
 	pthread_mutex_lock(&strmh->cb_mutex);
 	{
 		/* swap the buffers */
@@ -730,12 +847,36 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 
 		header_info = payload[1];
 
+		if (!strmh->diag_logged_first_payload) {
+			LOGI("startup-diag:libuvc bulk first-hdr HLE=0x%02x BFH=0x%02x "
+				"(ERR=%d EOF=%d PTS=%d SCR=%d FID=%d) data_len=%zu",
+				(unsigned)header_len,
+				(unsigned)header_info,
+				!!(header_info & UVC_STREAM_ERR),
+				!!(header_info & UVC_STREAM_EOF),
+				!!(header_info & UVC_STREAM_PTS),
+				!!(header_info & UVC_STREAM_SCR),
+				!!(header_info & UVC_STREAM_FID),
+				data_len);
+		}
+
 		if (UNLIKELY(header_info & UVC_STREAM_ERR)) {
 //			strmh->bfh_err |= UVC_STREAM_ERR;
-			UVC_DEBUG("bad packet: error bit set");
-			libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
-//			uvc_vc_get_error_code(strmh->devh, &vc_error_code, UVC_GET_CUR);
-			uvc_vs_get_error_code(strmh->devh, &vs_error_code, UVC_GET_CUR);
+			LOGI("startup-diag:libuvc bulk ERR bit set in header "
+				"(before_first_payload=%d)",
+				!strmh->first_video_payload_received);
+			/* Skip clear_halt + vs_get_error before the first real video payload.
+			 * Many bulk UVC devices send ERR=1 on their very first header packet to
+			 * signal "no prior frame was complete" — this is informational, not an
+			 * actionable error.  Calling libusb_clear_halt here causes the device to
+			 * restart its streaming pipeline (~5 s), creating the startup delay.
+			 * Once real video is flowing, ERR packets are genuine and should still
+			 * trigger the halt-clear. */
+			if (strmh->first_video_payload_received) {
+				libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
+//				uvc_vc_get_error_code(strmh->devh, &vc_error_code, UVC_GET_CUR);
+				uvc_vs_get_error_code(strmh->devh, &vs_error_code, UVC_GET_CUR);
+			}
 //			return;
 		}
 
@@ -773,6 +914,8 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 	}
 
 	if (LIKELY(data_len > 0)) {
+		strmh->first_video_payload_received = 1;
+		diag_first_payload(strmh, data_len, "bulk");
 		/* Last chunk may fill exactly to size_buf; strict `<` falsely set ERR and dropped it. */
 		if (LIKELY(strmh->got_bytes + data_len <= strmh->size_buf)) {
 			memcpy(strmh->outbuf + strmh->got_bytes, payload + header_len, data_len);
@@ -915,6 +1058,7 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 			// from "if (pkt->actual_length - header_len > 0)"
 			if (LIKELY(pkt->actual_length > header_len)) {
 				const size_t odd_bytes = pkt->actual_length - header_len;
+				diag_first_payload(strmh, odd_bytes, "iso");
 				if (UNLIKELY(strmh->got_bytes + odd_bytes > strmh->size_buf)) {
 					strmh->bfh_err |= UVC_STREAM_ERR;
 					UVC_DEBUG("iso bulk would overflow got=%zu odd=%zu cap=%zu",
@@ -962,6 +1106,7 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 #endif
 	switch (transfer->status) {
 	case LIBUSB_TRANSFER_COMPLETED:
+		diag_first_xfer_completed(strmh, transfer);
 		if (!transfer->num_iso_packets) {
 			/* This is a bulk mode transfer, so it just has one payload transfer */
 			_uvc_process_payload(strmh, transfer->buffer, transfer->actual_length);
@@ -979,12 +1124,29 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 //		MARK("not retrying transfer, status = %d", transfer->status);
 //		_uvc_delete_transfer(transfer);
 		resubmit = 0;
+		if (transfer->status != LIBUSB_TRANSFER_CANCELLED)
+			diag_first_xfer_issue(strmh, transfer);
 		break;
 	case LIBUSB_TRANSFER_TIMED_OUT:
+		if (!transfer->num_iso_packets && !strmh->diag_logged_first_payload) {
+			strmh->diag_bulk_timeout_count_before_payload++;
+			LOGI(
+				"startup-diag:libuvc bulk xfer %s #%u after %llu ms since arm "
+				"(device still not filling IN pipe; xfer_timeout_ms=%u)",
+				stream_libusb_xfer_status_str((int)transfer->status),
+				(unsigned)strmh->diag_bulk_timeout_count_before_payload,
+				(unsigned long long)((uvc_diag_now_ns()
+					- strmh->diag_xfer_epoch_ns)
+					/ 1000000ULL),
+				(unsigned)LIBUVC_STREAM_XFER_TIMEOUT_MS);
+		}
+		diag_first_xfer_issue(strmh, transfer);
+		UVC_DEBUG("retrying transfer, status = %d", transfer->status);
+		break;
 	case LIBUSB_TRANSFER_STALL:
 	case LIBUSB_TRANSFER_OVERFLOW:
+		diag_first_xfer_issue(strmh, transfer);
 		UVC_DEBUG("retrying transfer, status = %d", transfer->status);
-//		MARK("retrying transfer, status = %d", transfer->status);
 		break;
 	}
 
@@ -1030,17 +1192,26 @@ uvc_error_t uvc_start_streaming_bandwidth(uvc_device_handle_t *devh,
 		uint8_t flags) {
 	uvc_error_t ret;
 	uvc_stream_handle_t *strmh;
+	const uint64_t t_start = uvc_diag_now_ns();
 
+	const uint64_t t_open_ctrl = uvc_diag_now_ns();
 	ret = uvc_stream_open_ctrl(devh, &strmh, ctrl);
+	LOGI("startup-diag:libuvc uvc_stream_open_ctrl %llu ms ret=%d",
+		(unsigned long long)((uvc_diag_now_ns() - t_open_ctrl) / 1000000ULL), ret);
 	if (UNLIKELY(ret != UVC_SUCCESS))
 		return ret;
 
+	const uint64_t t_stream_start = uvc_diag_now_ns();
 	ret = uvc_stream_start_bandwidth(strmh, cb, user_ptr, bandwidth_factor, flags);
+	LOGI("startup-diag:libuvc uvc_stream_start_bandwidth %llu ms ret=%d",
+		(unsigned long long)((uvc_diag_now_ns() - t_stream_start) / 1000000ULL), ret);
 	if (UNLIKELY(ret != UVC_SUCCESS)) {
 		uvc_stream_close(strmh);
 		return ret;
 	}
 
+	LOGI("startup-diag:libuvc uvc_start_streaming_bandwidth total %llu ms",
+		(unsigned long long)((uvc_diag_now_ns() - t_start) / 1000000ULL));
 	return UVC_SUCCESS;
 }
 
@@ -1139,6 +1310,7 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 	size_t stream_buf_size;
 
 	UVC_ENTER();
+	const uint64_t t_open = uvc_diag_now_ns();
 
 	if (UNLIKELY(_uvc_get_stream_by_interface(devh, ctrl->bInterfaceNumber) != NULL)) {
 		ret = UVC_ERROR_BUSY; /* Stream is already opened */
@@ -1160,12 +1332,20 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 	strmh->stream_if = stream_if;
 	strmh->frame.library_owns_data = 1;
 
+	const uint64_t t_claim = uvc_diag_now_ns();
 	ret = uvc_claim_if(strmh->devh, strmh->stream_if->bInterfaceNumber);
+	LOGI("startup-diag:libuvc stream claim_if=%d %llu ms ret=%d",
+		strmh->stream_if->bInterfaceNumber,
+		(unsigned long long)((uvc_diag_now_ns() - t_claim) / 1000000ULL),
+		ret);
 	if (UNLIKELY(ret != UVC_SUCCESS))
 		goto fail;
 	claimed = 1;
 
+	const uint64_t t_ctrl = uvc_diag_now_ns();
 	ret = uvc_stream_ctrl(strmh, ctrl);
+	LOGI("startup-diag:libuvc uvc_stream_ctrl %llu ms ret=%d",
+		(unsigned long long)((uvc_diag_now_ns() - t_ctrl) / 1000000ULL), ret);
 	if (UNLIKELY(ret != UVC_SUCCESS))
 		goto fail;
 
@@ -1186,6 +1366,8 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 	DL_APPEND(devh->streams, strmh);
 
 	*strmhp = strmh;
+	LOGI("startup-diag:libuvc uvc_stream_open_ctrl total %llu ms",
+		(unsigned long long)((uvc_diag_now_ns() - t_open) / 1000000ULL));
 
 	UVC_EXIT(0);
 	return UVC_SUCCESS;
@@ -1411,7 +1593,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 				format_desc->parent->bEndpointAddress,
 				strmh->transfer_bufs[transfer_id], total_transfer_size,
 				packets_per_transfer, _uvc_stream_callback,
-				(void*) strmh, 5000);
+				(void*) strmh, LIBUVC_STREAM_XFER_TIMEOUT_MS);
 
 			libusb_set_iso_packet_lengths(transfer, endpoint_bytes_per_packet);
 		}
@@ -1431,7 +1613,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 				format_desc->parent->bEndpointAddress,
 				strmh->transfer_bufs[transfer_id],
 				strmh->cur_ctrl.dwMaxPayloadTransferSize, _uvc_stream_callback,
-				(void *)strmh, 5000);
+				(void *)strmh, LIBUVC_STREAM_XFER_TIMEOUT_MS);
 		}
 	}
 
@@ -1463,6 +1645,8 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 		/** @todo clean up transfers and memory */
 		goto fail;
 	}
+
+	xfer_diag_arm(strmh);
 
 	UVC_EXIT(ret);
 	return ret;
