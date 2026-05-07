@@ -12,7 +12,10 @@ import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.app.PictureInPictureParams
+import android.content.res.Configuration
 import android.text.SpannableString
 import android.text.style.ForegroundColorSpan
 import android.util.TypedValue
@@ -99,6 +102,7 @@ class MainActivity : ComponentActivity() {
     private var isStatsVisible = false
     private var statsPosition = StatsPosition.OFF
     private var isLowFpsWarningEnabled = true
+    private var isPipEnabled = true
     private var currentRotation = 0
     private var isFlippedHorizontal = false
     private var isFlippedVertical = false
@@ -523,6 +527,13 @@ class MainActivity : ComponentActivity() {
         } else {
             startTelemetryLoop()
             showControls()
+            if (connectingWatchdogJob == null && !previewBackend.hasReceivedFirstVideoFrame()) {
+                val dev = selectedDevice
+                val fmt = selectedFormat
+                if (dev != null && fmt != null) {
+                    startConnectingWatchdog(dev, fmt)
+                }
+            }
             binding.playbackControls.volumeSeekBar.progress = if (audioMuted) 0 else audioVolumePercent
             applyAudioVolumeFromUi()
             updateMuteButtonIcon(binding.playbackControls)
@@ -533,6 +544,7 @@ class MainActivity : ComponentActivity() {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
 
+        updatePipParams()
         updateConnectingOverlay(isRunning)
     }
 
@@ -947,6 +959,7 @@ class MainActivity : ComponentActivity() {
         popup.menu.findItem(R.id.menu_show_stats_left)?.isChecked = statsPosition == StatsPosition.BOTTOM_LEFT
         popup.menu.findItem(R.id.menu_show_stats_right)?.isChecked = statsPosition == StatsPosition.BOTTOM_RIGHT
         popup.menu.findItem(R.id.menu_low_fps_warning)?.isChecked = isLowFpsWarningEnabled
+        popup.menu.findItem(R.id.menu_picture_in_picture)?.isChecked = isPipEnabled
 
         popup.menu.findItem(R.id.menu_rotate_0)?.isChecked = currentRotation == 0
         popup.menu.findItem(R.id.menu_rotate_90)?.isChecked = currentRotation == 90
@@ -977,6 +990,11 @@ class MainActivity : ComponentActivity() {
                         lowFpsBelowThresholdSinceMs = 0L
                         binding.lowFpsWarning.isVisible = false
                     }
+                }
+                R.id.menu_picture_in_picture -> {
+                    isPipEnabled = !isPipEnabled
+                    item.isChecked = isPipEnabled
+                    updatePipParams()
                 }
                 R.id.menu_rotate_0 -> {
                     currentRotation = 0
@@ -1673,6 +1691,7 @@ class MainActivity : ComponentActivity() {
             statsPosition = StatsPosition.OFF
         }
         isLowFpsWarningEnabled = prefs.getBoolean(KEY_LOW_FPS_WARN, true)
+        isPipEnabled = prefs.getBoolean(KEY_PIP_ENABLED, true)
         currentRotation = prefs.getInt(KEY_ROTATION, 0)
         isFlippedHorizontal = prefs.getBoolean(KEY_FLIP_H, false)
         isFlippedVertical = prefs.getBoolean(KEY_FLIP_V, false)
@@ -1686,6 +1705,7 @@ class MainActivity : ComponentActivity() {
             .putInt(KEY_STATS_POSITION, statsPosition.ordinal)
             .putBoolean(KEY_STATS_VISIBLE, isStatsVisible)
             .putBoolean(KEY_LOW_FPS_WARN, isLowFpsWarningEnabled)
+            .putBoolean(KEY_PIP_ENABLED, isPipEnabled)
             .putInt(KEY_ROTATION, currentRotation)
             .putBoolean(KEY_FLIP_H, isFlippedHorizontal)
             .putBoolean(KEY_FLIP_V, isFlippedVertical)
@@ -1693,6 +1713,38 @@ class MainActivity : ComponentActivity() {
             .putInt(KEY_VOLUME, audioVolumePercent)
             .putBoolean(KEY_MUTED, audioMuted)
             .apply()
+    }
+
+    private fun updatePipParams() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val params = PictureInPictureParams.Builder()
+                .setAutoEnterEnabled(isPipEnabled && captureEngine.state.value is CaptureState.Running)
+                .build()
+            setPictureInPictureParams(params)
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (isPipEnabled && captureEngine.state.value is CaptureState.Running) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                enterPictureInPictureMode(PictureInPictureParams.Builder().build())
+            } else {
+                @Suppress("DEPRECATION")
+                enterPictureInPictureMode()
+            }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        if (isInPictureInPictureMode) {
+            binding.playbackControls.root.isVisible = false
+        } else {
+            if (captureEngine.state.value is CaptureState.Running) {
+                showControls()
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -1718,6 +1770,7 @@ class MainActivity : ComponentActivity() {
         private const val KEY_STATS_POSITION = "stats_position"
         private const val KEY_STATS_VISIBLE = "stats_visible"
         private const val KEY_LOW_FPS_WARN = "low_fps_warn"
+        private const val KEY_PIP_ENABLED = "pip_enabled"
         private const val KEY_ROTATION = "rotation"
         private const val KEY_FLIP_H = "flip_h"
         private const val KEY_FLIP_V = "flip_v"

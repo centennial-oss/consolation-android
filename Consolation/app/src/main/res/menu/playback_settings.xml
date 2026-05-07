@@ -25,6 +25,10 @@
         android:checkable="true"
         android:title="@string/settings_low_fps_warnings" />
     <item
+        android:id="@+id/menu_picture_in_picture"
+        android:checkable="true"
+        android:title="@string/settings_picture_in_picture" />
+    <item
         android:id="@+id/menu_video_rotation"
         android:title="@string/settings_rotation">
         <menu>
