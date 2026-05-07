@@ -27,7 +27,7 @@
     <string name="state_failed">failed: %1$s</string>
     <string name="error_dialog_title">Video Capture Error</string>
     <string name="connecting_capture_card">Connecting to Capture Card…</string>
-    <string name="telemetry_format">%1$dx%2$d @ %3$dp %4$s | Actual: %5$dfps | Drops: %6$d | Latency: %7$.0fms | Payload: %8$s</string>
+    <string name="telemetry_format">%1$dx%2$d/%3$d | %4$s | %5$dfps | Drops: %6$d | Queue: %7$.0f | Latency: %8$.0fms | Size: %9$s</string>
     <string name="low_fps_warning">Low FPS detected. Tap for info.</string>
     <string name="low_fps_info_title">Low FPS Warning</string>
     <string name="low_fps_info_message">The actual frame rate is lower than requested. This can be caused by USB bandwidth limitations, high system load, or capture card limitations. Try a lower resolution or a different USB port.</string>

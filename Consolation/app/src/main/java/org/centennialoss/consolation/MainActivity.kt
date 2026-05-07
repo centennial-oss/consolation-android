@@ -851,6 +851,7 @@ class MainActivity : ComponentActivity() {
                 R.string.telemetry_format,
                 stats.width, stats.height, stats.configuredFps,
                 stats.pixelFormat, stats.fps, stats.droppedFrames,
+                stats.nativeQueuedAvgFrames,
                 stats.nativeEndToEndLatencyAvgMs,
                 formatTelemetryPayloadLabel(stats.nativePayloadAvgKb),
             )

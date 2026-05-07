@@ -69,7 +69,6 @@ class UvccameraLibPreviewBackend(
     private var lastTelemetryTime = System.currentTimeMillis()
     private var actualFps = 0
     private var droppedFrames = 0
-    private var lastFrameTime = 0L
 
     /**
      * Device last passed to [USBMonitor.openDevice] for preview; kept so we can
@@ -129,6 +128,9 @@ class UvccameraLibPreviewBackend(
     private var deferredAudioRunnable: Runnable? = null
     private var deferredAudioFallbackRunnable: Runnable? = null
     private var captureAudioFailureListener: (() -> Unit)? = null
+    private var pendingAudioUsbDevice: UsbDevice? = null
+    private var pendingAudioCamera: UVCCamera? = null
+    private var pendingAudioGeneration: Long = 0L
 
     /**
      * Preview connect/startPreview must never block the main thread (Input ANR). SurfaceTexture is
@@ -150,6 +152,9 @@ class UvccameraLibPreviewBackend(
     private var playbackGeneration: Long = 0L
 
     private val loggedFirstVideoFrame = AtomicBoolean(false)
+    private var lastNativeEndToEndLatencyAvgMs: Double = 0.0
+    private var lastNativeQueuedAvgFrames: Double = 0.0
+    private var lastNativePayloadAvgKb: Double = 0.0
 
     private val surfaceListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
@@ -527,10 +532,43 @@ class UvccameraLibPreviewBackend(
         val now = System.currentTimeMillis()
         val elapsed = now - lastTelemetryTime
         if (elapsed >= 1000) {
-            actualFps = (frameCount.getAndSet(0) * 1000 / elapsed).toInt()
+            val processingStats = uvcCamera?.getAndResetProcessingStats() ?: EMPTY_PROCESSING_STATS
+            val nativeFrameCount = processingStats.getOrElse(9) { 0L }.toInt()
+            val callbackFrameCount = frameCount.getAndSet(0)
+            val observedFrames = if (nativeFrameCount > 0) nativeFrameCount else callbackFrameCount
+            actualFps = (observedFrames * 1000 / elapsed).toInt()
+            if (nativeFrameCount > 0 && loggedFirstVideoFrame.compareAndSet(false, true)) {
+                Log.i(logTag, "playback: first video frame observed via native preview stats")
+                val audioUsbDevice = pendingAudioUsbDevice
+                val audioCamera = pendingAudioCamera
+                if (audioUsbDevice != null && audioCamera != null) {
+                    scheduleDeferredUsbAudio(
+                        audioUsbDevice,
+                        audioCamera,
+                        pendingAudioGeneration,
+                    )
+                }
+            }
             lastTelemetryTime = now
+            droppedFrames += processingStats.getOrElse(12) { 0L }.toInt()
+            val perFrameLatencyMs = nsToMs(processingStats.getOrElse(1) { 0L })
+            val avgQueuedFrames = processingStats.getOrElse(13) { 0L } / 1000.0
+            lastNativeEndToEndLatencyAvgMs = perFrameLatencyMs * (1.0 + avgQueuedFrames)
+            lastNativeQueuedAvgFrames = avgQueuedFrames
+            lastNativePayloadAvgKb = bytesToKb(processingStats.getOrElse(10) { 0L })
+            return TelemetrySnapshot(
+                fps = actualFps,
+                droppedFrames = droppedFrames,
+                width = currentWidth,
+                height = currentHeight,
+                configuredFps = currentFpsConfigured,
+                pixelFormat = currentPixelFormat,
+                backendName = telemetryBackendLabel,
+                nativeEndToEndLatencyAvgMs = lastNativeEndToEndLatencyAvgMs,
+                nativeQueuedAvgFrames = lastNativeQueuedAvgFrames,
+                nativePayloadAvgKb = lastNativePayloadAvgKb,
+            )
         }
-        val processingStats = uvcCamera?.getAndResetProcessingStats() ?: EMPTY_PROCESSING_STATS
         return TelemetrySnapshot(
             fps = actualFps,
             droppedFrames = droppedFrames,
@@ -539,8 +577,9 @@ class UvccameraLibPreviewBackend(
             configuredFps = currentFpsConfigured,
             pixelFormat = currentPixelFormat,
             backendName = telemetryBackendLabel,
-            nativeEndToEndLatencyAvgMs = nsToMs(processingStats.getOrElse(1) { 0L }),
-            nativePayloadAvgKb = bytesToKb(processingStats.getOrElse(10) { 0L }),
+            nativeEndToEndLatencyAvgMs = lastNativeEndToEndLatencyAvgMs,
+            nativeQueuedAvgFrames = lastNativeQueuedAvgFrames,
+            nativePayloadAvgKb = lastNativePayloadAvgKb,
         )
     }
 
@@ -794,36 +833,28 @@ class UvccameraLibPreviewBackend(
             }
 
             loggedFirstVideoFrame.set(false)
-            camera.setFrameCallback({ frame ->
-                if (selectedFrameFormat == UVCCamera.FRAME_FORMAT_H264) {
+            pendingAudioUsbDevice = usbDevice
+            pendingAudioCamera = camera
+            pendingAudioGeneration = genAtPreviewStart
+            if (selectedFrameFormat == UVCCamera.FRAME_FORMAT_H264) {
+                camera.setPreviewFrameCallback({ frame ->
                     queueH264Frame(frame)
-                }
-                frameCount.incrementAndGet()
-                if (loggedFirstVideoFrame.compareAndSet(false, true)) {
-                    Log.i(
-                        logTag,
-                        "playback: first video frame callback msSinceSessionStart=" +
-                            "${SystemClock.elapsedRealtime() - tSession}",
-                    )
-                    // Start USB capture audio only after UVC isochronous streaming is active; opening
-                    // AudioRecord earlier (fixed delay after startPreview) races USB bandwidth / routing
-                    // and often breaks when the first frame appears on composite capture cards.
-                    scheduleDeferredUsbAudio(usbDevice, camera, genAtPreviewStart)
-                }
-                val now = System.nanoTime()
-                if (lastFrameTime > 0) {
-                    val frameTimeMs = (now - lastFrameTime) / 1_000_000.0
-                    val expectedTimeMs = 1000.0 / currentFpsConfigured
-                    if (frameTimeMs > expectedTimeMs * 1.5) {
-                        droppedFrames++
+                    frameCount.incrementAndGet()
+                    if (loggedFirstVideoFrame.compareAndSet(false, true)) {
+                        Log.i(
+                            logTag,
+                            "playback: first video frame callback msSinceSessionStart=" +
+                                "${SystemClock.elapsedRealtime() - tSession}",
+                        )
+                        // Start USB capture audio only after UVC isochronous streaming is active; opening
+                        // AudioRecord earlier (fixed delay after startPreview) races USB bandwidth / routing
+                        // and often breaks when the first frame appears on composite capture cards.
+                        scheduleDeferredUsbAudio(usbDevice, camera, genAtPreviewStart)
                     }
-                }
-                lastFrameTime = now
-            }, if (selectedFrameFormat == UVCCamera.FRAME_FORMAT_H264) {
-                UVCCamera.PIXEL_FORMAT_RAW
+                }, UVCCamera.PIXEL_FORMAT_RAW)
             } else {
-                UVCCamera.PIXEL_FORMAT_RAW
-            })
+                camera.setPreviewFrameCallback(null, 0)
+            }
 
             t1 = SystemClock.elapsedRealtime()
             camera.startPreview()
@@ -900,12 +931,15 @@ class UvccameraLibPreviewBackend(
         uvcPreviewExecutor = newPreviewExecutor()
         oldExec.shutdownNow()
 
-        playbackGeneration++
-        deferredAudioRunnable?.let { mainHandler.removeCallbacks(it) }
-        deferredAudioRunnable = null
-        deferredAudioFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
-        deferredAudioFallbackRunnable = null
-        runCatching { captureAudioRef.getAndSet(null)?.stop() }
+            playbackGeneration++
+            deferredAudioRunnable?.let { mainHandler.removeCallbacks(it) }
+            deferredAudioRunnable = null
+            deferredAudioFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
+            deferredAudioFallbackRunnable = null
+            pendingAudioUsbDevice = null
+            pendingAudioCamera = null
+            pendingAudioGeneration = 0L
+            runCatching { captureAudioRef.getAndSet(null)?.stop() }
 
         previewRunning = false
         uvcCamera = null
@@ -927,6 +961,9 @@ class UvccameraLibPreviewBackend(
         deferredAudioRunnable = null
         deferredAudioFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
         deferredAudioFallbackRunnable = null
+        pendingAudioUsbDevice = null
+        pendingAudioCamera = null
+        pendingAudioGeneration = 0L
         Log.i(
             logTag,
             "playback: stopUvcStreaming gen=$playbackGeneration thread=${Thread.currentThread().name}",
@@ -940,7 +977,6 @@ class UvccameraLibPreviewBackend(
 
         val camera = uvcCamera ?: run {
             Log.i(logTag, "playback: stop no uvcCamera instance")
-            lastFrameTime = 0
             loggedFirstVideoFrame.set(false)
             resetTelemetryCounters()
             monitorCachedUsbDevice = null
@@ -959,7 +995,6 @@ class UvccameraLibPreviewBackend(
         }.onFailure { Log.e(logTag, "playback: destroy failed", it) }
 
         uvcCamera = null
-        lastFrameTime = 0
         loggedFirstVideoFrame.set(false)
         resetTelemetryCounters()
         monitorCachedUsbDevice = null
@@ -1274,7 +1309,9 @@ class UvccameraLibPreviewBackend(
         frameCount.set(0)
         lastTelemetryTime = System.currentTimeMillis()
         actualFps = 0
-        lastFrameTime = 0L
+        lastNativeEndToEndLatencyAvgMs = 0.0
+        lastNativeQueuedAvgFrames = 0.0
+        lastNativePayloadAvgKb = 0.0
     }
 
     private fun nsToMs(ns: Long): Double = ns / 1_000_000.0
@@ -1289,7 +1326,7 @@ class UvccameraLibPreviewBackend(
 
     companion object {
         private const val logTag: String = "UvcLibPreview"
-        private val EMPTY_PROCESSING_STATS = LongArray(12)
+        private val EMPTY_PROCESSING_STATS = LongArray(14)
 
         /** Filter: `adb logcat -s ConsolationUvcProbe:I` */
         private const val probeLogTag: String = "ConsolationUvcProbe"

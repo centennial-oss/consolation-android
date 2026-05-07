@@ -192,11 +192,12 @@ public:
 	char *getDescriptions();
 	int setPreviewSize(int width, int height, int min_fps, int max_fps, int mode, float bandwidth = DEFAULT_BANDWIDTH);
 	int setPreviewDisplay(ANativeWindow *preview_window);
+	int setPreviewFrameCallback(JNIEnv *env, jobject frame_callback_obj, int pixel_format);
 	int setFrameCallback(JNIEnv *env, jobject frame_callback_obj, int pixel_format);
 	int startPreview();
 	int stopPreview();
 	int setCaptureDisplay(ANativeWindow *capture_window);
-	void getAndResetProcessingStats(uint64_t stats[12]);
+	void getAndResetProcessingStats(uint64_t stats[14]);
 
 	int getCtrlSupports(uint64_t *supports);
 	int getProcSupports(uint64_t *supports);
