@@ -183,11 +183,17 @@ enum reap_action {
 	ERROR,
 };
 
+struct iso_urb_ctx {
+	struct usbi_transfer *itransfer;
+	int urb_idx;
+};
+
 struct android_transfer_priv {
 	union {
 		struct usbfs_urb *urbs;
 		struct usbfs_urb **iso_urbs;
 	};
+	struct iso_urb_ctx *iso_urb_ctxs;
 	/* 1 = iso_urbs were pre-allocated by libusb_prealloc_iso_urbs();
 	 * skip calloc/free on the hot resubmit path */
 	int iso_urbs_preallocated;
@@ -2128,6 +2134,8 @@ static void free_iso_urbs(struct android_transfer_priv *tpriv) {
 
 	free(tpriv->iso_urbs);
 	tpriv->iso_urbs = NULL;
+	free(tpriv->iso_urb_ctxs);
+	tpriv->iso_urb_ctxs = NULL;
 }
 
 /*
@@ -2147,6 +2155,7 @@ int API_EXPORTED libusb_prealloc_iso_urbs(struct libusb_transfer *transfer)
 	struct android_transfer_priv *tpriv =
 		usbi_transfer_get_os_priv(itransfer);
 	struct usbfs_urb **urbs;
+	struct iso_urb_ctx *urb_ctxs;
 	const int num_packets = transfer->num_iso_packets;
 	int i;
 	int this_urb_len = 0;
@@ -2178,6 +2187,12 @@ int API_EXPORTED libusb_prealloc_iso_urbs(struct libusb_transfer *transfer)
 	if (UNLIKELY(!urbs))
 		return LIBUSB_ERROR_NO_MEM;
 
+	urb_ctxs = calloc(num_urbs, sizeof(*urb_ctxs));
+	if (UNLIKELY(!urb_ctxs)) {
+		free(urbs);
+		return LIBUSB_ERROR_NO_MEM;
+	}
+
 	/* Allocate and fully populate each URB with its static fields.
 	 * On resubmit we only reset num_retired / reap_action / iso_packet_offset
 	 * and re-issue the ioctls — no field here changes between submits. */
@@ -2207,15 +2222,18 @@ int API_EXPORTED libusb_prealloc_iso_urbs(struct libusb_transfer *transfer)
 			int j2;
 			for (j2 = 0; j2 < i; j2++)
 				free(urbs[j2]);
+			free(urb_ctxs);
 			free(urbs);
 			return LIBUSB_ERROR_NO_MEM;
 		}
 		urbs[i] = urb;
+		urb_ctxs[i].itransfer = itransfer;
+		urb_ctxs[i].urb_idx = i;
 
 		for (j = 0, k = packet_offset - urb_packet_offset; k < packet_offset; k++, j++)
 			urb->iso_frame_desc[j].length = transfer->iso_packet_desc[k].length;
 
-		urb->usercontext = itransfer;
+		urb->usercontext = &urb_ctxs[i];
 		urb->type = USBFS_URB_TYPE_ISO;
 		urb->flags = USBFS_URB_ISO_ASAP;
 		urb->endpoint = transfer->endpoint;
@@ -2224,6 +2242,7 @@ int API_EXPORTED libusb_prealloc_iso_urbs(struct libusb_transfer *transfer)
 	}
 
 	tpriv->iso_urbs = urbs;
+	tpriv->iso_urb_ctxs = urb_ctxs;
 	tpriv->num_urbs = num_urbs;
 	tpriv->iso_urbs_preallocated = 1;
 	usbi_dbg("preallocated %d ISO URBs for transfer", num_urbs);
@@ -2414,6 +2433,7 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 	struct android_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
 	struct android_device_handle_priv *dpriv = _device_handle_priv(transfer->dev_handle);
 	struct usbfs_urb **urbs;
+	struct iso_urb_ctx *urb_ctxs;
 	size_t alloc_size;
 	const int num_packets = transfer->num_iso_packets;
 	int i;
@@ -2489,7 +2509,14 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 	if (UNLIKELY(!urbs))
 		return LIBUSB_ERROR_NO_MEM;
 
+	urb_ctxs = calloc(num_urbs, sizeof(*urb_ctxs));
+	if (UNLIKELY(!urb_ctxs)) {
+		free(urbs);
+		return LIBUSB_ERROR_NO_MEM;
+	}
+
 	tpriv->iso_urbs = urbs;
+	tpriv->iso_urb_ctxs = urb_ctxs;
 	tpriv->num_urbs = num_urbs;
 	tpriv->num_retired = 0;
 	tpriv->reap_action = NORMAL;
@@ -2527,6 +2554,8 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 			return LIBUSB_ERROR_NO_MEM;
 		}
 		urbs[i] = urb;
+		urb_ctxs[i].itransfer = itransfer;
+		urb_ctxs[i].urb_idx = i;
 
 		/* populate packet lengths */
 		for (j = 0, k = packet_offset - urb_packet_offset;
@@ -2535,7 +2564,7 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 			urb->iso_frame_desc[j].length = packet_len;
 		}
 
-		urb->usercontext = itransfer;
+		urb->usercontext = &urb_ctxs[i];
 		urb->type = USBFS_URB_TYPE_ISO;
 		/* FIXME: interface for non-ASAP data? */
 		urb->flags = USBFS_URB_ISO_ASAP;
@@ -2852,12 +2881,13 @@ completed:
 }
 
 static int handle_iso_completion(struct libusb_device_handle *handle,	// XXX added saki
-		struct usbi_transfer *itransfer,
 		struct usbfs_urb *urb) {
+	struct iso_urb_ctx *urb_ctx = urb->usercontext;
+	struct usbi_transfer *itransfer = urb_ctx->itransfer;
 	struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
 	struct android_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
 	int num_urbs = tpriv->num_urbs;
-	int urb_idx = 0;
+	int urb_idx = urb_ctx->urb_idx + 1;
 	int i;
 	enum libusb_transfer_status status = LIBUSB_TRANSFER_COMPLETED;
 
@@ -2866,15 +2896,9 @@ static int handle_iso_completion(struct libusb_device_handle *handle,	// XXX add
 		usbi_mutex_unlock(&itransfer->lock);
 		return LIBUSB_TRANSFER_ERROR;
 	}
-
-	for (i = 0; i < num_urbs; i++) {
-		if (urb == tpriv->iso_urbs[i]) {
-			urb_idx = i + 1;
-			break;
-		}
-	}
-	if (UNLIKELY(urb_idx == 0)) {
-		usbi_err(TRANSFER_CTX(transfer), "could not locate urb!");	// crash 2014/09/29 SIGSEGV/SEGV_MAPERR
+	if (UNLIKELY(urb_idx < 1 || urb_idx > num_urbs ||
+			urb != tpriv->iso_urbs[urb_ctx->urb_idx])) {
+		usbi_err(TRANSFER_CTX(transfer), "invalid iso urb context");
 		usbi_mutex_unlock(&itransfer->lock);
 		return LIBUSB_ERROR_NOT_FOUND;
 	}
@@ -3065,7 +3089,12 @@ static int reap_for_handle(struct libusb_device_handle *handle) {
 		return LIBUSB_ERROR_IO;
 	}
 
-	itransfer = urb->usercontext;
+	if (urb->type == USBFS_URB_TYPE_ISO) {
+		struct iso_urb_ctx *urb_ctx = urb->usercontext;
+		itransfer = urb_ctx->itransfer;
+	} else {
+		itransfer = urb->usercontext;
+	}
 	transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
 
 	usbi_dbg("urb type=%d status=%d transferred=%d",
@@ -3081,7 +3110,7 @@ static int reap_for_handle(struct libusb_device_handle *handle) {
 	
 	switch (transfer->type) {
 	case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS:
-		return handle_iso_completion(handle, itransfer, urb);
+		return handle_iso_completion(handle, urb);
 	case LIBUSB_TRANSFER_TYPE_BULK:
 	case LIBUSB_TRANSFER_TYPE_BULK_STREAM:
 	case LIBUSB_TRANSFER_TYPE_INTERRUPT:
