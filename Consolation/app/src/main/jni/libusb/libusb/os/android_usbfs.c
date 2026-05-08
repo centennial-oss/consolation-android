@@ -2654,7 +2654,8 @@ static int handle_bulk_completion(struct libusb_device_handle *handle,	// XXX ad
 		if (tpriv->reap_status == LIBUSB_TRANSFER_COMPLETED)
 			tpriv->reap_status = LIBUSB_TRANSFER_STALL;
 		LOGE("LIBUSB_TRANSFER_STALL");
-		op_clear_halt(handle, urb->endpoint);	// XXX added saki
+		/* Do not clear halt inline in completion path; this can block and
+		 * stall reaping under high-throughput streaming workloads. */
 		goto cancel_remaining;
 	case -EOVERFLOW:
 		/* overflow can only ever occur in the last urb */
@@ -2725,10 +2726,12 @@ static int handle_iso_completion(struct libusb_device_handle *handle,	// XXX add
 	enum libusb_transfer_status status = LIBUSB_TRANSFER_COMPLETED;
 
 	usbi_mutex_lock(&itransfer->lock);
+	if (tpriv->iso_urbs == NULL) {
+		usbi_mutex_unlock(&itransfer->lock);
+		return LIBUSB_TRANSFER_ERROR;
+	}
+
 	for (i = 0; i < num_urbs; i++) {
-		if(tpriv->iso_urbs == NULL){
-			return LIBUSB_TRANSFER_ERROR;
-		}
 		if (urb == tpriv->iso_urbs[i]) {
 			urb_idx = i + 1;
 			break;
@@ -2765,7 +2768,7 @@ static int handle_iso_completion(struct libusb_device_handle *handle,	// XXX add
 			usbi_dbg("detected endpoint stall");
 			lib_desc->status = LIBUSB_TRANSFER_STALL;
 			LOGE("LIBUSB_TRANSFER_STALL");
-			op_clear_halt(handle, urb->endpoint);	// XXX added saki
+			/* Avoid synchronous clear_halt in hot completion path. */
 			break;
 		case -EOVERFLOW:
 			usbi_dbg("overflow error");
@@ -2877,7 +2880,7 @@ static int handle_control_completion(struct libusb_device_handle *handle,	// XXX
 		usbi_dbg("unsupported control request");
 		status = LIBUSB_TRANSFER_STALL;
 		LOGE("LIBUSB_TRANSFER_STALL");
-		op_clear_halt(handle, urb->endpoint);	// XXX added saki
+		/* Avoid synchronous clear_halt in hot completion path. */
 		break;
 	case -EOVERFLOW:
 		usbi_dbg("control overflow error");
@@ -2930,10 +2933,12 @@ static int reap_for_handle(struct libusb_device_handle *handle) {
 	usbi_dbg("urb type=%d status=%d transferred=%d",
 		urb->type, urb->status, urb->actual_length);
 	
-	// if not check status, will crash when target > 27
-	// current error status is -108
-	if(urb->status == -108){
-		return LIBUSB_ERROR_OTHER;
+	/* -108 has been observed on some Android stacks during heavy streaming.
+	 * Treat as a transport error for this URB so normal completion/error paths
+	 * can retire/cancel cleanly, instead of aborting the event loop. */
+	if (urb->status == -108) {
+		usbi_warn(HANDLE_CTX(handle), "urb status -108 mapped to -EPROTO");
+		urb->status = -EPROTO;
 	}
 	
 	switch (transfer->type) {
