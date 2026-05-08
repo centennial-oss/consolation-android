@@ -3129,16 +3129,20 @@ static int op_handle_events(struct libusb_context *ctx, struct pollfd *fds,
 	int r;
 	unsigned int i = 0;
 
-	usbi_mutex_lock(&ctx->open_devs_lock);
 	for (i = 0; i < nfds && num_ready > 0; i++) {
 		struct pollfd *pollfd = &fds[i];
-		struct libusb_device_handle *handle;
+		struct libusb_device_handle *handle = NULL;
 		struct android_device_handle_priv *hpriv = NULL;
 
 		if (!pollfd->revents)
 			continue;
 
 		num_ready--;
+		/* libusb's event loop calls backend handle_events with events_lock
+		 * held. That excludes libusb_close while we reap or disconnect using
+		 * this handle. open_devs_lock is only needed for the fd -> handle
+		 * lookup, so release it before callbacks can resubmit transfers. */
+		usbi_mutex_lock(&ctx->open_devs_lock);
 		list_for_each_entry(handle, &ctx->open_devs, list, struct libusb_device_handle)
 		{
 			hpriv = _device_handle_priv(handle);
@@ -3147,16 +3151,16 @@ static int op_handle_events(struct libusb_context *ctx, struct pollfd *fds,
 		}
 
 		if (!hpriv || hpriv->fd != pollfd->fd) {
+			usbi_mutex_unlock(&ctx->open_devs_lock);
 			usbi_err(ctx, "cannot find handle for fd %d\n",
 				 pollfd->fd);
 			continue;
 		}
+		usbi_mutex_unlock(&ctx->open_devs_lock);
 
 		if (pollfd->revents & POLLERR) {
 			usbi_remove_pollfd(HANDLE_CTX(handle), hpriv->fd);
-			usbi_mutex_lock(&ctx->events_lock);		// XXX as a note of usbi_handle_disconnect shows that need event_lock locked
 			usbi_handle_disconnect(handle);
-			usbi_mutex_unlock(&ctx->events_lock);	// XXX
 			/* device will still be marked as attached if hotplug monitor thread
 			 * hasn't processed remove event yet */
 			usbi_mutex_static_lock(&android_hotplug_lock);
@@ -3173,13 +3177,10 @@ static int op_handle_events(struct libusb_context *ctx, struct pollfd *fds,
 		if (r == 1 || r == LIBUSB_ERROR_NO_DEVICE)
 			continue;
 		else if (r < 0)
-			goto out;
+			return r;
 	}
 
-	r = 0;
-out:
-	usbi_mutex_unlock(&ctx->open_devs_lock);
-	return r;
+	return 0;
 }
 
 static int op_clock_gettime(int clk_id, struct timespec *tp) {
