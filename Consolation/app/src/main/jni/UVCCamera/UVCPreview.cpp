@@ -46,6 +46,20 @@
 
 #include <sys/resource.h>
 
+#ifndef UVC_RUNTIME_DIAG_ENABLED
+#if defined(NDEBUG)
+#define UVC_RUNTIME_DIAG_ENABLED 0
+#else
+#define UVC_RUNTIME_DIAG_ENABLED 1
+#endif
+#endif
+
+#if UVC_RUNTIME_DIAG_ENABLED
+#define UVC_DIAG_LOGI(...) LOGI(__VA_ARGS__)
+#else
+#define UVC_DIAG_LOGI(...)
+#endif
+
 namespace {
 
 static void consolation_tune_thread_latency(const char *pthread_name_not_null)
@@ -159,6 +173,8 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	processingPreviewQueueDropCount(0),
 	processingPreviewQueueDepthSampleCount(0),
 	processingPreviewQueueDepthTotalMilli(0),
+	diagMjpegDecodedCount(0),
+	diagMjpegLastLuma(0),
 	streamingStartMonotonicNs(0),
 	firstFrameLogged(false) {
 
@@ -374,6 +390,83 @@ void UVCPreview::recordPayloadBytes(size_t bytes) {
 	if (bytes > processingPayloadMaxBytes)
 		processingPayloadMaxBytes = bytes;
 	pthread_mutex_unlock(&processing_stats_mutex);
+}
+
+void UVCPreview::recordMjpegDecodedVisualSample(uint32_t sequence, size_t bytes,
+		const uint8_t *rgbx, size_t stride_bytes, uint32_t width, uint32_t height) {
+#if !UVC_RUNTIME_DIAG_ENABLED
+	(void)sequence;
+	(void)bytes;
+	(void)rgbx;
+	(void)stride_bytes;
+	(void)width;
+	(void)height;
+	return;
+#else
+	/* Sample 8 rows × 8 columns for the whole-frame average luma, and
+	 * additionally record per-row luma at 8 evenly-spaced horizontal bands
+	 * (10%, 20%, …, 90% of frame height).  The per-row log fires whenever
+	 * the whole-frame luma delta is large (≥30) so we can pinpoint which
+	 * bands are flickering without drowning logcat in normal operation. */
+	uint64_t luma_total = 0;
+	uint32_t samples = 0;
+	uint32_t luma_avg;
+	uint32_t prior;
+	uint32_t delta;
+	uint32_t y;
+	/* per-row band lumas; 0 = not computed */
+	uint32_t band_luma[8] = {};
+
+	if (UNLIKELY(!rgbx || !width || !height || stride_bytes < (size_t)width * PREVIEW_PIXEL_BYTES))
+		return;
+
+	for (y = 0; y < 8; y++) {
+		const uint32_t py = (height * (y * 2 + 1)) / 16;
+		uint32_t x;
+		const uint8_t *row = rgbx + (size_t)py * stride_bytes;
+		uint64_t band_total = 0;
+		for (x = 0; x < 8; x++) {
+			const uint32_t px = (width * (x * 2 + 1)) / 16;
+			const uint8_t *p = row + (size_t)px * PREVIEW_PIXEL_BYTES;
+			const uint32_t pix_luma = (uint32_t)p[0] * 77u + (uint32_t)p[1] * 150u
+				+ (uint32_t)p[2] * 29u;
+			luma_total += pix_luma;
+			band_total += pix_luma;
+			samples++;
+		}
+		band_luma[y] = (uint32_t)(band_total / (8u * 256u));
+	}
+	if (!samples)
+		return;
+
+	luma_avg = (uint32_t)(luma_total / (samples * 256u));
+	pthread_mutex_lock(&processing_stats_mutex);
+	diagMjpegDecodedCount++;
+	prior = diagMjpegLastLuma;
+	delta = luma_avg > prior ? luma_avg - prior : prior - luma_avg;
+	if (delta >= 10 || diagMjpegDecodedCount <= 20 || !(diagMjpegDecodedCount % 120)) {
+		UVC_DIAG_LOGI("mjpeg-diag:decoded count=%u seq=%u bytes=%zu luma=%u last_luma=%u delta=%u frame=%ux%u",
+			diagMjpegDecodedCount,
+			sequence,
+			bytes,
+			luma_avg,
+			prior,
+			delta,
+			width,
+			height);
+	}
+	/* Per-band breakdown when luma swings are large enough to indicate banding. */
+	if (delta >= 30) {
+		UVC_DIAG_LOGI("mjpeg-diag:bands count=%u seq=%u "
+			"b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u",
+			diagMjpegDecodedCount,
+			sequence,
+			band_luma[0], band_luma[1], band_luma[2], band_luma[3],
+			band_luma[4], band_luma[5], band_luma[6], band_luma[7]);
+	}
+	diagMjpegLastLuma = luma_avg;
+	pthread_mutex_unlock(&processing_stats_mutex);
+#endif
 }
 
 void UVCPreview::recordPreviewQueueDepthSample(uint64_t depth_frames) {
@@ -852,6 +945,21 @@ bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
 					? uvc_mjpeg2rgbx(frame, &surface) : uvc_any2rgbx(frame, &surface);
 				recordPreviewConversionTiming(processing_now_ns() - t_convert);
 				rendered = result == UVC_SUCCESS;
+				if (LIKELY(rendered && frame->frame_format == UVC_FRAME_FORMAT_MJPEG)) {
+					recordMjpegDecodedVisualSample(frame->sequence, frame->actual_bytes,
+						(const uint8_t *)buffer.bits, surface.step, frame->width, frame->height);
+				}
+				if (UNLIKELY(result && frame->frame_format == UVC_FRAME_FORMAT_MJPEG)) {
+					UVC_DIAG_LOGI("mjpeg-diag:decode-fail direct seq=%u bytes=%zu result=%d surface=%dx%d stride=%d frame=%ux%u",
+						frame->sequence,
+						frame->actual_bytes,
+						result,
+						buffer.width,
+						buffer.height,
+						buffer.stride,
+						frame->width,
+						frame->height);
+				}
 			}
 			ANativeWindow_unlockAndPost(target);
 			if (rendered && after_post_ns)
@@ -874,6 +982,12 @@ uvc_frame_t *UVCPreview::convertPreviewFrameToRgbx(uvc_frame_t *frame) {
 	recordPreviewConversionTiming(processing_now_ns() - t_convert);
 
 	if (UNLIKELY(result && frame->frame_format == UVC_FRAME_FORMAT_MJPEG)) {
+		UVC_DIAG_LOGI("mjpeg-diag:decode-fail scratch-primary seq=%u bytes=%zu result=%d frame=%ux%u",
+			frame->sequence,
+			frame->actual_bytes,
+			result,
+			frame->width,
+			frame->height);
 		uvc_frame_t *tmp = get_frame(frame->width * frame->height * 2);
 		if (LIKELY(tmp)) {
 			t_convert = processing_now_ns();
@@ -888,10 +1002,22 @@ uvc_frame_t *UVCPreview::convertPreviewFrameToRgbx(uvc_frame_t *frame) {
 	}
 
 	if (UNLIKELY(result)) {
+		if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG) {
+			UVC_DIAG_LOGI("mjpeg-diag:decode-fail scratch-final seq=%u bytes=%zu result=%d frame=%ux%u",
+				frame->sequence,
+				frame->actual_bytes,
+				result,
+				frame->width,
+				frame->height);
+		}
 		recycle_frame(rgbx);
 		return NULL;
 	}
 	rgbx->arrival_monotonic_ns = frame->arrival_monotonic_ns;
+	if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG) {
+		recordMjpegDecodedVisualSample(frame->sequence, frame->actual_bytes,
+			(const uint8_t *)rgbx->data, rgbx->step, rgbx->width, rgbx->height);
+	}
 	return rgbx;
 }
 

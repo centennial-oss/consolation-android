@@ -215,6 +215,12 @@ static inline void insert_huff_tables(j_decompress_ptr dinfo) {
 
 #define MJPEG_RGBX_READLINE 16
 
+/* Diagnostic/compat path: avoid carrying libjpeg decompressor state across
+ * MJPEG frames.  If this fixes one card's flicker, make it device-scoped. */
+#ifndef UVC_MJPEG_RGBX_REUSE_DECODER
+#define UVC_MJPEG_RGBX_REUSE_DECODER 1
+#endif
+
 /** True if full output height was decoded (avoids size_t vs int compare on return paths). */
 static inline int uvc_mjpeg_lines_match_height(size_t lines_decoded, int height_px) {
 	if UNLIKELY(height_px < 0)
@@ -456,8 +462,13 @@ fail:
  * @param out RGBX frame
  */
 uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
+#if UVC_MJPEG_RGBX_REUSE_DECODER
 	struct mjpeg_decoder_ctx *decoder;
 	struct jpeg_decompress_struct *dinfo;
+#else
+	struct jpeg_decompress_struct dinfo_stack;
+	struct jpeg_decompress_struct *dinfo = &dinfo_stack;
+#endif
 	struct error_mgr jerr;
 	size_t lines_read;
 
@@ -484,11 +495,15 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	out->capture_time = in->capture_time;
 	out->source = in->source;
 
+#if UVC_MJPEG_RGBX_REUSE_DECODER
 	decoder = _mjpeg_decoder_get();
 	if (UNLIKELY(!decoder))
 		return UVC_ERROR_NO_MEM;
 
 	dinfo = &decoder->dinfo;
+#else
+	memset(dinfo, 0, sizeof(*dinfo));
+#endif
 	dinfo->err = jpeg_std_error(&jerr.super);
 	jerr.super.error_exit = _error_exit;
 
@@ -496,10 +511,14 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 		goto fail;
 	}
 
+#if UVC_MJPEG_RGBX_REUSE_DECODER
 	if (!decoder->initialized) {
 		jpeg_create_decompress(dinfo);
 		decoder->initialized = 1;
 	}
+#else
+	jpeg_create_decompress(dinfo);
+#endif
 
 	jpeg_mem_src(dinfo, in->data, in->actual_bytes/*in->data_bytes*/);	// XXX
 	jpeg_read_header(dinfo, TRUE);
@@ -530,11 +549,18 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 		out->actual_bytes = in->width * in->height * 4;	// XXX
 	}
 	jpeg_finish_decompress(dinfo);
+#if !UVC_MJPEG_RGBX_REUSE_DECODER
+	jpeg_destroy_decompress(dinfo);
+#endif
 	return uvc_mjpeg_lines_match_height(lines_read, out->height)
 		? UVC_SUCCESS : UVC_ERROR_OTHER;
 
 fail:
+#if UVC_MJPEG_RGBX_REUSE_DECODER
 	_mjpeg_decoder_reset(decoder);
+#else
+	jpeg_destroy_decompress(dinfo);
+#endif
 	return UVC_ERROR_OTHER+1;
 }
 

@@ -276,6 +276,10 @@ struct uvc_stream_handle {
   size_t got_bytes, hold_bytes;
   size_t size_buf;	// XXX add for boundary check
   uint8_t *outbuf, *holdbuf;
+  /** Third stable buffer for consumer; never aliased to outbuf/holdbuf.
+   *  _uvc_populate_frame memcpy's holdbuf here under cb_mutex so the
+   *  USB producer can immediately reuse holdbuf without racing the copy. */
+  uint8_t *framebuf;
   pthread_mutex_t cb_mutex;
   pthread_cond_t cb_cond;
   pthread_t cb_thread;
@@ -301,6 +305,14 @@ struct uvc_stream_handle {
   uint8_t diag_logged_first_swap;
   /** Bulk-only: count TIMEOUT completions before first video payload */
   uint16_t diag_bulk_timeout_count_before_payload;
+  uint32_t diag_mjpeg_publish_count;
+  uint32_t diag_mjpeg_drop_count;
+  size_t diag_last_mjpeg_bytes;
+  uint32_t diag_last_mjpeg_pts;
+  uint32_t diag_last_mjpeg_scr;
+  uint32_t diag_last_mjpeg_sample_hash;
+  uint32_t diag_last_mjpeg_header_hash;
+  uint16_t diag_last_mjpeg_restart_interval;
 };
 
 /** Handle on an open UVC device

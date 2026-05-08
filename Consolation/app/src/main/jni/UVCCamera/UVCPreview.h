@@ -115,6 +115,8 @@ private:
 	uint64_t processingPreviewQueueDropCount;
 	uint64_t processingPreviewQueueDepthSampleCount;
 	uint64_t processingPreviewQueueDepthTotalMilli;
+	uint32_t diagMjpegDecodedCount;
+	uint32_t diagMjpegLastLuma;
 	volatile uint64_t streamingStartMonotonicNs;
 	volatile bool firstFrameLogged;
 // improve performance by reducing memory allocation
@@ -160,6 +162,8 @@ private:
 	void recordEndToEndLatencyTiming(uint64_t start_ns, uint64_t end_ns);
 	void recordPayloadBytes(size_t bytes);
 	void recordPreviewQueueDepthSample(uint64_t depth_frames);
+	void recordMjpegDecodedVisualSample(uint32_t sequence, size_t bytes,
+		const uint8_t *rgbx, size_t stride_bytes, uint32_t width, uint32_t height);
 public:
 	UVCPreview(uvc_device_handle_t *devh);
 	~UVCPreview();

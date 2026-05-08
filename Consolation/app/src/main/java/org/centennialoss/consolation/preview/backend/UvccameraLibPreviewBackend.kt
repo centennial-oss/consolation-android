@@ -26,6 +26,7 @@ import org.centennialoss.consolation.preview.UsbPreviewSurfaceHints.setDefaultBu
 import org.centennialoss.consolation.usb.UsbCaptureDeviceRepository
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -1141,19 +1142,19 @@ class UvccameraLibPreviewBackend(
 
     private fun buildAutoFormatOrder(nativeFrameFormat: Int?, preferCompressed: Boolean): List<Int> {
         val out = mutableListOf<Int>()
-        // Keep native hints, but don't allow YUYV to preempt NV12 in AUTO mode.
+        // Keep native hints, but keep deterministic AUTO fallback priority.
         nativeFrameFormat
             ?.takeUnless { it == UVCCamera.FRAME_FORMAT_YUYV }
             ?.let { out.add(it) }
         if (preferCompressed) {
             out.add(UVCCamera.FRAME_FORMAT_MJPEG)
             out.add(UVCCamera.FRAME_FORMAT_NV12)
-            out.add(UVCCamera.FRAME_FORMAT_P010)
             out.add(UVCCamera.FRAME_FORMAT_YUYV)
+            out.add(UVCCamera.FRAME_FORMAT_P010)
         } else {
             out.add(UVCCamera.FRAME_FORMAT_NV12)
-            out.add(UVCCamera.FRAME_FORMAT_P010)
             out.add(UVCCamera.FRAME_FORMAT_YUYV)
+            out.add(UVCCamera.FRAME_FORMAT_P010)
             out.add(UVCCamera.FRAME_FORMAT_MJPEG)
         }
         return out.distinct()

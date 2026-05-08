@@ -119,8 +119,8 @@ class MainActivity : ComponentActivity() {
         AUTO("auto", null),
         H264("h264", UVCCamera.FRAME_FORMAT_H264),
         NV12("nv12", UVCCamera.FRAME_FORMAT_NV12),
-        P010("p010", UVCCamera.FRAME_FORMAT_P010),
         YUYV("yuyv", UVCCamera.FRAME_FORMAT_YUYV),
+        P010("p010", UVCCamera.FRAME_FORMAT_P010),
         MJPEG("mjpeg", UVCCamera.FRAME_FORMAT_MJPEG),
     }
 
@@ -496,7 +496,7 @@ class MainActivity : ComponentActivity() {
             binding.lowFpsWarning.isVisible = false
             binding.videoStatsOverlay.isVisible = false
 
-            val names = devices.map { it.name }
+            val names = devices.map { it.displayName }
             val adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, names)
             binding.startupScreen.deviceDropdown.setAdapter(adapter)
 
@@ -515,7 +515,7 @@ class MainActivity : ComponentActivity() {
                     selectedFormat = null
                     selectedPixelFormatPreference = PixelFormatPreference.AUTO
                     probedFormatSizes = emptyList()
-                    binding.startupScreen.deviceDropdown.setText(selectedDevice?.name, false)
+                    binding.startupScreen.deviceDropdown.setText(selectedDevice?.displayName, false)
                     binding.startupScreen.resolutionDropdown.setText("", false)
                     lastResolutionRefreshDeviceId = null
                 }
@@ -781,6 +781,15 @@ class MainActivity : ComponentActivity() {
                 menu.addSubMenu(Menu.NONE, Menu.NONE, Menu.NONE, "${group.width}x${group.height}")
             addMenuHeaderWithDivider(resolutionSub, "Frame Rate")
             for (fps in group.fpsOptions) {
+                val formatOptions = supportedFormatPreferencesForResolutionAndFps(
+                    probedFormatSizes,
+                    group.width,
+                    group.height,
+                    fps,
+                )
+                if (formatOptions.isEmpty()) {
+                    continue
+                }
                 val fpsSub: Menu = resolutionSub.addSubMenu(
                     Menu.NONE,
                     Menu.NONE,
@@ -788,12 +797,6 @@ class MainActivity : ComponentActivity() {
                     "${fps.roundToInt()} fps",
                 )
                 addMenuHeaderWithDivider(fpsSub, "Pixel Format")
-                val formatOptions = supportedFormatPreferencesForResolutionAndFps(
-                    probedFormatSizes,
-                    group.width,
-                    group.height,
-                    fps,
-                )
                 for (formatPreference in formatOptions) {
                     val id = nextId++
                     choiceIds[id] = MenuChoice(group.width, group.height, fps, formatPreference)
@@ -1531,7 +1534,13 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) {
                 30
             }
-            previewBackend.setPreferredPixelFormat(pixelPreference.frameFormat)
+            // Keep runtime request aligned with the already-resolved concrete Size so AUTO
+            // never asks backend for a format unavailable at the selected resolution/fps.
+            val runtimeFrameFormat = when (pixelPreference) {
+                PixelFormatPreference.AUTO -> format.frame_type
+                else -> pixelPreference.frameFormat ?: format.frame_type
+            }
+            previewBackend.setPreferredPixelFormat(runtimeFrameFormat)
             previewBackend.setPreviewSize(format.width, format.height, fps)
 
             WatchSessionPrep(format, newProbed, pixelPreference)
@@ -1787,6 +1796,7 @@ class MainActivity : ComponentActivity() {
         private const val POST_USB_PERMISSION_SETTLE_MS = 1_500L
         private const val DEFAULT_TARGET_FPS = 60f
         private const val DEFAULT_TARGET_FPS_TOLERANCE = 0.75f
+        private const val MENU_FPS_DEDUP_TOLERANCE = 0.75f
 
         private data class ResolutionGroup(
             val width: Int,
@@ -1801,9 +1811,28 @@ class MainActivity : ComponentActivity() {
                 map.getOrPut(key) { mutableListOf() }.add(s)
             }
             return map.map { (k, v) ->
-                val fpsOptions = v.flatMap { it.fps?.toList().orEmpty() }.distinct().sortedDescending()
+                val fpsOptions = collapseFpsOptions(
+                    v.flatMap { it.fps?.toList().orEmpty() },
+                    MENU_FPS_DEDUP_TOLERANCE,
+                )
                 ResolutionGroup(k.first, k.second, fpsOptions)
             }.sortedByDescending { it.width * it.height }
+        }
+
+        /**
+         * Device descriptors sometimes publish duplicate/near-duplicate intervals (e.g. 60 and 59.94)
+         * that collapse to the same UI label. Keep one representative per tolerance bucket.
+         */
+        private fun collapseFpsOptions(values: List<Float>, tolerance: Float): List<Float> {
+            if (values.isEmpty()) return emptyList()
+            val sorted = values.sortedDescending()
+            val collapsed = mutableListOf<Float>()
+            for (fps in sorted) {
+                if (collapsed.none { abs(it - fps) <= tolerance }) {
+                    collapsed += fps
+                }
+            }
+            return collapsed
         }
 
         private fun supportedFormatPreferences(sizes: List<Size>): List<PixelFormatPreference> {
@@ -1811,8 +1840,8 @@ class MainActivity : ComponentActivity() {
             val ordered = listOf(
                 PixelFormatPreference.H264,
                 PixelFormatPreference.NV12,
-                PixelFormatPreference.P010,
                 PixelFormatPreference.YUYV,
+                PixelFormatPreference.P010,
                 PixelFormatPreference.MJPEG,
             ).filter { it in supported }
             return listOf(PixelFormatPreference.AUTO) + ordered
@@ -1829,18 +1858,14 @@ class MainActivity : ComponentActivity() {
                 val fpsArray = size.fps ?: return@filter false
                 fpsArray.any { abs(it - fps) <= DEFAULT_TARGET_FPS_TOLERANCE }
             }
-            return if (candidates.isNotEmpty()) {
-                supportedFormatPreferences(candidates)
-            } else {
-                supportedFormatPreferences(sizes.filter { it.width == width && it.height == height })
-            }
+            return supportedFormatPreferences(candidates)
         }
 
         private fun preferenceForFrameType(frameType: Int): PixelFormatPreference? = when (frameType) {
             UVCCamera.FRAME_FORMAT_H264 -> PixelFormatPreference.H264
             UVCCamera.FRAME_FORMAT_NV12 -> PixelFormatPreference.NV12
-            UVCCamera.FRAME_FORMAT_P010 -> PixelFormatPreference.P010
             UVCCamera.FRAME_FORMAT_YUYV -> PixelFormatPreference.YUYV
+            UVCCamera.FRAME_FORMAT_P010 -> PixelFormatPreference.P010
             UVCCamera.FRAME_FORMAT_MJPEG -> PixelFormatPreference.MJPEG
             else -> null
         }
@@ -1849,8 +1874,8 @@ class MainActivity : ComponentActivity() {
             PixelFormatPreference.AUTO -> "Auto"
             PixelFormatPreference.H264 -> "H264"
             PixelFormatPreference.NV12 -> "NV12"
-            PixelFormatPreference.P010 -> "P010"
             PixelFormatPreference.YUYV -> "YUYV"
+            PixelFormatPreference.P010 -> "P010"
             PixelFormatPreference.MJPEG -> "MJPEG"
         }
 
@@ -1924,28 +1949,32 @@ class MainActivity : ComponentActivity() {
             val prioritized = when (preference) {
                 PixelFormatPreference.AUTO ->
                     listOf(
-                        UVCCamera.FRAME_FORMAT_H264,
                         UVCCamera.FRAME_FORMAT_NV12,
-                        UVCCamera.FRAME_FORMAT_P010,
                         UVCCamera.FRAME_FORMAT_YUYV,
+                        UVCCamera.FRAME_FORMAT_P010,
                         UVCCamera.FRAME_FORMAT_MJPEG,
                     )
                 else -> listOfNotNull(preference.frameFormat)
             }
+            val targetFps = requestedFps ?: DEFAULT_TARGET_FPS
+            val fpsMatchedCandidates = resolutionCandidates.filter { size ->
+                val fpsArray = size.fps ?: return@filter false
+                fpsArray.any { abs(it - targetFps) <= DEFAULT_TARGET_FPS_TOLERANCE }
+            }
             val candidates = if (prioritized.isEmpty()) {
-                resolutionCandidates
+                if (fpsMatchedCandidates.isNotEmpty()) fpsMatchedCandidates else resolutionCandidates
             } else {
+                val pool = if (fpsMatchedCandidates.isNotEmpty()) fpsMatchedCandidates else resolutionCandidates
                 prioritized
                     .asSequence()
                     .mapNotNull { fmt ->
-                        resolutionCandidates
+                        pool
                             .filter { it.frame_type == fmt }
                             .maxByOrNull { bestAvailableFps(it) }
                     }
                     .toList()
-                    .ifEmpty { resolutionCandidates }
+                    .ifEmpty { pool }
             }
-            val targetFps = requestedFps ?: DEFAULT_TARGET_FPS
             val template = candidates.minByOrNull { size ->
                 val fpsArray = size.fps ?: return@minByOrNull Float.POSITIVE_INFINITY
                 fpsArray.minOfOrNull { abs(it - targetFps) } ?: Float.POSITIVE_INFINITY

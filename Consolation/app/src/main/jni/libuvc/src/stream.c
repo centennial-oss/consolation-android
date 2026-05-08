@@ -63,16 +63,236 @@
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
 
+#ifndef UVC_RUNTIME_DIAG_ENABLED
+#if defined(NDEBUG)
+#define UVC_RUNTIME_DIAG_ENABLED 0
+#else
+#define UVC_RUNTIME_DIAG_ENABLED 1
+#endif
+#endif
+
+#if UVC_RUNTIME_DIAG_ENABLED
+#define UVC_DIAG_LOGI(...) LOGI(__VA_ARGS__)
+#else
+#define UVC_DIAG_LOGI(...)
+#endif
+
 uvc_frame_desc_t *uvc_find_frame_desc_stream(uvc_stream_handle_t *strmh,
 		uint16_t format_id, uint16_t frame_id);
 uvc_frame_desc_t *uvc_find_frame_desc(uvc_device_handle_t *devh,
 		uint16_t format_id, uint16_t frame_id);
 static void *_uvc_user_caller(void *arg);
 static void _uvc_populate_frame(uvc_stream_handle_t *strmh);
+static void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason);
 static uint64_t uvc_diag_now_ns(void) {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+}
+
+static uint32_t _uvc_diag_sample_hash(const uint8_t *data, size_t len) {
+	uint32_t hash = 2166136261u;
+	size_t chunk;
+
+	if (!data || !len)
+		return 0;
+
+	for (chunk = 0; chunk < 16; chunk++) {
+		size_t offset = (len * chunk) / 16;
+		size_t end = offset + 64;
+		size_t i;
+		if (end > len)
+			end = len;
+		for (i = offset; i < end; i++) {
+			hash ^= data[i];
+			hash *= 16777619u;
+		}
+	}
+	return hash;
+}
+
+static uint32_t _uvc_diag_hash_bytes(uint32_t hash, const uint8_t *data, size_t len) {
+	size_t i;
+	for (i = 0; i < len; i++) {
+		hash ^= data[i];
+		hash *= 16777619u;
+	}
+	return hash;
+}
+
+static uint16_t _uvc_diag_read_be16(const uint8_t *data) {
+	return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+}
+
+static uint32_t _uvc_diag_mjpeg_header_hash(const uint8_t *data, size_t len,
+		uint16_t *restart_interval) {
+	uint32_t hash = 2166136261u;
+	size_t pos = 2;
+
+	if (restart_interval)
+		*restart_interval = 0;
+
+	if (!data || len < 4 || data[0] != 0xff || data[1] != 0xd8)
+		return 0;
+
+	for (; pos + 3 < len ;) {
+		uint8_t marker;
+		uint16_t segment_len;
+		size_t segment_end;
+
+		if (data[pos] != 0xff) {
+			pos++;
+			continue;
+		}
+		while (pos < len && data[pos] == 0xff)
+			pos++;
+		if (pos >= len)
+			break;
+
+		marker = data[pos++];
+		if (marker == 0xda || marker == 0xd9)
+			break;
+		if (marker == 0x00 || (marker >= 0xd0 && marker <= 0xd7) || marker == 0x01)
+			continue;
+		if (pos + 2 > len)
+			break;
+
+		segment_len = _uvc_diag_read_be16(data + pos);
+		if (segment_len < 2)
+			break;
+		segment_end = pos + segment_len;
+		if (segment_end > len)
+			break;
+
+		hash ^= marker;
+		hash *= 16777619u;
+		hash = _uvc_diag_hash_bytes(hash, data + pos, segment_len);
+
+		if (marker == 0xdd && restart_interval && segment_len >= 4)
+			*restart_interval = _uvc_diag_read_be16(data + pos + 2);
+
+		pos = segment_end;
+	}
+
+	return hash;
+}
+
+static inline int _uvc_mjpeg_payload_has_markers(const uvc_stream_handle_t *strmh) {
+	const uint8_t *data = strmh->outbuf;
+	const size_t len = strmh->got_bytes;
+	size_t i;
+
+	if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG)
+		return 1;
+
+	if (!(len >= 4
+		&& data[0] == 0xff && data[1] == 0xd8
+		&& data[len - 2] == 0xff && data[len - 1] == 0xd9))
+		return 0;
+
+	for (i = 2; i + 1 < len - 2; i++) {
+		if (data[i] == 0xff && data[i + 1] == 0xd8)
+			return 0;
+	}
+
+	return 1;
+}
+
+static void _uvc_diag_mjpeg_drop(uvc_stream_handle_t *strmh, const char *reason) {
+	if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG)
+		return;
+
+	strmh->diag_mjpeg_drop_count++;
+	if (strmh->diag_mjpeg_drop_count <= 20 || !(strmh->diag_mjpeg_drop_count % 120)) {
+		UVC_DIAG_LOGI("mjpeg-diag:drop count=%u reason=%s seq=%u bytes=%zu fid=%u pts=%u scr=%u",
+			strmh->diag_mjpeg_drop_count,
+			reason ? reason : "?",
+			strmh->seq,
+			strmh->got_bytes,
+			(unsigned)strmh->fid,
+			strmh->pts,
+			strmh->last_scr);
+	}
+}
+
+static void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason) {
+	size_t last_bytes;
+	int size_anomaly = 0;
+	int pts_anomaly = 0;
+	int scr_anomaly = 0;
+	uint32_t hash;
+	uint32_t header_hash;
+	uint16_t restart_interval = 0;
+	int sample_hash_repeat = 0;
+	int header_change = 0;
+	int restart_change = 0;
+
+	if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG)
+		return;
+#if !UVC_RUNTIME_DIAG_ENABLED
+	(void)reason;
+	return;
+#endif
+
+	hash = _uvc_diag_sample_hash(strmh->outbuf, strmh->got_bytes);
+	header_hash = _uvc_diag_mjpeg_header_hash(strmh->outbuf, strmh->got_bytes,
+		&restart_interval);
+	sample_hash_repeat = strmh->diag_last_mjpeg_sample_hash
+		&& hash == strmh->diag_last_mjpeg_sample_hash;
+	header_change = strmh->diag_last_mjpeg_header_hash
+		&& header_hash != strmh->diag_last_mjpeg_header_hash;
+	restart_change = strmh->diag_last_mjpeg_restart_interval
+		&& restart_interval != strmh->diag_last_mjpeg_restart_interval;
+
+	last_bytes = strmh->diag_last_mjpeg_bytes;
+	if (last_bytes) {
+		const size_t min_expected = last_bytes - (last_bytes / 3);
+		const size_t max_expected = last_bytes + (last_bytes / 3);
+		size_anomaly = strmh->got_bytes < min_expected || strmh->got_bytes > max_expected;
+	}
+	pts_anomaly = strmh->pts && strmh->diag_last_mjpeg_pts
+		&& strmh->pts <= strmh->diag_last_mjpeg_pts;
+	scr_anomaly = strmh->last_scr && strmh->diag_last_mjpeg_scr
+		&& strmh->last_scr <= strmh->diag_last_mjpeg_scr;
+
+	strmh->diag_mjpeg_publish_count++;
+#if UVC_RUNTIME_DIAG_ENABLED
+	if (size_anomaly || pts_anomaly || scr_anomaly || header_change || restart_change
+			|| strmh->diag_mjpeg_publish_count <= 20
+			|| !(strmh->diag_mjpeg_publish_count % 120)) {
+		UVC_DIAG_LOGI("mjpeg-diag:publish count=%u reason=%s seq=%u bytes=%zu last_bytes=%zu "
+			"fid=%u pts=%u last_pts=%u scr=%u last_scr=%u hash=%08x repeat=%u "
+			"hdr=%08x last_hdr=%08x dri=%u last_dri=%u anomaly=%s%s%s%s%s",
+			strmh->diag_mjpeg_publish_count,
+			reason ? reason : "?",
+			strmh->seq,
+			strmh->got_bytes,
+			last_bytes,
+			(unsigned)strmh->fid,
+			strmh->pts,
+			strmh->diag_last_mjpeg_pts,
+			strmh->last_scr,
+			strmh->diag_last_mjpeg_scr,
+			hash,
+			(unsigned)sample_hash_repeat,
+			header_hash,
+			strmh->diag_last_mjpeg_header_hash,
+			(unsigned)restart_interval,
+			(unsigned)strmh->diag_last_mjpeg_restart_interval,
+			size_anomaly ? "size" : "",
+			pts_anomaly ? "|pts" : "",
+			scr_anomaly ? "|scr" : "",
+			header_change ? "|hdr" : "",
+			restart_change ? "|dri" : "");
+	}
+#endif
+
+	strmh->diag_last_mjpeg_bytes = strmh->got_bytes;
+	strmh->diag_last_mjpeg_pts = strmh->pts;
+	strmh->diag_last_mjpeg_scr = strmh->last_scr;
+	strmh->diag_last_mjpeg_sample_hash = hash;
+	strmh->diag_last_mjpeg_header_hash = header_hash;
+	strmh->diag_last_mjpeg_restart_interval = restart_interval;
 }
 
 /** Matches libusb_fill_{bulk,iso}_transfer timeout_ms in this file */
@@ -689,10 +909,21 @@ uvc_error_t uvc_probe_stream_ctrl(uvc_device_handle_t *devh,
 /** @internal
  * @brief Swap the working buffer with the presented buffer and notify consumers
  */
-static void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
+static void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 	uint8_t *tmp_buf;
 
+	if (UNLIKELY(!_uvc_mjpeg_payload_has_markers(strmh))) {
+		_uvc_diag_mjpeg_drop(strmh, reason);
+		strmh->got_bytes = 0;
+		strmh->frame_start_monotonic_ns = 0;
+		strmh->last_scr = 0;
+		strmh->pts = 0;
+		strmh->bfh_err = 0;
+		return;
+	}
+
 	diag_first_swap(strmh);
+	_uvc_diag_mjpeg_publish(strmh, reason);
 
 	pthread_mutex_lock(&strmh->cb_mutex);
 	{
@@ -887,7 +1118,7 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 			/* The frame ID bit was flipped, but we have image data sitting
 				around from prior transfers. This means the camera didn't send
 				an EOF for the last transfer of the previous frame. */
-			_uvc_swap_buffers(strmh);
+			_uvc_swap_buffers(strmh, "bulk-fid");
 		}
 
 		strmh->fid = header_info & UVC_STREAM_FID;
@@ -929,7 +1160,7 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 
 		if (header_info & UVC_STREAM_EOF/*(1 << 1)*/) {
 			// The EOF bit is set, so publish the complete frame
-			_uvc_swap_buffers(strmh);
+			_uvc_swap_buffers(strmh, "bulk-eof");
 		}
 	}
 }
@@ -1008,12 +1239,12 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 				/* The frame ID bit was flipped, but we have image data sitting
 	             around from prior transfers. This means the camera didn't send
     		     an EOF for the last transfer of the previous frame or some frames losted. */
-					_uvc_swap_buffers(strmh);
+					_uvc_swap_buffers(strmh, "iso-fid");
 				}
 				strmh->fid = header_info & UVC_STREAM_FID;
 #else
 				if (strmh->fid != (header_info & UVC_STREAM_FID)) {	// when FID is toggled
-					_uvc_swap_buffers(strmh);
+					_uvc_swap_buffers(strmh, "iso-fid-noeof");
 					strmh->fid = header_info & UVC_STREAM_FID;
 				}
 #endif
@@ -1075,7 +1306,7 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 #ifdef USE_EOF
 			if ((pktbuf[1] & UVC_STREAM_EOF) && strmh->got_bytes != 0) {
 				/* The EOF bit is set, so publish the complete frame */
-				_uvc_swap_buffers(strmh);
+				_uvc_swap_buffers(strmh, "iso-eof");
 			}
 #endif
 		} else {	// if (LIKELY(pktbuf))
@@ -1357,7 +1588,8 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 	stream_buf_size = _uvc_stream_frame_buffer_size(ctrl, stream_if);
 	strmh->outbuf = malloc(stream_buf_size);
 	strmh->holdbuf = malloc(stream_buf_size);
-	if (UNLIKELY(!strmh->outbuf || !strmh->holdbuf)) {
+	strmh->framebuf = malloc(stream_buf_size);
+	if (UNLIKELY(!strmh->outbuf || !strmh->holdbuf || !strmh->framebuf)) {
 		ret = UVC_ERROR_NO_MEM;
 		goto fail;
 	}
@@ -1379,6 +1611,7 @@ fail:
 	if (strmh) {
 		free(strmh->outbuf);
 		free(strmh->holdbuf);
+		free(strmh->framebuf);
 		if (claimed)
 			uvc_release_if(strmh->devh, strmh->stream_if->bInterfaceNumber);
 		free(strmh);
@@ -1456,6 +1689,19 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 		LOGE("unlnown frame format");
 		goto fail;
 	}
+
+	UVC_DIAG_LOGI("stream-ctrl: fmt=%u frm=%u %ux%u interval=%u "
+		"dwMaxVideoFrameSize=%u dwMaxPayloadTransferSize=%u "
+		"wCompQuality=%u bmFramingInfo=%02x bPreferedVersion=%u",
+		(unsigned)ctrl->bFormatIndex, (unsigned)ctrl->bFrameIndex,
+		(unsigned)frame_desc->wWidth, (unsigned)frame_desc->wHeight,
+		(unsigned)ctrl->dwFrameInterval,
+		(unsigned)ctrl->dwMaxVideoFrameSize,
+		(unsigned)ctrl->dwMaxPayloadTransferSize,
+		(unsigned)ctrl->wCompQuality,
+		(unsigned)ctrl->bmFramingInfo,
+		(unsigned)ctrl->bPreferedVersion);
+
 	uint32_t dwMaxVideoFrameSize = ctrl->dwMaxVideoFrameSize;
 	if (frame_desc->dwMaxVideoFrameBufferSize > dwMaxVideoFrameSize)
 		dwMaxVideoFrameSize = frame_desc->dwMaxVideoFrameBufferSize;
@@ -1764,17 +2010,28 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
 	}
 
 	/*
-	 * Publish decoded payload from holdbuf in-place — avoids a full-frame memcpy into
-	 * frame->data. Callback / poll consumers must dup or memcpy out before returning if
-	 * they retain the pixels (same rule as borrowing any libuvc buffer).
+	 * Copy holdbuf into framebuf while cb_mutex is held so the USB producer can
+	 * immediately reuse holdbuf for the next frame without racing the consumer's
+	 * uvc_duplicate_frame / JPEG-decode memcpy path (which runs without the lock).
+	 * The previous zero-copy pointer assignment caused torn frames on fast-paced
+	 * devices (e.g. 335 KB MJPEG @ 60 fps) where the next frame's EOF swap fired
+	 * before the consumer finished copying, overwriting the buffer mid-read.
 	 */
 	if (frame->data && frame->library_owns_data) {
 		free(frame->data);
 		frame->data = NULL;
 	}
-	frame->data = strmh->holdbuf;
+	if (LIKELY(strmh->framebuf && strmh->hold_bytes)) {
+		memcpy(strmh->framebuf, strmh->holdbuf, strmh->hold_bytes);
+		frame->data = strmh->framebuf;
+	} else {
+		frame->data = strmh->holdbuf;
+	}
 	frame->data_bytes = strmh->hold_bytes ? strmh->hold_bytes : 1;
 	frame->library_owns_data = 0;
+	frame->sequence = strmh->hold_seq;
+	frame->capture_time.tv_sec = 0;
+	frame->capture_time.tv_usec = 0;
 	frame->arrival_monotonic_ns = strmh->hold_start_monotonic_ns;
 
 	/** @todo set the frame time */
@@ -1966,6 +2223,10 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 	if (strmh->holdbuf) {
 		free(strmh->holdbuf);
 		strmh->holdbuf = NULL;
+	}
+	if (strmh->framebuf) {
+		free(strmh->framebuf);
+		strmh->framebuf = NULL;
 	}
 
 	pthread_cond_destroy(&strmh->cb_cond);
