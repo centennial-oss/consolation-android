@@ -1115,6 +1115,7 @@ int usbi_io_init(struct libusb_context *ctx) {
 	usbi_mutex_init_recursive(&ctx->events_lock, NULL);
 	usbi_mutex_init(&ctx->event_waiters_lock, NULL);
 	usbi_cond_init(&ctx->event_waiters_cond, NULL);
+	__atomic_store_n(&ctx->event_waiters_count, 0, __ATOMIC_RELAXED);
 	list_init(&ctx->flying_transfers);
 	list_init(&ctx->pollfds);
 
@@ -1428,6 +1429,19 @@ static int arm_timerfd_for_next_timeout(struct libusb_context *ctx) {
 }
 #endif
 
+static void broadcast_event_waiters(struct libusb_context *ctx) {
+
+	if (__atomic_load_n(&ctx->event_waiters_count, __ATOMIC_ACQUIRE) == 0)
+		return;
+
+	usbi_mutex_lock(&ctx->event_waiters_lock);
+	{
+		if (__atomic_load_n(&ctx->event_waiters_count, __ATOMIC_RELAXED) > 0)
+			usbi_cond_broadcast(&ctx->event_waiters_cond);
+	}
+	usbi_mutex_unlock(&ctx->event_waiters_lock);
+}
+
 /** \ingroup asyncio
  * Submit a transfer. This function will fire off the USB transfer and then
  * return immediately.
@@ -1612,11 +1626,7 @@ int usbi_handle_transfer_completion(struct usbi_transfer *itransfer,
 	 * this point. */
 	if (flags & LIBUSB_TRANSFER_FREE_TRANSFER)
 		libusb_free_transfer(transfer);
-	usbi_mutex_lock(&ctx->event_waiters_lock);
-	{
-		usbi_cond_broadcast(&ctx->event_waiters_cond);
-	}
-	usbi_mutex_unlock(&ctx->event_waiters_lock);
+	broadcast_event_waiters(ctx);
 	libusb_unref_device(handle->dev);
 	return LIBUSB_SUCCESS;
 }
@@ -1726,11 +1736,7 @@ void API_EXPORTED libusb_unlock_events(libusb_context *ctx) {
 	/* FIXME: perhaps we should be a bit more efficient by not broadcasting
 	 * the availability of the events lock when we are modifying pollfds
 	 * (check ctx->pollfd_modify)? */
-	usbi_mutex_lock(&ctx->event_waiters_lock);
-	{
-		usbi_cond_broadcast(&ctx->event_waiters_cond);
-	}
-	usbi_mutex_unlock(&ctx->event_waiters_lock);
+	broadcast_event_waiters(ctx);
 }
 
 /** \ingroup poll
@@ -1870,7 +1876,9 @@ int API_EXPORTED libusb_wait_for_event(libusb_context *ctx, struct timeval *tv) 
 
 	USBI_GET_CONTEXT(ctx);
 	if (tv == NULL) {
+		__atomic_add_fetch(&ctx->event_waiters_count, 1, __ATOMIC_RELEASE);
 		usbi_cond_wait(&ctx->event_waiters_cond, &ctx->event_waiters_lock);
+		__atomic_sub_fetch(&ctx->event_waiters_count, 1, __ATOMIC_RELEASE);
 		return 0;
 	}
 
@@ -1887,8 +1895,10 @@ int API_EXPORTED libusb_wait_for_event(libusb_context *ctx, struct timeval *tv) 
 		timeout.tv_sec++;
 	}
 
+	__atomic_add_fetch(&ctx->event_waiters_count, 1, __ATOMIC_RELEASE);
 	r = usbi_cond_timedwait(&ctx->event_waiters_cond,
 		&ctx->event_waiters_lock, &timeout);	// XXX crash 2014/10/02 SIGABRT/SI_TKILL
+	__atomic_sub_fetch(&ctx->event_waiters_count, 1, __ATOMIC_RELEASE);
 	return (r == ETIMEDOUT);
 }
 

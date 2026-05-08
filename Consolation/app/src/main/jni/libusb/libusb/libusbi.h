@@ -277,6 +277,9 @@ struct libusb_context {
 	 * event handling */
 	usbi_mutex_t event_waiters_lock;
 	usbi_cond_t event_waiters_cond;
+	/* Accessed with __atomic builtins so the completion hot path can skip
+	 * taking event_waiters_lock when there are no waiters. */
+	int event_waiters_count;
 
 #ifdef USBI_TIMERFD_AVAILABLE
 	/* used for timeout handling, if supported by OS.
