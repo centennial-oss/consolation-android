@@ -173,6 +173,19 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	processingPreviewQueueDropCount(0),
 	processingPreviewQueueDepthSampleCount(0),
 	processingPreviewQueueDepthTotalMilli(0),
+	processingPreviewQueueDepthMaxMilli(0),
+	processingPreviewEnqueueDepthSampleCount(0),
+	processingPreviewEnqueueDepthTotalMilli(0),
+	processingPreviewEnqueueDepthMaxMilli(0),
+	processingUvcCallbackCount(0),
+	processingUvcCallbackTotalNs(0),
+	processingUvcCallbackMaxNs(0),
+	processingCallbackLagCount(0),
+	processingCallbackLagTotalNs(0),
+	processingCallbackLagMaxNs(0),
+	processingPreCallbackSkippedFrames(0),
+	processingLastUvcSequence(0),
+	processingLastUvcSequenceValid(false),
 	diagMjpegDecodedCount(0),
 	diagMjpegLastLuma(0),
 	streamingStartMonotonicNs(0),
@@ -470,13 +483,41 @@ void UVCPreview::recordMjpegDecodedVisualSample(uint32_t sequence, size_t bytes,
 }
 
 void UVCPreview::recordPreviewQueueDepthSample(uint64_t depth_frames) {
+	const uint64_t depth_milli = depth_frames * 1000ULL;
 	pthread_mutex_lock(&processing_stats_mutex);
 	processingPreviewQueueDepthSampleCount++;
-	processingPreviewQueueDepthTotalMilli += depth_frames * 1000ULL;
+	processingPreviewQueueDepthTotalMilli += depth_milli;
+	if (depth_milli > processingPreviewQueueDepthMaxMilli)
+		processingPreviewQueueDepthMaxMilli = depth_milli;
 	pthread_mutex_unlock(&processing_stats_mutex);
 }
 
-void UVCPreview::getAndResetProcessingStats(uint64_t stats[14]) {
+static inline void recordPreviewEnqueueDepthSample(
+	pthread_mutex_t *stats_mutex,
+	uint64_t *sample_count,
+	uint64_t *total_milli,
+	uint64_t *max_milli,
+	uint64_t depth_frames) {
+	const uint64_t depth_milli = depth_frames * 1000ULL;
+	pthread_mutex_lock(stats_mutex);
+	(*sample_count)++;
+	(*total_milli) += depth_milli;
+	if (depth_milli > *max_milli)
+		*max_milli = depth_milli;
+	pthread_mutex_unlock(stats_mutex);
+}
+
+void UVCPreview::getAndResetProcessingStats(uint64_t stats[UVC_PROCESSING_STATS_COUNT]) {
+	uint32_t stream_interval_100ns = 0;
+	int stream_altsetting = -1;
+	uint32_t stream_published_count = 0;
+	uint32_t stream_dropped_before_cb_count = 0;
+	(void)uvc_get_stream_runtime_diag(
+		mDeviceHandle,
+		&stream_interval_100ns,
+		&stream_altsetting,
+		&stream_published_count,
+		&stream_dropped_before_cb_count);
 	pthread_mutex_lock(&processing_stats_mutex);
 	stats[0] = processingPreviewConvertCount;
 	stats[1] = processingEndToEndLatencyCount
@@ -497,6 +538,25 @@ void UVCPreview::getAndResetProcessingStats(uint64_t stats[14]) {
 	stats[12] = processingPreviewQueueDropCount;
 	stats[13] = processingPreviewQueueDepthSampleCount
 		? processingPreviewQueueDepthTotalMilli / processingPreviewQueueDepthSampleCount : 0;
+	stats[14] = processingPreviewConvertCount
+		? processingPreviewConvertTotalNs / processingPreviewConvertCount : 0;
+	stats[15] = processingEndToEndLatencyMaxNs;
+	stats[16] = processingPreviewQueueDepthMaxMilli;
+	stats[17] = processingPreviewEnqueueDepthSampleCount
+		? processingPreviewEnqueueDepthTotalMilli / processingPreviewEnqueueDepthSampleCount : 0;
+	stats[18] = processingPreviewEnqueueDepthMaxMilli;
+	stats[19] = processingUvcCallbackCount
+		? processingUvcCallbackTotalNs / processingUvcCallbackCount : 0;
+	stats[20] = processingUvcCallbackMaxNs;
+	stats[21] = processingCallbackLagCount
+		? processingCallbackLagTotalNs / processingCallbackLagCount : 0;
+	stats[22] = processingCallbackLagMaxNs;
+	stats[23] = processingCallbackLagCount;
+	stats[24] = processingPreCallbackSkippedFrames;
+	stats[25] = stream_interval_100ns;
+	stats[26] = stream_altsetting >= 0 ? (uint64_t)stream_altsetting : 0;
+	stats[27] = stream_published_count;
+	stats[28] = stream_dropped_before_cb_count;
 	processingPreviewConvertCount = 0;
 	processingPreviewConvertTotalNs = 0;
 	processingPreviewConvertMaxNs = 0;
@@ -515,6 +575,19 @@ void UVCPreview::getAndResetProcessingStats(uint64_t stats[14]) {
 	processingPreviewQueueDropCount = 0;
 	processingPreviewQueueDepthSampleCount = 0;
 	processingPreviewQueueDepthTotalMilli = 0;
+	processingPreviewQueueDepthMaxMilli = 0;
+	processingPreviewEnqueueDepthSampleCount = 0;
+	processingPreviewEnqueueDepthTotalMilli = 0;
+	processingPreviewEnqueueDepthMaxMilli = 0;
+	processingUvcCallbackCount = 0;
+	processingUvcCallbackTotalNs = 0;
+	processingUvcCallbackMaxNs = 0;
+	processingCallbackLagCount = 0;
+	processingCallbackLagTotalNs = 0;
+	processingCallbackLagMaxNs = 0;
+	processingPreCallbackSkippedFrames = 0;
+	processingLastUvcSequence = 0;
+	processingLastUvcSequenceValid = false;
 	pthread_mutex_unlock(&processing_stats_mutex);
 }
 
@@ -803,7 +876,45 @@ int copyToSurface(uvc_frame_t *frame, ANativeWindow **window, uint64_t *after_po
 
 void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args) {
 	UVCPreview *preview = reinterpret_cast<UVCPreview *>(vptr_args);
+	struct UvcCallbackTimingScope final {
+		UVCPreview *preview;
+		uint64_t start_ns;
+		~UvcCallbackTimingScope() {
+			if (!preview || !start_ns)
+				return;
+			const uint64_t elapsed_ns = processing_now_ns() - start_ns;
+			pthread_mutex_lock(&preview->processing_stats_mutex);
+			preview->processingUvcCallbackCount++;
+			preview->processingUvcCallbackTotalNs += elapsed_ns;
+			if (elapsed_ns > preview->processingUvcCallbackMaxNs)
+				preview->processingUvcCallbackMaxNs = elapsed_ns;
+			pthread_mutex_unlock(&preview->processing_stats_mutex);
+		}
+	} callback_timing_scope = { preview, processing_now_ns() };
 	if UNLIKELY(!preview->isRunning() || !frame || !frame->frame_format || !frame->data || !frame->data_bytes) return;
+	pthread_mutex_lock(&preview->processing_stats_mutex);
+	if (preview->processingLastUvcSequenceValid) {
+		const uint32_t last_seq = preview->processingLastUvcSequence;
+		if (frame->sequence > last_seq + 1U) {
+			preview->processingPreCallbackSkippedFrames +=
+				(uint64_t)(frame->sequence - last_seq - 1U);
+		}
+	}
+	preview->processingLastUvcSequence = frame->sequence;
+	preview->processingLastUvcSequenceValid = true;
+	pthread_mutex_unlock(&preview->processing_stats_mutex);
+	if (LIKELY(frame->arrival_monotonic_ns)) {
+		const uint64_t now_ns = processing_now_ns();
+		if (LIKELY(now_ns > frame->arrival_monotonic_ns)) {
+			const uint64_t lag_ns = now_ns - frame->arrival_monotonic_ns;
+			pthread_mutex_lock(&preview->processing_stats_mutex);
+			preview->processingCallbackLagCount++;
+			preview->processingCallbackLagTotalNs += lag_ns;
+			if (lag_ns > preview->processingCallbackLagMaxNs)
+				preview->processingCallbackLagMaxNs = lag_ns;
+			pthread_mutex_unlock(&preview->processing_stats_mutex);
+		}
+	}
 	if (!preview->firstFrameLogged) {
 		preview->firstFrameLogged = true;
 		const uint64_t t0 = preview->streamingStartMonotonicNs;
@@ -1026,6 +1137,12 @@ void UVCPreview::addPreviewFrame(uvc_frame_t *frame) {
 	pthread_mutex_lock(&preview_mutex);
 	if (isRunning()) {
 		uvc_frame_t *drop = preview_frame_ring.enqueue_drop_oldest_if_full(frame);
+		recordPreviewEnqueueDepthSample(
+			&processing_stats_mutex,
+			&processingPreviewEnqueueDepthSampleCount,
+			&processingPreviewEnqueueDepthTotalMilli,
+			&processingPreviewEnqueueDepthMaxMilli,
+			static_cast<uint64_t>(preview_frame_ring.size()));
 		if UNLIKELY(drop) {
 			pthread_mutex_lock(&processing_stats_mutex);
 			processingPreviewQueueDropCount++;

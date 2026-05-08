@@ -309,6 +309,8 @@ struct uvc_stream_handle {
   uint16_t diag_bulk_timeout_count_before_payload;
   uint32_t diag_mjpeg_publish_count;
   uint32_t diag_mjpeg_drop_count;
+  uint32_t diag_selected_frame_interval_100ns;
+  int32_t diag_selected_altsetting;
   size_t diag_last_mjpeg_bytes;
   uint32_t diag_last_mjpeg_pts;
   uint32_t diag_last_mjpeg_scr;

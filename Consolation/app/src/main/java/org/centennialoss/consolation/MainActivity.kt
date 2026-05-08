@@ -80,6 +80,8 @@ class MainActivity : ComponentActivity() {
 
     /** Raw formats from the last successful probe for the current device (independent of open camera). */
     private var probedFormatSizes: List<Size> = emptyList()
+    /** Formats exactly as reported by probe (before debug-only unsafe synthesis). */
+    private var probedFormatSizesReported: List<Size> = emptyList()
 
     /** User choice: width, height, and frame interval index into [Size.fps]. */
     private var selectedFormat: Size? = null
@@ -113,6 +115,7 @@ class MainActivity : ComponentActivity() {
     private var volumeBeforeMute = 100
 
     private var lowFpsBelowThresholdSinceMs: Long = 0L
+    private var lastTelemetryLogAtMs: Long = 0L
 
     enum class StatsPosition { OFF, BOTTOM_LEFT, BOTTOM_RIGHT }
     private enum class PixelFormatPreference(val prefValue: String, val frameFormat: Int?) {
@@ -227,6 +230,7 @@ class MainActivity : ComponentActivity() {
                 selectedFormat = null
                 selectedPixelFormatPreference = PixelFormatPreference.AUTO
                 probedFormatSizes = emptyList()
+                probedFormatSizesReported = emptyList()
                 startup.resolutionDropdown.setText("", false)
             }
             selectedDevice = device
@@ -493,6 +497,7 @@ class MainActivity : ComponentActivity() {
             cancelConnectingWatchdog()
             hasRetriedConnectingSession = false
             lowFpsBelowThresholdSinceMs = 0L
+            lastTelemetryLogAtMs = 0L
             binding.lowFpsWarning.isVisible = false
             binding.videoStatsOverlay.isVisible = false
 
@@ -505,6 +510,7 @@ class MainActivity : ComponentActivity() {
                 selectedFormat = null
                 selectedPixelFormatPreference = PixelFormatPreference.AUTO
                 probedFormatSizes = emptyList()
+                probedFormatSizesReported = emptyList()
                 binding.startupScreen.deviceDropdown.setText(getString(R.string.hint_no_capture_devices), false)
                 binding.startupScreen.resolutionDropdown.setText("", false)
                 updateCompatibilityWarning()
@@ -515,6 +521,7 @@ class MainActivity : ComponentActivity() {
                     selectedFormat = null
                     selectedPixelFormatPreference = PixelFormatPreference.AUTO
                     probedFormatSizes = emptyList()
+                    probedFormatSizesReported = emptyList()
                     binding.startupScreen.deviceDropdown.setText(selectedDevice?.displayName, false)
                     binding.startupScreen.resolutionDropdown.setText("", false)
                     lastResolutionRefreshDeviceId = null
@@ -638,6 +645,7 @@ class MainActivity : ComponentActivity() {
             binding.startupScreen.resolutionDropdown.setAdapter(null)
             binding.startupScreen.resolutionDropdown.setText("", false)
             probedFormatSizes = emptyList()
+            probedFormatSizesReported = emptyList()
             selectedFormat = null
             updateStartupActions()
             return
@@ -657,6 +665,7 @@ class MainActivity : ComponentActivity() {
         isResolutionProbeInProgress = true
         selectedFormat = null
         probedFormatSizes = emptyList()
+        probedFormatSizesReported = emptyList()
         updateStartupActions()
         binding.startupScreen.resolutionDropdown.setAdapter(null)
         binding.startupScreen.resolutionDropdown.setText(
@@ -686,18 +695,20 @@ class MainActivity : ComponentActivity() {
                 )
                 return@launch
             }
-            probedFormatSizes = sizes
-            if (sizes.isNotEmpty()) {
+            probedFormatSizesReported = sizes
+            val effectiveSizes = applyDebugUnsafeFormatSynthesis(sizes)
+            probedFormatSizes = effectiveSizes
+            if (effectiveSizes.isNotEmpty()) {
                 previewBackend.consumeLastProbeOpenFailed()
-                val remembered = loadRememberedFormat(device, sizes)
-                val compatibilityDefault = pickDefaultFormat(sizes, selectedDeviceCompatibilityIssue())
+                val remembered = loadRememberedFormat(device, effectiveSizes)
+                val compatibilityDefault = pickDefaultFormat(effectiveSizes, selectedDeviceCompatibilityIssue())
                 val defaultSeed = remembered?.first
                         ?: compatibilityDefault
-                        ?: sizes.first().let { Size(it) }
+                        ?: effectiveSizes.first().let { Size(it) }
                 selectedPixelFormatPreference = remembered?.second ?: PixelFormatPreference.AUTO
                 val defaultFormat = remembered?.first ?: (
                     resolveFormatChoiceForPreference(
-                        sizes,
+                        effectiveSizes,
                         defaultSeed.width,
                         defaultSeed.height,
                         selectedPixelFormatPreference,
@@ -719,12 +730,13 @@ class MainActivity : ComponentActivity() {
                 updateStartupActions()
                 Log.i(
                     RESOLUTION_PROBE_TAG,
-                    "refreshResolutions: UI updated size=${sizes.size} source=$defaultSource " +
+                    "refreshResolutions: UI updated size=${effectiveSizes.size} source=$defaultSource " +
                         "pref=${selectedPixelFormatPreference.prefValue} defaultLabel=$label",
                 )
             } else {
                 val probeOpenFailed = previewBackend.consumeLastProbeOpenFailed()
                 selectedFormat = null
+                probedFormatSizesReported = emptyList()
                 binding.startupScreen.resolutionDropdown.setText(
                     getString(
                         if (probeOpenFailed) {
@@ -798,9 +810,16 @@ class MainActivity : ComponentActivity() {
                 )
                 addMenuHeaderWithDivider(fpsSub, "Pixel Format")
                 for (formatPreference in formatOptions) {
+                    val unsafeChoice = isDebugUnsafeFormatChoice(
+                        probedFormatSizesReported,
+                        group.width,
+                        group.height,
+                        fps,
+                        formatPreference,
+                    )
                     val id = nextId++
                     choiceIds[id] = MenuChoice(group.width, group.height, fps, formatPreference)
-                    fpsSub.add(Menu.NONE, id, Menu.NONE, formatMenuLabel(formatPreference))
+                    fpsSub.add(Menu.NONE, id, Menu.NONE, formatMenuLabel(formatPreference, unsafeChoice))
                 }
             }
         }
@@ -853,6 +872,7 @@ class MainActivity : ComponentActivity() {
                     cancelConnectingWatchdog()
                 }
                 updateStatsOverlay(stats)
+                logTelemetryLine(stats)
                 updateLowFpsWarning(stats)
                 delay(500)
             }
@@ -862,24 +882,48 @@ class MainActivity : ComponentActivity() {
     private fun updateStatsOverlay(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot) {
         binding.videoStatsOverlay.isVisible = isStatsVisible && statsPosition != StatsPosition.OFF
         if (binding.videoStatsOverlay.isVisible) {
-            binding.videoStatsOverlay.text = getString(
-                R.string.telemetry_format,
-                stats.width, stats.height, stats.configuredFps,
-                stats.pixelFormat, stats.fps, stats.droppedFrames,
-                stats.nativeQueuedAvgFrames,
-                stats.nativeEndToEndLatencyAvgMs,
-                formatTelemetryPayloadLabel(stats.nativePayloadAvgKb),
-            )
+            binding.videoStatsOverlay.text = buildTelemetryOverlayText(stats)
             val params = binding.videoStatsOverlay.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-            if (statsPosition == StatsPosition.BOTTOM_LEFT) {
-                params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
-            } else {
-                params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
-                params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-            }
+            params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+            params.horizontalBias = if (statsPosition == StatsPosition.BOTTOM_LEFT) 0f else 1f
             binding.videoStatsOverlay.layoutParams = params
         }
+    }
+
+    private fun buildTelemetryOverlayText(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot): String {
+        val payload = formatTelemetryPayloadLabel(stats.nativePayloadAvgKb)
+        return listOf(
+            "Res:${stats.width}x${stats.height}/${stats.configuredFps}",
+            "Fmt:${stats.pixelFormat}",
+            "Fps:${stats.fps}",
+            "Drop:${stats.droppedFrames}",
+            "QD:${format0(stats.nativeQueuedAvgFrames)}",
+            "QE:${format0(stats.nativeQueueEnqAvgFrames)}",
+            "CbMs:${format1(stats.nativeUvcCbAvgMs)}",
+            "CbMax:${format1(stats.nativeUvcCbMaxMs)}",
+            "LagMs:${format1(stats.nativeCbLagAvgMs)}",
+            "LagMax:${format1(stats.nativeCbLagMaxMs)}",
+            "LagCnt:${stats.nativeCbLagCount}",
+            "Pub/s:${format0(stats.nativePubFps)}",
+            "PreSk:${stats.nativePreCbSkip}",
+            "SDrop:${stats.nativeStreamDrop}",
+            "Intv:${stats.nativeFrameInterval100ns}",
+            "Alt:${stats.nativeAltSetting}",
+            "CvMs:${format1(stats.nativePreviewConvAvgMs)}",
+            "E2EMs:${format1(stats.nativeEndToEndLatencyAvgMs)}",
+            "E2EMx:${format1(stats.nativeEndToEndMaxMs)}",
+            "Pay:${payload}",
+        ).joinToString(" | ")
+    }
+
+    private fun logTelemetryLine(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastTelemetryLogAtMs < 1_000L) {
+            return
+        }
+        lastTelemetryLogAtMs = now
+        Log.i(TELEMETRY_LOG_TAG, buildTelemetryOverlayText(stats))
     }
 
     /** Average native payload size for overlay: KiB until 1024 KiB, then MiB. */
@@ -893,6 +937,9 @@ class MainActivity : ComponentActivity() {
             String.format(Locale.US, "%.0f KB", avgKb)
         }
     }
+
+    private fun format1(value: Double): String = String.format(Locale.US, "%.1f", value)
+    private fun format0(value: Double): String = String.format(Locale.US, "%.0f", value)
 
     private fun updateLowFpsWarning(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot) {
         if (!previewBackend.hasReceivedFirstVideoFrame()) {
@@ -1547,13 +1594,19 @@ class MainActivity : ComponentActivity() {
         }
 
         if (prep.format == null) {
-            prep.probedUpdate?.let { probedFormatSizes = it }
+            prep.probedUpdate?.let {
+                probedFormatSizesReported = it
+                probedFormatSizes = applyDebugUnsafeFormatSynthesis(it)
+            }
             selectedFormat = null
             showMessage(getString(R.string.state_no_formats))
             return
         }
 
-        prep.probedUpdate?.let { probedFormatSizes = it }
+        prep.probedUpdate?.let {
+            probedFormatSizesReported = it
+            probedFormatSizes = applyDebugUnsafeFormatSynthesis(it)
+        }
         selectedFormat = prep.format
         selectedPixelFormatPreference = prep.pixelPreference
         persistFormatForDevice(device, prep.format, selectedPixelFormatPreference)
@@ -1772,6 +1825,8 @@ class MainActivity : ComponentActivity() {
 
         /** Stop/play sequencing; filter `adb logcat -s ConsolationPlayback:I`. */
         private const val PLAYBACK_DIAG_TAG = "ConsolationPlayback"
+        /** Per-second compact telemetry line; stripped from release via AppLog policy. */
+        private const val TELEMETRY_LOG_TAG = "ConsolationTelemetry"
         private const val GITHUB_URL = "https://github.com/centennial-oss/consolation-android"
         private const val PRIVACY_POLICY_URL = "https://centennialoss.org/privacy/"
 
@@ -1870,13 +1925,72 @@ class MainActivity : ComponentActivity() {
             else -> null
         }
 
-        private fun formatMenuLabel(pref: PixelFormatPreference): String = when (pref) {
-            PixelFormatPreference.AUTO -> "Auto"
-            PixelFormatPreference.H264 -> "H264"
-            PixelFormatPreference.NV12 -> "NV12"
-            PixelFormatPreference.YUYV -> "YUYV"
-            PixelFormatPreference.P010 -> "P010"
-            PixelFormatPreference.MJPEG -> "MJPEG"
+        private fun formatMenuLabel(pref: PixelFormatPreference, unsafeDebug: Boolean = false): String {
+            val base = when (pref) {
+                PixelFormatPreference.AUTO -> "Auto"
+                PixelFormatPreference.H264 -> "H264"
+                PixelFormatPreference.NV12 -> "NV12"
+                PixelFormatPreference.YUYV -> "YUYV"
+                PixelFormatPreference.P010 -> "P010"
+                PixelFormatPreference.MJPEG -> "MJPEG"
+            }
+            return if (unsafeDebug) "$base (DEBUG / UNSAFE)" else base
+        }
+
+        private fun isDebugUnsafeFormatChoice(
+            reportedSizes: List<Size>,
+            width: Int,
+            height: Int,
+            fps: Float,
+            pref: PixelFormatPreference,
+        ): Boolean {
+            if (!BuildConfig.DEBUG) return false
+            val frameType = pref.frameFormat ?: return false
+            if (frameType != UVCCamera.FRAME_FORMAT_NV12 && frameType != UVCCamera.FRAME_FORMAT_YUYV) {
+                return false
+            }
+            return reportedSizes.none { size ->
+                size.width == width &&
+                    size.height == height &&
+                    size.frame_type == frameType &&
+                    (size.fps ?: floatArrayOf()).any { abs(it - fps) <= DEFAULT_TARGET_FPS_TOLERANCE }
+            }
+        }
+
+        private fun applyDebugUnsafeFormatSynthesis(reportedSizes: List<Size>): List<Size> {
+            if (!BuildConfig.DEBUG || reportedSizes.isEmpty()) return reportedSizes
+            val expanded = reportedSizes.map { Size(it) }.toMutableList()
+            val synthFormats = listOf(UVCCamera.FRAME_FORMAT_NV12, UVCCamera.FRAME_FORMAT_YUYV)
+            val donors = synthFormats.associateWith { frameType ->
+                reportedSizes.firstOrNull { it.frame_type == frameType }
+            }
+            if (donors.values.all { it == null }) return expanded
+
+            for (group in groupSizesByResolution(reportedSizes)) {
+                for (fps in group.fpsOptions) {
+                    for (frameType in synthFormats) {
+                        val donor = donors[frameType] ?: continue
+                        val exists = expanded.any { size ->
+                            size.width == group.width &&
+                                size.height == group.height &&
+                                size.frame_type == frameType &&
+                                (size.fps ?: floatArrayOf()).any { abs(it - fps) <= DEFAULT_TARGET_FPS_TOLERANCE }
+                        }
+                        if (exists) continue
+
+                        val interval100ns = (10_000_000.0f / fps).toInt().coerceAtLeast(1)
+                        expanded += Size(
+                            donor.type,
+                            frameType,
+                            donor.index,
+                            group.width,
+                            group.height,
+                            intArrayOf(interval100ns),
+                        )
+                    }
+                }
+            }
+            return expanded
         }
 
         private fun addMenuHeaderWithDivider(menu: Menu, title: String) {

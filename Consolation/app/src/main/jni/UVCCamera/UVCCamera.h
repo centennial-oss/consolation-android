@@ -197,7 +197,7 @@ public:
 	int startPreview();
 	int stopPreview();
 	int setCaptureDisplay(ANativeWindow *capture_window);
-	void getAndResetProcessingStats(uint64_t stats[14]);
+	void getAndResetProcessingStats(uint64_t stats[UVC_PROCESSING_STATS_COUNT]);
 
 	int getCtrlSupports(uint64_t *supports);
 	int getProcSupports(uint64_t *supports);

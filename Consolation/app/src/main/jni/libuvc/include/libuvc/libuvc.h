@@ -627,6 +627,11 @@ uvc_error_t uvc_stream_get_frame(uvc_stream_handle_t *strmh,
 		uvc_frame_t **frame, int32_t timeout_us);
 uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh);
 void uvc_stream_close(uvc_stream_handle_t *strmh);
+uvc_error_t uvc_get_stream_runtime_diag(uvc_device_handle_t *devh,
+		uint32_t *frame_interval_100ns,
+		int *altsetting,
+		uint32_t *published_count,
+		uint32_t *dropped_before_cb_count);
 
 // Generic Controls
 int uvc_get_ctrl_len(uvc_device_handle_t *devh, uint8_t unit, uint8_t ctrl);

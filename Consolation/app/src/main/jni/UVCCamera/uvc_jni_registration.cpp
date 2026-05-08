@@ -342,18 +342,18 @@ static jlongArray nativeGetAndResetProcessingStats(JNIEnv *env, jobject thiz,
 	ID_TYPE id_camera) {
 
 	ENTER();
-	uint64_t stats[14] = {};
+	uint64_t stats[UVC_PROCESSING_STATS_COUNT] = {};
 	UVCCamera *camera = reinterpret_cast<UVCCamera *>(id_camera);
 	if (LIKELY(camera)) {
 		camera->getAndResetProcessingStats(stats);
 	}
-	jlong values[14];
-	for (int i = 0; i < 14; i++) {
+	jlong values[UVC_PROCESSING_STATS_COUNT];
+	for (int i = 0; i < UVC_PROCESSING_STATS_COUNT; i++) {
 		values[i] = static_cast<jlong>(stats[i]);
 	}
-	jlongArray result = env->NewLongArray(14);
+	jlongArray result = env->NewLongArray(UVC_PROCESSING_STATS_COUNT);
 	if (LIKELY(result)) {
-		env->SetLongArrayRegion(result, 0, 14, values);
+		env->SetLongArrayRegion(result, 0, UVC_PROCESSING_STATS_COUNT, values);
 	}
 	RETURN(result, jlongArray);
 }

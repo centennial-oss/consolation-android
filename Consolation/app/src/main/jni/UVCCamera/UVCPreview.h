@@ -43,6 +43,7 @@
 #define DEFAULT_PREVIEW_FPS_MAX 30
 #define DEFAULT_PREVIEW_MODE 0
 #define DEFAULT_BANDWIDTH 1.0f
+#define UVC_PROCESSING_STATS_COUNT 29
 
 typedef uvc_error_t (*convFunc_t)(uvc_frame_t *in, uvc_frame_t *out);
 
@@ -115,6 +116,19 @@ private:
 	uint64_t processingPreviewQueueDropCount;
 	uint64_t processingPreviewQueueDepthSampleCount;
 	uint64_t processingPreviewQueueDepthTotalMilli;
+	uint64_t processingPreviewQueueDepthMaxMilli;
+	uint64_t processingPreviewEnqueueDepthSampleCount;
+	uint64_t processingPreviewEnqueueDepthTotalMilli;
+	uint64_t processingPreviewEnqueueDepthMaxMilli;
+	uint64_t processingUvcCallbackCount;
+	uint64_t processingUvcCallbackTotalNs;
+	uint64_t processingUvcCallbackMaxNs;
+	uint64_t processingCallbackLagCount;
+	uint64_t processingCallbackLagTotalNs;
+	uint64_t processingCallbackLagMaxNs;
+	uint64_t processingPreCallbackSkippedFrames;
+	uint32_t processingLastUvcSequence;
+	bool processingLastUvcSequenceValid;
 	uint32_t diagMjpegDecodedCount;
 	uint32_t diagMjpegLastLuma;
 	volatile uint64_t streamingStartMonotonicNs;
@@ -177,7 +191,7 @@ public:
 	int stopPreview();
 	inline const bool isCapturing() const;
 	int setCaptureDisplay(ANativeWindow *capture_window);
-	void getAndResetProcessingStats(uint64_t stats[14]);
+	void getAndResetProcessingStats(uint64_t stats[UVC_PROCESSING_STATS_COUNT]);
 };
 
 #endif /* UVCPREVIEW_H_ */

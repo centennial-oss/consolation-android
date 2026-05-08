@@ -291,6 +291,7 @@ static void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reas
 
 	if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG)
 		return;
+	strmh->diag_mjpeg_publish_count++;
 #if !UVC_RUNTIME_DIAG_ENABLED
 	(void)reason;
 	return;
@@ -317,7 +318,6 @@ static void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reas
 	scr_anomaly = strmh->last_scr && strmh->diag_last_mjpeg_scr
 		&& strmh->last_scr <= strmh->diag_last_mjpeg_scr;
 
-	strmh->diag_mjpeg_publish_count++;
 #if UVC_RUNTIME_DIAG_ENABLED
 	if (size_anomaly || pts_anomaly || scr_anomaly || header_change || restart_change
 			|| strmh->diag_mjpeg_publish_count <= 20
@@ -1915,6 +1915,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 			UVC_DEBUG("libusb_set_interface_alt_setting failed");
 			goto fail;
 		}
+		strmh->diag_selected_altsetting = altsetting->bAlternateSetting;
 
 		/* Set up the transfers */
 		MARK("Set up the transfers");
@@ -1938,6 +1939,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 		}
 	} else {
 		MARK("bulk transfer mode");
+		strmh->diag_selected_altsetting = 0;
 		/** prepare for bulk transfer */
 		for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
 			transfer = libusb_alloc_transfer(0);
@@ -1958,6 +1960,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 
 	strmh->user_cb = cb;
 	strmh->user_ptr = user_ptr;
+	strmh->diag_selected_frame_interval_100ns = strmh->cur_ctrl.dwFrameInterval;
 
 	/* If the user wants it, set up a thread that calls the user's function
 	 * with the contents of each frame.
@@ -2282,6 +2285,31 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 	}
 
 	RETURN(UVC_SUCCESS, uvc_error_t);
+}
+
+uvc_error_t uvc_get_stream_runtime_diag(uvc_device_handle_t *devh,
+		uint32_t *frame_interval_100ns,
+		int *altsetting,
+		uint32_t *published_count,
+		uint32_t *dropped_before_cb_count) {
+	uvc_stream_handle_t *strmh;
+
+	if (UNLIKELY(!devh))
+		return UVC_ERROR_INVALID_PARAM;
+
+	strmh = devh->streams;
+	if (UNLIKELY(!strmh))
+		return UVC_ERROR_NOT_FOUND;
+
+	if (frame_interval_100ns)
+		*frame_interval_100ns = strmh->diag_selected_frame_interval_100ns;
+	if (altsetting)
+		*altsetting = strmh->diag_selected_altsetting;
+	if (published_count)
+		*published_count = strmh->diag_mjpeg_publish_count;
+	if (dropped_before_cb_count)
+		*dropped_before_cb_count = strmh->diag_mjpeg_drop_count;
+	return UVC_SUCCESS;
 }
 
 /** @brief Close stream.

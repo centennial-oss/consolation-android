@@ -156,6 +156,21 @@ class UvccameraLibPreviewBackend(
     private var lastNativeEndToEndLatencyAvgMs: Double = 0.0
     private var lastNativeQueuedAvgFrames: Double = 0.0
     private var lastNativePayloadAvgKb: Double = 0.0
+    private var lastNativePreviewConvAvgMs: Double = 0.0
+    private var lastNativeEndToEndMaxMs: Double = 0.0
+    private var lastNativeQueueDeqMaxFrames: Double = 0.0
+    private var lastNativeQueueEnqAvgFrames: Double = 0.0
+    private var lastNativeQueueEnqMaxFrames: Double = 0.0
+    private var lastNativeUvcCbAvgMs: Double = 0.0
+    private var lastNativeUvcCbMaxMs: Double = 0.0
+    private var lastNativeCbLagAvgMs: Double = 0.0
+    private var lastNativeCbLagMaxMs: Double = 0.0
+    private var lastNativeCbLagCount: Long = 0L
+    private var lastNativePubFps: Double = 0.0
+    private var lastNativePreCbSkip: Long = 0L
+    private var lastNativeStreamDrop: Long = 0L
+    private var lastNativeFrameInterval100ns: Long = 0L
+    private var lastNativeAltSetting: Long = 0L
 
     private val surfaceListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
@@ -557,6 +572,22 @@ class UvccameraLibPreviewBackend(
             lastNativeEndToEndLatencyAvgMs = perFrameLatencyMs * (1.0 + avgQueuedFrames)
             lastNativeQueuedAvgFrames = avgQueuedFrames
             lastNativePayloadAvgKb = bytesToKb(processingStats.getOrElse(10) { 0L })
+            lastNativePreviewConvAvgMs = nsToMs(processingStats.getOrElse(14) { 0L })
+            lastNativeEndToEndMaxMs = nsToMs(processingStats.getOrElse(15) { 0L })
+            lastNativeQueueDeqMaxFrames = processingStats.getOrElse(16) { 0L } / 1000.0
+            lastNativeQueueEnqAvgFrames = processingStats.getOrElse(17) { 0L } / 1000.0
+            lastNativeQueueEnqMaxFrames = processingStats.getOrElse(18) { 0L } / 1000.0
+            lastNativeUvcCbAvgMs = nsToMs(processingStats.getOrElse(19) { 0L })
+            lastNativeUvcCbMaxMs = nsToMs(processingStats.getOrElse(20) { 0L })
+            lastNativeCbLagAvgMs = nsToMs(processingStats.getOrElse(21) { 0L })
+            lastNativeCbLagMaxMs = nsToMs(processingStats.getOrElse(22) { 0L })
+            lastNativeCbLagCount = processingStats.getOrElse(23) { 0L }
+            lastNativePreCbSkip = processingStats.getOrElse(24) { 0L }
+            lastNativeFrameInterval100ns = processingStats.getOrElse(25) { 0L }
+            lastNativeAltSetting = processingStats.getOrElse(26) { 0L }
+            val nativePublishedCount = processingStats.getOrElse(27) { 0L }
+            lastNativePubFps = nativePublishedCount * 1000.0 / elapsed.toDouble()
+            lastNativeStreamDrop = processingStats.getOrElse(28) { 0L }
             return TelemetrySnapshot(
                 fps = actualFps,
                 droppedFrames = droppedFrames,
@@ -568,6 +599,21 @@ class UvccameraLibPreviewBackend(
                 nativeEndToEndLatencyAvgMs = lastNativeEndToEndLatencyAvgMs,
                 nativeQueuedAvgFrames = lastNativeQueuedAvgFrames,
                 nativePayloadAvgKb = lastNativePayloadAvgKb,
+                nativePreviewConvAvgMs = lastNativePreviewConvAvgMs,
+                nativeEndToEndMaxMs = lastNativeEndToEndMaxMs,
+                nativeQueueDeqMaxFrames = lastNativeQueueDeqMaxFrames,
+                nativeQueueEnqAvgFrames = lastNativeQueueEnqAvgFrames,
+                nativeQueueEnqMaxFrames = lastNativeQueueEnqMaxFrames,
+                nativeUvcCbAvgMs = lastNativeUvcCbAvgMs,
+                nativeUvcCbMaxMs = lastNativeUvcCbMaxMs,
+                nativeCbLagAvgMs = lastNativeCbLagAvgMs,
+                nativeCbLagMaxMs = lastNativeCbLagMaxMs,
+                nativeCbLagCount = lastNativeCbLagCount,
+                nativePubFps = lastNativePubFps,
+                nativePreCbSkip = lastNativePreCbSkip,
+                nativeStreamDrop = lastNativeStreamDrop,
+                nativeFrameInterval100ns = lastNativeFrameInterval100ns,
+                nativeAltSetting = lastNativeAltSetting,
             )
         }
         return TelemetrySnapshot(
@@ -581,6 +627,21 @@ class UvccameraLibPreviewBackend(
             nativeEndToEndLatencyAvgMs = lastNativeEndToEndLatencyAvgMs,
             nativeQueuedAvgFrames = lastNativeQueuedAvgFrames,
             nativePayloadAvgKb = lastNativePayloadAvgKb,
+            nativePreviewConvAvgMs = lastNativePreviewConvAvgMs,
+            nativeEndToEndMaxMs = lastNativeEndToEndMaxMs,
+            nativeQueueDeqMaxFrames = lastNativeQueueDeqMaxFrames,
+            nativeQueueEnqAvgFrames = lastNativeQueueEnqAvgFrames,
+            nativeQueueEnqMaxFrames = lastNativeQueueEnqMaxFrames,
+            nativeUvcCbAvgMs = lastNativeUvcCbAvgMs,
+            nativeUvcCbMaxMs = lastNativeUvcCbMaxMs,
+            nativeCbLagAvgMs = lastNativeCbLagAvgMs,
+            nativeCbLagMaxMs = lastNativeCbLagMaxMs,
+            nativeCbLagCount = lastNativeCbLagCount,
+            nativePubFps = lastNativePubFps,
+            nativePreCbSkip = lastNativePreCbSkip,
+            nativeStreamDrop = lastNativeStreamDrop,
+            nativeFrameInterval100ns = lastNativeFrameInterval100ns,
+            nativeAltSetting = lastNativeAltSetting,
         )
     }
 
@@ -1326,6 +1387,21 @@ class UvccameraLibPreviewBackend(
         lastNativeEndToEndLatencyAvgMs = 0.0
         lastNativeQueuedAvgFrames = 0.0
         lastNativePayloadAvgKb = 0.0
+        lastNativePreviewConvAvgMs = 0.0
+        lastNativeEndToEndMaxMs = 0.0
+        lastNativeQueueDeqMaxFrames = 0.0
+        lastNativeQueueEnqAvgFrames = 0.0
+        lastNativeQueueEnqMaxFrames = 0.0
+        lastNativeUvcCbAvgMs = 0.0
+        lastNativeUvcCbMaxMs = 0.0
+        lastNativeCbLagAvgMs = 0.0
+        lastNativeCbLagMaxMs = 0.0
+        lastNativeCbLagCount = 0L
+        lastNativePubFps = 0.0
+        lastNativePreCbSkip = 0L
+        lastNativeStreamDrop = 0L
+        lastNativeFrameInterval100ns = 0L
+        lastNativeAltSetting = 0L
     }
 
     private fun nsToMs(ns: Long): Double = ns / 1_000_000.0
@@ -1340,7 +1416,7 @@ class UvccameraLibPreviewBackend(
 
     companion object {
         private const val logTag: String = "UvcLibPreview"
-        private val EMPTY_PROCESSING_STATS = LongArray(14)
+        private val EMPTY_PROCESSING_STATS = LongArray(UVCCamera.PROCESSING_STATS_COUNT)
 
         /** Filter: `adb logcat -s ConsolationUvcProbe:I` */
         private const val probeLogTag: String = "ConsolationUvcProbe"

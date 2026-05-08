@@ -339,9 +339,9 @@ int UVCCamera::setCaptureDisplay(ANativeWindow *capture_window) {
 	RETURN(result, int);
 }
 
-void UVCCamera::getAndResetProcessingStats(uint64_t stats[14]) {
+void UVCCamera::getAndResetProcessingStats(uint64_t stats[UVC_PROCESSING_STATS_COUNT]) {
 	if (stats) {
-		for (int i = 0; i < 14; i++)
+		for (int i = 0; i < UVC_PROCESSING_STATS_COUNT; i++)
 			stats[i] = 0;
 		if (mPreview)
 			mPreview->getAndResetProcessingStats(stats);
