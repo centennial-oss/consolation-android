@@ -33,6 +33,8 @@ Consolation has been tested by the developers on a Samsung Galaxy Tab S8 Ultra (
 - Elgato HD60 X - 👌 🚀
 - Acer USB 3.0 Video Capture Card (model OCB5B0) - 👌 🚀
 - WANKEDA 4K Capture Card 1080p 60FPS for Streaming (1da603d4) - 👌 🚀
+- blueAVS 4K Capture Card (A3-B) - 👌 🚀
+- Guermok Video Capture Card (GM-29A) - 👌 🚀
 - UGREEN Full HD 1080p Capture Card (model 40189) -  ⚠️ max 30p @ 1920x1080
 
 ## Requirements
