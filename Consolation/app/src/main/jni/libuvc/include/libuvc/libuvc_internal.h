@@ -252,6 +252,9 @@ typedef struct uvc_device_info {
 #ifndef LIBUVC_NUM_TRANSFER_BUFS
 #define LIBUVC_NUM_TRANSFER_BUFS 10
 #endif
+#ifndef LIBUVC_FRAME_POOL_SLOTS
+#define LIBUVC_FRAME_POOL_SLOTS 6
+#endif
 
 #define LIBUVC_XFER_BUF_SIZE	( 16 * 1024 * 1024 )
 
@@ -276,10 +279,9 @@ struct uvc_stream_handle {
   size_t got_bytes, hold_bytes;
   size_t size_buf;	// XXX add for boundary check
   uint8_t *outbuf, *holdbuf;
-  /** Third stable buffer for consumer; never aliased to outbuf/holdbuf.
-   *  _uvc_populate_frame memcpy's holdbuf here under cb_mutex so the
-   *  USB producer can immediately reuse holdbuf without racing the copy. */
-  uint8_t *framebuf;
+  uint8_t *frame_pool[LIBUVC_FRAME_POOL_SLOTS];
+  uint32_t frame_pool_refs[LIBUVC_FRAME_POOL_SLOTS];
+  uint8_t out_slot, hold_slot;
   pthread_mutex_t cb_mutex;
   pthread_cond_t cb_cond;
   pthread_t cb_thread;

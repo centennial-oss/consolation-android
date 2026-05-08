@@ -84,6 +84,68 @@ uvc_frame_desc_t *uvc_find_frame_desc(uvc_device_handle_t *devh,
 static void *_uvc_user_caller(void *arg);
 static void _uvc_populate_frame(uvc_stream_handle_t *strmh);
 static void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason);
+static inline int _uvc_frame_slot_valid(uint32_t slot) {
+	return slot < LIBUVC_FRAME_POOL_SLOTS;
+}
+
+static void _uvc_frame_retain_locked(uvc_stream_handle_t *strmh, uint32_t slot) {
+	if (strmh && _uvc_frame_slot_valid(slot))
+		strmh->frame_pool_refs[slot]++;
+}
+
+static void _uvc_frame_release_locked(uvc_stream_handle_t *strmh, uint32_t slot) {
+	if (strmh && _uvc_frame_slot_valid(slot) && strmh->frame_pool_refs[slot] > 0)
+		strmh->frame_pool_refs[slot]--;
+}
+
+static int _uvc_frame_pick_out_slot_locked(uvc_stream_handle_t *strmh, uint32_t *slot_out) {
+	uint32_t i;
+	uint32_t start;
+	if (!strmh || !slot_out)
+		return 0;
+	start = (uint32_t)((strmh->out_slot + 1u) % LIBUVC_FRAME_POOL_SLOTS);
+	for (i = 0; i < LIBUVC_FRAME_POOL_SLOTS; i++) {
+		uint32_t slot = (start + i) % LIBUVC_FRAME_POOL_SLOTS;
+		if ((slot != strmh->hold_slot) && (strmh->frame_pool_refs[slot] == 0)) {
+			*slot_out = slot;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void _uvc_stream_try_acquire_outbuf(uvc_stream_handle_t *strmh) {
+	uint32_t slot;
+	if (!strmh || strmh->outbuf)
+		return;
+	pthread_mutex_lock(&strmh->cb_mutex);
+	if (!strmh->outbuf && _uvc_frame_pick_out_slot_locked(strmh, &slot)) {
+		strmh->out_slot = (uint8_t)slot;
+		strmh->outbuf = strmh->frame_pool[strmh->out_slot];
+	}
+	pthread_mutex_unlock(&strmh->cb_mutex);
+}
+
+void uvc_frame_retain(uvc_frame_t *frame) {
+	uvc_stream_handle_t *strmh;
+	if (!frame || !frame->library_frame_owner || !_uvc_frame_slot_valid(frame->library_frame_slot))
+		return;
+	strmh = (uvc_stream_handle_t *)frame->library_frame_owner;
+	pthread_mutex_lock(&strmh->cb_mutex);
+	_uvc_frame_retain_locked(strmh, frame->library_frame_slot);
+	pthread_mutex_unlock(&strmh->cb_mutex);
+}
+
+void uvc_frame_release(uvc_frame_t *frame) {
+	uvc_stream_handle_t *strmh;
+	if (!frame || !frame->library_frame_owner || !_uvc_frame_slot_valid(frame->library_frame_slot))
+		return;
+	strmh = (uvc_stream_handle_t *)frame->library_frame_owner;
+	pthread_mutex_lock(&strmh->cb_mutex);
+	_uvc_frame_release_locked(strmh, frame->library_frame_slot);
+	pthread_mutex_unlock(&strmh->cb_mutex);
+}
+
 static uint64_t uvc_diag_now_ns(void) {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -910,7 +972,7 @@ uvc_error_t uvc_probe_stream_ctrl(uvc_device_handle_t *devh,
  * @brief Swap the working buffer with the presented buffer and notify consumers
  */
 static void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
-	uint8_t *tmp_buf;
+	uint32_t next_out_slot;
 
 	if (UNLIKELY(!_uvc_mjpeg_payload_has_markers(strmh))) {
 		_uvc_diag_mjpeg_drop(strmh, reason);
@@ -927,17 +989,24 @@ static void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 
 	pthread_mutex_lock(&strmh->cb_mutex);
 	{
-		/* swap the buffers */
-		tmp_buf = strmh->holdbuf;
 		strmh->hold_bfh_err = strmh->bfh_err;	// XXX
 		strmh->hold_bytes = strmh->got_bytes;
 		/* Timestamp when a full frame is assembled and published (EOF/FID boundary). */
 		strmh->hold_start_monotonic_ns = uvc_diag_now_ns();
-		strmh->holdbuf = strmh->outbuf;
-		strmh->outbuf = tmp_buf;
+		strmh->hold_slot = strmh->out_slot;
+		strmh->holdbuf = strmh->frame_pool[strmh->hold_slot];
 		strmh->hold_last_scr = strmh->last_scr;
 		strmh->hold_pts = strmh->pts;
 		strmh->hold_seq = strmh->seq;
+
+		if (_uvc_frame_pick_out_slot_locked(strmh, &next_out_slot)) {
+			strmh->out_slot = (uint8_t)next_out_slot;
+			strmh->outbuf = strmh->frame_pool[strmh->out_slot];
+		} else {
+			/* No free producer slot (all retained by consumers): drop until one is released. */
+			strmh->outbuf = NULL;
+			strmh->bfh_err |= UVC_STREAM_ERR;
+		}
 
 		pthread_cond_broadcast(&strmh->cb_cond);
 	}
@@ -1041,8 +1110,12 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 	};
 
 	// ignore empty payload transfers
-	if (UNLIKELY(!payload || !payload_len || !strmh->outbuf))
+	if (UNLIKELY(!payload || !payload_len))
 		return;
+	if (UNLIKELY(!strmh->outbuf)) {
+		_uvc_diag_mjpeg_drop(strmh, "slot-exhausted");
+		return;
+	}
 
 	/* Certain iSight cameras have strange behavior: They send header
 	 * information in a packet with no image data, and then the following
@@ -1183,6 +1256,10 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 
 	for (packet_id = 0; packet_id < transfer->num_iso_packets; ++packet_id) {
 		check_header = 1;
+		if (UNLIKELY(!strmh->outbuf)) {
+			_uvc_diag_mjpeg_drop(strmh, "slot-exhausted");
+			continue;
+		}
 
 		pkt = transfer->iso_packet_desc + packet_id;
 
@@ -1341,6 +1418,7 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 	switch (transfer->status) {
 	case LIBUSB_TRANSFER_COMPLETED:
 		diag_first_xfer_completed(strmh, transfer);
+		_uvc_stream_try_acquire_outbuf(strmh);
 		if (!transfer->num_iso_packets) {
 			/* This is a bulk mode transfer, so it just has one payload transfer */
 			_uvc_process_payload(strmh, transfer->buffer, transfer->actual_length);
@@ -1586,13 +1664,21 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 	// Set up the streaming status and data space
 	strmh->running = 0;
 	stream_buf_size = _uvc_stream_frame_buffer_size(ctrl, stream_if);
-	strmh->outbuf = malloc(stream_buf_size);
-	strmh->holdbuf = malloc(stream_buf_size);
-	strmh->framebuf = malloc(stream_buf_size);
-	if (UNLIKELY(!strmh->outbuf || !strmh->holdbuf || !strmh->framebuf)) {
-		ret = UVC_ERROR_NO_MEM;
-		goto fail;
+	{
+		uint32_t i;
+		for (i = 0; i < LIBUVC_FRAME_POOL_SLOTS; i++) {
+			strmh->frame_pool[i] = malloc(stream_buf_size);
+			if (UNLIKELY(!strmh->frame_pool[i])) {
+				ret = UVC_ERROR_NO_MEM;
+				goto fail;
+			}
+			strmh->frame_pool_refs[i] = 0;
+		}
 	}
+	strmh->hold_slot = 0;
+	strmh->out_slot = 1 % LIBUVC_FRAME_POOL_SLOTS;
+	strmh->holdbuf = strmh->frame_pool[strmh->hold_slot];
+	strmh->outbuf = strmh->frame_pool[strmh->out_slot];
 	strmh->size_buf = stream_buf_size;	// xxx for boundary check
 
 	pthread_mutex_init(&strmh->cb_mutex, NULL);
@@ -1609,9 +1695,13 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 
 fail:
 	if (strmh) {
-		free(strmh->outbuf);
-		free(strmh->holdbuf);
-		free(strmh->framebuf);
+		uint32_t i;
+		for (i = 0; i < LIBUVC_FRAME_POOL_SLOTS; i++) {
+			free(strmh->frame_pool[i]);
+			strmh->frame_pool[i] = NULL;
+		}
+		strmh->outbuf = NULL;
+		strmh->holdbuf = NULL;
 		if (claimed)
 			uvc_release_if(strmh->devh, strmh->stream_if->bInterfaceNumber);
 		free(strmh);
@@ -1959,6 +2049,10 @@ static void *_uvc_user_caller(void *arg) {
 
 		if (LIKELY(!strmh->hold_bfh_err))	// XXX
 			strmh->user_cb(&strmh->frame, strmh->user_ptr);	// call user callback function
+		if (LIKELY(!strmh->hold_bfh_err)) {
+			uvc_frame_release(&strmh->frame);
+			strmh->frame.library_frame_owner = NULL;
+		}
 	}
 
 	return NULL; // return value ignored
@@ -2009,26 +2103,18 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
 		break;
 	}
 
-	/*
-	 * Copy holdbuf into framebuf while cb_mutex is held so the USB producer can
-	 * immediately reuse holdbuf for the next frame without racing the consumer's
-	 * uvc_duplicate_frame / JPEG-decode memcpy path (which runs without the lock).
-	 * The previous zero-copy pointer assignment caused torn frames on fast-paced
-	 * devices (e.g. 335 KB MJPEG @ 60 fps) where the next frame's EOF swap fired
-	 * before the consumer finished copying, overwriting the buffer mid-read.
-	 */
 	if (frame->data && frame->library_owns_data) {
 		free(frame->data);
 		frame->data = NULL;
 	}
-	if (LIKELY(strmh->framebuf && strmh->hold_bytes)) {
-		memcpy(strmh->framebuf, strmh->holdbuf, strmh->hold_bytes);
-		frame->data = strmh->framebuf;
-	} else {
-		frame->data = strmh->holdbuf;
-	}
+	if (frame->library_frame_owner == strmh && _uvc_frame_slot_valid(frame->library_frame_slot))
+		_uvc_frame_release_locked(strmh, frame->library_frame_slot);
+	frame->data = strmh->holdbuf;
 	frame->data_bytes = strmh->hold_bytes ? strmh->hold_bytes : 1;
 	frame->library_owns_data = 0;
+	frame->library_frame_owner = strmh;
+	frame->library_frame_slot = strmh->hold_slot;
+	_uvc_frame_retain_locked(strmh, strmh->hold_slot);
 	frame->sequence = strmh->hold_seq;
 	frame->capture_time.tv_sec = 0;
 	frame->capture_time.tv_usec = 0;
@@ -2059,6 +2145,11 @@ uvc_error_t uvc_stream_get_frame(uvc_stream_handle_t *strmh,
 
 	pthread_mutex_lock(&strmh->cb_mutex);
 	{
+		if (strmh->frame.library_frame_owner == strmh
+				&& _uvc_frame_slot_valid(strmh->frame.library_frame_slot)) {
+			_uvc_frame_release_locked(strmh, strmh->frame.library_frame_slot);
+			strmh->frame.library_frame_owner = NULL;
+		}
 		if (strmh->last_polled_seq < strmh->hold_seq) {
 			_uvc_populate_frame(strmh);
 			*frame = &strmh->frame;
@@ -2216,17 +2307,17 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 		strmh->frame.data = NULL;
 	}
 
-	if (strmh->outbuf) {
-		free(strmh->outbuf);
+	{
+		uint32_t i;
+		for (i = 0; i < LIBUVC_FRAME_POOL_SLOTS; i++) {
+			if (strmh->frame_pool[i]) {
+				free(strmh->frame_pool[i]);
+				strmh->frame_pool[i] = NULL;
+			}
+			strmh->frame_pool_refs[i] = 0;
+		}
 		strmh->outbuf = NULL;
-	}
-	if (strmh->holdbuf) {
-		free(strmh->holdbuf);
 		strmh->holdbuf = NULL;
-	}
-	if (strmh->framebuf) {
-		free(strmh->framebuf);
-		strmh->framebuf = NULL;
 	}
 
 	pthread_cond_destroy(&strmh->cb_cond);

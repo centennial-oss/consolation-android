@@ -498,6 +498,10 @@ typedef struct uvc_frame {
 	 * Set this field to zero if you are supplying the buffer.
 	 */
 	uint8_t library_owns_data;
+	/** @internal Borrowed frame slot owner (set by streaming path). */
+	void *library_frame_owner;
+	/** @internal Borrowed frame slot index (set by streaming path). */
+	uint32_t library_frame_slot;
 } uvc_frame_t;
 
 /** A callback function to handle incoming assembled UVC frames
@@ -844,6 +848,10 @@ uvc_error_t uvc_any2iyuv420SP(uvc_frame_t *in, uvc_frame_t *out);	// XXX
 uvc_error_t uvc_any2yuyv(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 
 uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes); // XXX
+/** Retain/release borrowed stream frame buffers returned by callback/get_frame.
+ * For copied/allocated frames these are no-ops. */
+void uvc_frame_retain(uvc_frame_t *frame);
+void uvc_frame_release(uvc_frame_t *frame);
 
 //**********************************************************************
 // added for diagnostic

@@ -195,6 +195,8 @@ uvc_error_t uvc_duplicate_frame(uvc_frame_t *in, uvc_frame_t *out) {
 	out->arrival_monotonic_ns = in->arrival_monotonic_ns;
 	out->source = in->source;
 	out->actual_bytes = copy_bytes;
+	out->library_frame_owner = NULL;
+	out->library_frame_slot = 0;
 
 #if USE_STRIDE	 // XXX
 	if (in->step && out->step) {
