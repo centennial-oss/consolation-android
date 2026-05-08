@@ -1360,6 +1360,13 @@ void API_EXPORTED libusb_free_transfer(struct libusb_transfer *transfer) {
 		free(transfer->buffer);
 
 	itransfer = LIBUSB_TRANSFER_TO_USBI_TRANSFER(transfer);
+
+	/* Free any backend-private resources (e.g. pre-allocated ISO URBs).
+	 * Must happen before the mutex is destroyed; the backend may take
+	 * itransfer->lock while cleaning up. */
+	if (usbi_backend->clear_transfer_priv)
+		usbi_backend->clear_transfer_priv(itransfer);
+
 	usbi_mutex_destroy(&itransfer->lock);
 	free(itransfer);
 	transfer->user_data = NULL;	// XXX

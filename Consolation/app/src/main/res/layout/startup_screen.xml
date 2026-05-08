@@ -123,7 +123,7 @@
                     android:focusable="false"
                     android:focusableInTouchMode="false"
                     android:hint="@string/hint_select_device"
-                    android:inputType="none"
+                    android:inputType="textNoSuggestions"
                     android:paddingStart="0dp"
                     android:paddingEnd="48dp"
                     android:textColor="@android:color/white"
@@ -175,7 +175,7 @@
                 android:cursorVisible="false"
                 android:focusable="true"
                 android:focusableInTouchMode="false"
-                android:inputType="none"
+                android:inputType="textNoSuggestions"
                 android:paddingStart="0dp"
                 android:paddingEnd="48dp"
                 android:textColor="@android:color/white" />

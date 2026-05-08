@@ -7,6 +7,7 @@
     <string name="hint_select_device">Choose a connected USB capture device</string>
     <string name="hint_no_capture_devices">No device found. Connect a Capture Card to continue.</string>
     <string name="startup_permission_notice">You\'ll be asked to allow camera, microphone, and USB access, which is required because Android treats capture cards as USB webcams.</string>
+    <string name="startup_usb2_warning">This device is using USB 2, which severely limits performance.\nRecommended modes: 1280x720 @ 60p or 1920x1080 @ 30p.</string>
     <string name="action_request_permission">Request USB permission</string>
     <string name="action_start_video">Play</string>
     <string name="action_stop_video">Stop Video</string>

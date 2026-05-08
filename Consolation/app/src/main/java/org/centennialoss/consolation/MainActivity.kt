@@ -40,6 +40,9 @@ import androidx.appcompat.widget.PopupMenu as AppCompatPopupMenu
 import androidx.core.content.ContextCompat
 import androidx.core.view.doOnLayout
 import androidx.core.view.isVisible
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -173,6 +176,14 @@ class MainActivity : ComponentActivity() {
 
         deviceRepository.refreshAfterUsbIntent(intent)
         updatePreviewScale()
+        updateSystemUiForPlayback(isPlaybackActive = false)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && captureEngine.state.value is CaptureState.Running) {
+            updateSystemUiForPlayback(isPlaybackActive = true)
+        }
     }
 
     override fun onStart() {
@@ -488,6 +499,7 @@ class MainActivity : ComponentActivity() {
 
     private fun updateUiForState(devices: List<CaptureDevice>, state: CaptureState) {
         val isRunning = state is CaptureState.Running
+        updateSystemUiForPlayback(isRunning)
         binding.startupScreen.root.isVisible = !isRunning
         binding.playbackControls.root.isVisible = isRunning
         previewTexture.isVisible = isRunning
@@ -522,10 +534,16 @@ class MainActivity : ComponentActivity() {
                     selectedPixelFormatPreference = PixelFormatPreference.AUTO
                     probedFormatSizes = emptyList()
                     probedFormatSizesReported = emptyList()
-                    binding.startupScreen.deviceDropdown.setText(selectedDevice?.displayName, false)
+                    binding.startupScreen.deviceDropdown.setText(selectedDevice?.name, false)
                     binding.startupScreen.resolutionDropdown.setText("", false)
                     lastResolutionRefreshDeviceId = null
                 }
+                // Refresh selected device snapshot so updated display labels
+                // (e.g., USB capability/speed suffixes) are always reflected.
+                selectedDevice = selectedDevice?.let { current ->
+                    devices.firstOrNull { it.id == current.id } ?: current
+                }
+                binding.startupScreen.deviceDropdown.setText(selectedDevice?.name, false)
                 updateCompatibilityWarning()
                 maybeRefreshResolutionsAfterDeviceOrPermissionChange()
                 updateStartupActions()
@@ -610,10 +628,27 @@ class MainActivity : ComponentActivity() {
                 !hasRuntimeCameraPermission() ||
                 !hasRuntimeRecordAudioPermission()
             )
+        val showUsb2BandwidthWarning = hasDevice && !needsAccess && device?.usbCapabilityLabel == "USB 2"
         val isRequestingPermission = captureEngine.state.value is CaptureState.RequestingPermission
 
-        binding.startupScreen.permissionNoticeText.isVisible = needsAccess
-        binding.startupScreen.permissionNoticeDivider.isVisible = needsAccess
+        binding.startupScreen.permissionNoticeText.isVisible = needsAccess || showUsb2BandwidthWarning
+        binding.startupScreen.permissionNoticeDivider.isVisible = needsAccess || showUsb2BandwidthWarning
+        binding.startupScreen.permissionNoticeText.text = getString(
+            if (showUsb2BandwidthWarning) {
+                R.string.startup_usb2_warning
+            } else {
+                R.string.startup_permission_notice
+            },
+        )
+        binding.startupScreen.permissionNoticeText.setTextColor(
+            Color.parseColor(
+                if (showUsb2BandwidthWarning) {
+                    "#FFE082"
+                } else {
+                    "#CCFFFFFF"
+                },
+            ),
+        )
         binding.startupScreen.resolutionLabel.isVisible = hasUsbPermission
         binding.startupScreen.resolutionInputLayout.isVisible = hasUsbPermission
         binding.startupScreen.requestUsbPermissionButton.isVisible = hasDevice && !hasUsbPermission
@@ -882,7 +917,7 @@ class MainActivity : ComponentActivity() {
     private fun updateStatsOverlay(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot) {
         binding.videoStatsOverlay.isVisible = isStatsVisible && statsPosition != StatsPosition.OFF
         if (binding.videoStatsOverlay.isVisible) {
-            binding.videoStatsOverlay.text = buildTelemetryOverlayText(stats)
+            binding.videoStatsOverlay.text = buildTelemetryOverlayCompactText(stats)
             val params = binding.videoStatsOverlay.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
             params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
             params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
@@ -891,7 +926,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun buildTelemetryOverlayText(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot): String {
+    private fun buildTelemetryOverlayCompactText(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot): String {
+        val payload = formatTelemetryPayloadLabel(stats.nativePayloadAvgKb)
+        return listOf(
+            "Res:${stats.width}x${stats.height}/${stats.configuredFps}",
+            "Fmt:${stats.pixelFormat}",
+            "Fps:${stats.fps}",
+            "Drop:${stats.droppedFrames}",
+            "QD:${format0(stats.nativeQueuedAvgFrames)}",
+            "QE:${format0(stats.nativeQueueEnqAvgFrames)}",
+            "Cb:${format0(stats.nativeUvcCbAvgMs)}",
+            "Lag:${format0(stats.nativeCbLagAvgMs)}",
+            "LagCnt:${stats.nativeCbLagCount}",
+            "Pub/s:${format0(stats.nativePubFps)}",
+            "PreSk:${stats.nativePreCbSkip}",
+            "SDrop:${stats.nativeStreamDrop}",
+            "Intv:${stats.nativeFrameInterval100ns}",
+            "Alt:${stats.nativeAltSetting}",
+            "Cv:${format0(stats.nativePreviewConvAvgMs)}",
+            "E2E:${format0(stats.nativeEndToEndLatencyAvgMs)}",
+            "Pay:${payload}",
+        ).joinToString(" | ")
+    }
+
+    private fun buildTelemetryLogText(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot): String {
         val payload = formatTelemetryPayloadLabel(stats.nativePayloadAvgKb)
         return listOf(
             "Res:${stats.width}x${stats.height}/${stats.configuredFps}",
@@ -923,7 +981,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         lastTelemetryLogAtMs = now
-        Log.i(TELEMETRY_LOG_TAG, buildTelemetryOverlayText(stats))
+        Log.i(TELEMETRY_LOG_TAG, buildTelemetryLogText(stats))
     }
 
     /** Average native payload size for overlay: KiB until 1024 KiB, then MiB. */
@@ -981,6 +1039,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showControls() {
+        if (captureEngine.state.value is CaptureState.Running) {
+            updateSystemUiForPlayback(isPlaybackActive = true)
+        }
         binding.playbackControls.root.isVisible = true
         resetControlsTimer()
     }
@@ -1783,6 +1844,18 @@ class MainActivity : ComponentActivity() {
                 .setAutoEnterEnabled(isPipEnabled && captureEngine.state.value is CaptureState.Running)
                 .build()
             setPictureInPictureParams(params)
+        }
+    }
+
+    private fun updateSystemUiForPlayback(isPlaybackActive: Boolean) {
+        WindowCompat.setDecorFitsSystemWindows(window, !isPlaybackActive)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        if (isPlaybackActive) {
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller.show(WindowInsetsCompat.Type.systemBars())
         }
     }
 

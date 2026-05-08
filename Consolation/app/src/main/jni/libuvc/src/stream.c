@@ -357,9 +357,20 @@ static void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reas
 	strmh->diag_last_mjpeg_restart_interval = restart_interval;
 }
 
-/** Matches libusb_fill_{bulk,iso}_transfer timeout_ms in this file */
+/** Transfer timeout passed to libusb_fill_{bulk,iso}_transfer for streaming transfers.
+ *
+ * Set to 0 (infinite) for both ISO and bulk streaming paths. Device removal is
+ * handled through the usbfs fd POLLERR path (usbi_handle_disconnect), which
+ * cancels all in-flight transfers independently of timeout. Using a non-zero
+ * timeout forces a sorted insert into the flying_transfers list on every
+ * libusb_submit_transfer call; 0 allows an O(1) tail append instead.
+ *
+ * If a stream-stall watchdog is needed, implement it at the libuvc or
+ * application layer based on frame cadence, not individual transfer expiry.
+ * Override at compile time if a non-zero timeout is required for testing.
+ */
 #ifndef LIBUVC_STREAM_XFER_TIMEOUT_MS
-#define LIBUVC_STREAM_XFER_TIMEOUT_MS 5000
+#define LIBUVC_STREAM_XFER_TIMEOUT_MS 0
 #endif
 
 static const char *stream_libusb_xfer_status_str(int status) {
@@ -1936,6 +1947,16 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 				(void*) strmh, LIBUVC_STREAM_XFER_TIMEOUT_MS);
 
 			libusb_set_iso_packet_lengths(transfer, endpoint_bytes_per_packet);
+
+			/* Pre-allocate kernel URBs once so the hot resubmit path
+			 * skips calloc/free on every completion. */
+			ret = libusb_prealloc_iso_urbs(transfer);
+			if (UNLIKELY(ret != LIBUSB_SUCCESS)) {
+				UVC_DEBUG("libusb_prealloc_iso_urbs failed: %d", ret);
+				_uvc_free_transfer(strmh, transfer_id);
+				ret = UVC_ERROR_NO_MEM;
+				goto fail;
+			}
 		}
 	} else {
 		MARK("bulk transfer mode");

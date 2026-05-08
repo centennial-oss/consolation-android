@@ -88,10 +88,11 @@ class UsbCaptureDeviceRepository(
                     mutablePermissionGranted.value = granted
                     if (granted) {
                         mutablePermissionResults.tryEmit(PermissionResult.Granted)
+                        // Refresh device snapshots after grant so displayName can pick up
+                        // capability labels that may require descriptor access.
+                        refreshDevices()
                     } else {
                         mutablePermissionResults.tryEmit(PermissionResult.Denied)
-                    }
-                    if (!granted) {
                         refreshDevices()
                     }
                 }
@@ -183,7 +184,8 @@ class UsbCaptureDeviceRepository(
                 CaptureDevice(
                     id = usbDevice.deviceKey(),
                     name = name,
-                    displayName = if (speedLabel != null) "$name ($speedLabel)" else name,
+                    displayName = name,
+                    usbCapabilityLabel = speedLabel,
                     vendorId = usbDevice.vendorId,
                     productId = usbDevice.productId,
                 )
@@ -215,11 +217,11 @@ class UsbCaptureDeviceRepository(
     private fun UsbDevice.deviceKey(): String = "$vendorId:$productId:$deviceName"
 
     private fun UsbDevice.usbSpeedLabel(): String? {
-        return actualUsbSpeedLabelFromSysfs()
+        return usbCapabilityLabelFromSysfs()
             ?: descriptorUsbCapabilityLabel()
     }
 
-    private fun UsbDevice.actualUsbSpeedLabelFromSysfs(): String? {
+    private fun UsbDevice.usbCapabilityLabelFromSysfs(): String? {
         val parts = deviceName.split('/')
         if (parts.size < 2) return null
         val busNumber = parts.getOrNull(parts.size - 2)?.toIntOrNull() ?: return null
@@ -232,8 +234,14 @@ class UsbCaptureDeviceRepository(
             val dev = child.resolve("devnum").readTextOrNull()?.trim()?.toIntOrNull()
             if (bus == busNumber && dev == deviceNumber) {
                 val mbps = child.resolve("speed").readTextOrNull()?.trim()?.toDoubleOrNull()
-                    ?: return null
-                return usbSpeedLabelFromMbps(mbps)
+                if (mbps != null) {
+                    return usbCapabilityLabelFromMbps(mbps)
+                }
+                val version = child.resolve("version").readTextOrNull()?.trim()
+                if (!version.isNullOrBlank()) {
+                    return usbCapabilityLabelFromVersion(version)
+                }
+                return null
             }
         }
         return null
@@ -252,9 +260,9 @@ class UsbCaptureDeviceRepository(
             if (raw.size < 4) return null
             val bcdUsb = raw.u8(2) or (raw.u8(3) shl 8)
             when {
-                bcdUsb >= 0x0300 -> "USB 3+ capable"
-                bcdUsb >= 0x0200 -> "USB 2 capable"
-                else -> "USB 1 capable"
+                bcdUsb >= 0x0300 -> "USB 3"
+                bcdUsb >= 0x0200 -> "USB 2"
+                else -> "USB 2"
             }
         } catch (_: Exception) {
             null
@@ -263,22 +271,25 @@ class UsbCaptureDeviceRepository(
         }
     }
 
-    private fun usbSpeedLabelFromMbps(mbps: Double): String {
+    private fun usbCapabilityLabelFromMbps(mbps: Double): String {
         return when {
-            mbps >= 10000.0 -> "USB 3+ ${formatGbps(mbps)}"
-            mbps >= 5000.0 -> "USB 3 ${formatGbps(mbps)}"
-            mbps >= 480.0 -> "USB 2 480 Mbps"
-            mbps >= 12.0 -> "USB 1.1 12 Mbps"
-            else -> "USB 1 ${mbps.toInt()} Mbps"
+            mbps >= 5000.0 -> "USB 3"
+            mbps >= 480.0 -> "USB 2"
+            else -> "USB 2"
         }
     }
 
-    private fun formatGbps(mbps: Double): String {
-        val gbps = mbps / 1000.0
-        return if (gbps % 1.0 == 0.0) {
-            "${gbps.toInt()} Gbps"
-        } else {
-            "%.1f Gbps".format(gbps)
+    private fun usbCapabilityLabelFromVersion(version: String): String? {
+        val cleaned = version.trim()
+        if (cleaned.isEmpty()) return null
+        val parts = cleaned.split('.')
+        val major = parts.firstOrNull()?.toIntOrNull() ?: return null
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        return when {
+            major >= 3 -> "USB 3"
+            major >= 2 -> "USB 2"
+            major == 1 && minor >= 1 -> "USB 2"
+            else -> "USB 2"
         }
     }
 

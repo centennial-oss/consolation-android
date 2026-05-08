@@ -4,6 +4,7 @@ data class CaptureDevice(
     val id: String,
     val name: String,
     val displayName: String = name,
+    val usbCapabilityLabel: String? = null,
     val vendorId: Int,
     val productId: Int,
 )

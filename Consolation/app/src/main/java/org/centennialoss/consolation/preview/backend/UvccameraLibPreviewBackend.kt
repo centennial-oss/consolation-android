@@ -171,6 +171,7 @@ class UvccameraLibPreviewBackend(
     private var lastNativeStreamDrop: Long = 0L
     private var lastNativeFrameInterval100ns: Long = 0L
     private var lastNativeAltSetting: Long = 0L
+    private var lastNativePublishedCountRaw: Long = 0L
 
     private val surfaceListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
@@ -586,7 +587,9 @@ class UvccameraLibPreviewBackend(
             lastNativeFrameInterval100ns = processingStats.getOrElse(25) { 0L }
             lastNativeAltSetting = processingStats.getOrElse(26) { 0L }
             val nativePublishedCount = processingStats.getOrElse(27) { 0L }
-            lastNativePubFps = nativePublishedCount * 1000.0 / elapsed.toDouble()
+            val publishedDelta = (nativePublishedCount - lastNativePublishedCountRaw).coerceAtLeast(0L)
+            lastNativePubFps = publishedDelta * 1000.0 / elapsed.toDouble()
+            lastNativePublishedCountRaw = nativePublishedCount
             lastNativeStreamDrop = processingStats.getOrElse(28) { 0L }
             return TelemetrySnapshot(
                 fps = actualFps,
@@ -1402,6 +1405,7 @@ class UvccameraLibPreviewBackend(
         lastNativeStreamDrop = 0L
         lastNativeFrameInterval100ns = 0L
         lastNativeAltSetting = 0L
+        lastNativePublishedCountRaw = 0L
     }
 
     private fun nsToMs(ns: Long): Double = ns / 1_000_000.0
