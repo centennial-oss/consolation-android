@@ -1462,7 +1462,6 @@ int API_EXPORTED libusb_submit_transfer(struct libusb_transfer *transfer) {
 	int r;
 	int updated_fds;
 
-	usbi_mutex_lock(&ctx->flying_transfers_lock);
 	usbi_mutex_lock(&itransfer->lock);
 	{
 		itransfer->transferred = 0;
@@ -1473,22 +1472,40 @@ int API_EXPORTED libusb_submit_transfer(struct libusb_transfer *transfer) {
 			goto out;
 		}
 
+		usbi_mutex_lock(&ctx->flying_transfers_lock);
 		r = add_to_flying_list(itransfer);
-		if (LIKELY(r == LIBUSB_SUCCESS)) {
-			r = usbi_backend->submit_transfer(itransfer);
-		}
 		if (UNLIKELY(r != LIBUSB_SUCCESS)) {
 			list_del(&itransfer->list);
-			arm_timerfd_for_next_timeout(ctx);
-		} else {
+			if (timerisset(&itransfer->timeout))
+				arm_timerfd_for_next_timeout(ctx);
+			usbi_mutex_unlock(&ctx->flying_transfers_lock);
+			goto out;
+		}
+		usbi_mutex_unlock(&ctx->flying_transfers_lock);
+
+		/* Keep the transfer lock across backend submission so cancel cannot
+		 * race the backend's URB setup. The flying-list lock is intentionally
+		 * released first: completions and disconnect can now remove/inspect
+		 * other transfers while SUBMITURB ioctls are in progress. If this
+		 * submit fails, we remove the transfer from the flying list before
+		 * returning to the caller. usbi_handle_disconnect only claims
+		 * transfers whose transfer lock it can take, so it cannot hold a
+		 * stale pointer to a transfer being removed by this failure path. */
+		r = usbi_backend->submit_transfer(itransfer);
+		if (LIKELY(r == LIBUSB_SUCCESS)) {
 			/* keep a reference to this device */
 			libusb_ref_device(transfer->dev_handle->dev);
+		} else {
+			usbi_mutex_lock(&ctx->flying_transfers_lock);
+			list_del(&itransfer->list);
+			if (timerisset(&itransfer->timeout))
+				arm_timerfd_for_next_timeout(ctx);
+			usbi_mutex_unlock(&ctx->flying_transfers_lock);
 		}
 out:
 		updated_fds = (itransfer->flags & USBI_TRANSFER_UPDATED_FDS);
 	}
 	usbi_mutex_unlock(&itransfer->lock);
-	usbi_mutex_unlock(&ctx->flying_transfers_lock);
 	if (updated_fds)
 		usbi_fd_notification(ctx);
 	return r;
@@ -1589,19 +1606,14 @@ int usbi_handle_transfer_completion(struct usbi_transfer *itransfer,
 	uint8_t flags;
 	int r = 0;
 
-	/* FIXME: could be more intelligent with the timerfd here. we don't need
-	 * to disarm the timerfd if there was no timer running, and we only need
-	 * to rearm the timerfd if the transfer that expired was the one with
-	 * the shortest timeout. */
-
 	usbi_mutex_lock(&ctx->flying_transfers_lock);
 	{
 		list_del(&itransfer->list);
-		if (usbi_using_timerfd(ctx))
+		if (usbi_using_timerfd(ctx) && timerisset(&itransfer->timeout))
 			r = arm_timerfd_for_next_timeout(ctx);
 	}
 	usbi_mutex_unlock(&ctx->flying_transfers_lock);
-	if (usbi_using_timerfd(ctx) && (r < 0))
+	if (timerisset(&itransfer->timeout) && usbi_using_timerfd(ctx) && (r < 0))
 		return r;
 
 	if (status == LIBUSB_TRANSFER_COMPLETED
@@ -2633,24 +2645,35 @@ void usbi_handle_disconnect(struct libusb_device_handle *handle) {
 	 * libusb_close, both of which hold the events_lock while doing so,
 	 * so usbi_handle_disconnect cannot be running at the same time.
 	 *
-	 * Note that libusb_submit_transfer also removes the transfer from
-	 * the flying_transfer list on submission failure, but it keeps the
-	 * flying_transfer list locked between addition and removal, so
-	 * usbi_handle_disconnect never sees such transfers.
+	 * Note that libusb_submit_transfer can remove a transfer from the
+	 * flying_transfer list on submission failure. To avoid holding a stale
+	 * pointer to a transfer still being submitted, this loop only claims a
+	 * transfer if it can take the transfer lock while holding the flying list
+	 * lock. If the transfer is busy, submit/cancel/completion owns it; drop the
+	 * list lock and retry.
 	 */
 
 	while (1) {
+		int busy = 0;
+
 		usbi_mutex_lock(&HANDLE_CTX(handle)->flying_transfers_lock);
 		to_cancel = NULL;
 		list_for_each_entry(cur, &HANDLE_CTX(handle)->flying_transfers, list, struct usbi_transfer)
 			if (USBI_TRANSFER_TO_LIBUSB_TRANSFER(cur)->dev_handle == handle) {
+				if (usbi_mutex_trylock(&cur->lock) != 0) {
+					busy = 1;
+					break;
+				}
 				to_cancel = cur;
 				break;
 			}
 		usbi_mutex_unlock(&HANDLE_CTX(handle)->flying_transfers_lock);
 
+		if (busy)
+			continue;
 		if (!to_cancel)
 			break;
+		usbi_mutex_unlock(&to_cancel->lock);
 
 		usbi_dbg("cancelling transfer %p from disconnect",
 			 USBI_TRANSFER_TO_LIBUSB_TRANSFER(to_cancel));

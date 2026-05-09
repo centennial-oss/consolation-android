@@ -1759,6 +1759,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	int transfer_id;
 	int submitted_transfers = 0;
 	int cb_thread_started = 0;
+	int usb_ret;
 
 	ctrl = &strmh->cur_ctrl;
 
@@ -1950,9 +1951,9 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 
 			/* Pre-allocate kernel URBs once so the hot resubmit path
 			 * skips calloc/free on every completion. */
-			ret = libusb_prealloc_iso_urbs(transfer);
-			if (UNLIKELY(ret != LIBUSB_SUCCESS)) {
-				UVC_DEBUG("libusb_prealloc_iso_urbs failed: %d", ret);
+			usb_ret = libusb_prealloc_iso_urbs(transfer);
+			if (UNLIKELY(usb_ret != LIBUSB_SUCCESS)) {
+				UVC_DEBUG("libusb_prealloc_iso_urbs failed: %d", usb_ret);
 				_uvc_free_transfer(strmh, transfer_id);
 				ret = UVC_ERROR_NO_MEM;
 				goto fail;
@@ -1976,6 +1977,16 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 				strmh->transfer_bufs[transfer_id],
 				strmh->cur_ctrl.dwMaxPayloadTransferSize, _uvc_stream_callback,
 				(void *)strmh, LIBUVC_STREAM_XFER_TIMEOUT_MS);
+
+			/* Pre-allocate kernel URBs once so the bulk hot resubmit path
+			 * skips calloc/free on every completion. */
+			usb_ret = libusb_prealloc_bulk_urbs(transfer);
+			if (UNLIKELY(usb_ret != LIBUSB_SUCCESS)) {
+				UVC_DEBUG("libusb_prealloc_bulk_urbs failed: %d", usb_ret);
+				_uvc_free_transfer(strmh, transfer_id);
+				ret = UVC_ERROR_NO_MEM;
+				goto fail;
+			}
 		}
 	}
 

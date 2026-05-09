@@ -194,6 +194,9 @@ struct android_transfer_priv {
 		struct usbfs_urb **iso_urbs;
 	};
 	struct iso_urb_ctx *iso_urb_ctxs;
+	/* 1 = urbs were pre-allocated by libusb_prealloc_bulk_urbs();
+	 * skip calloc/free on the hot resubmit path */
+	int bulk_urbs_preallocated;
 	/* 1 = iso_urbs were pre-allocated by libusb_prealloc_iso_urbs();
 	 * skip calloc/free on the hot resubmit path */
 	int iso_urbs_preallocated;
@@ -2249,6 +2252,104 @@ int API_EXPORTED libusb_prealloc_iso_urbs(struct libusb_transfer *transfer)
 	return LIBUSB_SUCCESS;
 }
 
+int API_EXPORTED libusb_prealloc_bulk_urbs(struct libusb_transfer *transfer)
+{
+	struct usbi_transfer *itransfer =
+		LIBUSB_TRANSFER_TO_USBI_TRANSFER(transfer);
+	struct android_transfer_priv *tpriv =
+		usbi_transfer_get_os_priv(itransfer);
+	struct android_device_handle_priv *dpriv =
+		_device_handle_priv(transfer->dev_handle);
+	struct usbfs_urb *urbs;
+	int is_out = (transfer->endpoint & LIBUSB_ENDPOINT_DIR_MASK)
+		== LIBUSB_ENDPOINT_OUT;
+	int bulk_buffer_len, use_bulk_continuation;
+	int num_urbs;
+	int last_urb_partial = 0;
+	int i;
+
+	if (tpriv->bulk_urbs_preallocated)
+		return LIBUSB_SUCCESS;
+
+	if (UNLIKELY(transfer->type != LIBUSB_TRANSFER_TYPE_BULK &&
+			transfer->type != LIBUSB_TRANSFER_TYPE_BULK_STREAM &&
+			transfer->type != LIBUSB_TRANSFER_TYPE_INTERRUPT))
+		return LIBUSB_ERROR_INVALID_PARAM;
+
+	if (UNLIKELY(is_out && (transfer->flags & LIBUSB_TRANSFER_ADD_ZERO_PACKET))
+			&& !(dpriv->caps & USBFS_CAP_ZERO_PACKET))
+		return LIBUSB_ERROR_NOT_SUPPORTED;
+
+	if (dpriv->caps & USBFS_CAP_BULK_SCATTER_GATHER) {
+		bulk_buffer_len = transfer->length ? transfer->length : 1;
+		use_bulk_continuation = 0;
+	} else if (dpriv->caps & USBFS_CAP_BULK_CONTINUATION) {
+		bulk_buffer_len = MAX_BULK_BUFFER_LENGTH;
+		use_bulk_continuation = 1;
+	} else if (dpriv->caps & USBFS_CAP_NO_PACKET_SIZE_LIM) {
+		bulk_buffer_len = transfer->length ? transfer->length : 1;
+		use_bulk_continuation = 0;
+	} else {
+		bulk_buffer_len = MAX_BULK_BUFFER_LENGTH;
+		use_bulk_continuation = 0;
+	}
+
+	num_urbs = transfer->length / bulk_buffer_len;
+	if (transfer->length == 0) {
+		num_urbs = 1;
+	} else if ((transfer->length % bulk_buffer_len) > 0) {
+		last_urb_partial = 1;
+		num_urbs++;
+	}
+
+	urbs = calloc(num_urbs, sizeof(*urbs));
+	if (UNLIKELY(!urbs))
+		return LIBUSB_ERROR_NO_MEM;
+
+	for (i = 0; i < num_urbs; i++) {
+		struct usbfs_urb *urb = &urbs[i];
+		urb->usercontext = itransfer;
+		switch (transfer->type) {
+		case LIBUSB_TRANSFER_TYPE_BULK:
+			urb->type = USBFS_URB_TYPE_BULK;
+			urb->stream_id = 0;
+			break;
+		case LIBUSB_TRANSFER_TYPE_BULK_STREAM:
+			urb->type = USBFS_URB_TYPE_BULK;
+			urb->stream_id = itransfer->stream_id;
+			break;
+		case LIBUSB_TRANSFER_TYPE_INTERRUPT:
+			urb->type = USBFS_URB_TYPE_INTERRUPT;
+			break;
+		default:
+			break;
+		}
+		urb->endpoint = transfer->endpoint;
+		urb->buffer = transfer->buffer + (i * bulk_buffer_len);
+		if (use_bulk_continuation && !is_out && (i < num_urbs - 1))
+			urb->flags = USBFS_URB_SHORT_NOT_OK;
+		if (i == num_urbs - 1 && last_urb_partial)
+			urb->buffer_length = transfer->length % bulk_buffer_len;
+		else if (transfer->length == 0)
+			urb->buffer_length = 0;
+		else
+			urb->buffer_length = bulk_buffer_len;
+
+		if (i > 0 && use_bulk_continuation)
+			urb->flags |= USBFS_URB_BULK_CONTINUATION;
+
+		if (is_out && i == num_urbs - 1
+				&& transfer->flags & LIBUSB_TRANSFER_ADD_ZERO_PACKET)
+			urb->flags |= USBFS_URB_ZERO_PACKET;
+	}
+
+	tpriv->urbs = urbs;
+	tpriv->num_urbs = num_urbs;
+	tpriv->bulk_urbs_preallocated = 1;
+	usbi_dbg("preallocated %d bulk URBs for transfer", num_urbs);
+	return LIBUSB_SUCCESS;
+}
+
 static int submit_bulk_transfer(struct usbi_transfer *itransfer) {
 
 	struct libusb_transfer *transfer
@@ -2263,6 +2364,47 @@ static int submit_bulk_transfer(struct usbi_transfer *itransfer) {
 	int r;
 	int i;
 	size_t alloc_size;
+
+	if (tpriv->bulk_urbs_preallocated) {
+		tpriv->num_retired = 0;
+		tpriv->reap_action = NORMAL;
+		tpriv->reap_status = LIBUSB_TRANSFER_COMPLETED;
+		for (i = 0; i < tpriv->num_urbs; i++) {
+			struct usbfs_urb *urb = &tpriv->urbs[i];
+			urb->status = 0;
+			urb->actual_length = 0;
+			urb->error_count = 0;
+			r = ioctl(dpriv->fd, IOCTL_USBFS_SUBMITURB, urb);
+			if (UNLIKELY(r < 0)) {
+				if (errno == ENODEV) {
+					r = LIBUSB_ERROR_NO_DEVICE;
+				} else {
+					usbi_err(TRANSFER_CTX(transfer),
+						"submiturb failed error %d errno=%d", r, errno);
+					r = LIBUSB_ERROR_IO;
+				}
+
+				if (UNLIKELY(i == 0)) {
+					usbi_dbg("first preallocated bulk URB failed");
+					return r;
+				}
+
+				tpriv->reap_action =
+						EREMOTEIO == errno ? COMPLETED_EARLY : SUBMIT_FAILED;
+				tpriv->num_retired += tpriv->num_urbs - i;
+
+				if (COMPLETED_EARLY == tpriv->reap_action)
+					return LIBUSB_SUCCESS;
+
+				discard_urbs(itransfer, 0, i);
+				usbi_dbg("reporting successful submission but waiting for %d "
+					"discards before reporting error", i);
+				return LIBUSB_SUCCESS;
+			}
+		}
+
+		return LIBUSB_SUCCESS;
+	}
 
 	if (UNLIKELY(tpriv->urbs))
 		return LIBUSB_ERROR_BUSY;
@@ -2727,6 +2869,7 @@ static void op_clear_transfer_priv(struct usbi_transfer *itransfer) {
 		if (tpriv->urbs)
 			free(tpriv->urbs);
 		tpriv->urbs = NULL;
+		tpriv->bulk_urbs_preallocated = 0;
 		usbi_mutex_unlock(&itransfer->lock);
 		break;
 	case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS:
@@ -2871,9 +3014,10 @@ out_unlock:
 	return LIBUSB_SUCCESS;
 
 completed:
-	if (tpriv->urbs)
+	if (tpriv->urbs && !tpriv->bulk_urbs_preallocated)
 		free(tpriv->urbs);
-	tpriv->urbs = NULL;
+	if (!tpriv->bulk_urbs_preallocated)
+		tpriv->urbs = NULL;
 	usbi_mutex_unlock(&itransfer->lock);
 	return CANCELLED == tpriv->reap_action ?
 		usbi_handle_transfer_cancellation(itransfer) :

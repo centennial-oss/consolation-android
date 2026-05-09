@@ -922,7 +922,10 @@ struct usbi_os_backend {
 	 *
 	 * This function must not block.
 	 *
-	 * This function gets called with the flying_transfers_lock locked!
+	 * This function gets called with the transfer lock held, but not with
+	 * flying_transfers_lock held. The transfer has already been added to the
+	 * flying list; if submission fails, core code removes it before
+	 * libusb_submit_transfer() returns.
 	 *
 	 * Return:
 	 * - 0 on success
