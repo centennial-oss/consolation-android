@@ -1003,11 +1003,6 @@ uvc_error_t uvc_probe_stream_ctrl(uvc_device_handle_t *devh,
 static void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 	uint32_t next_out_slot;
 
-	if (UNLIKELY(strmh->frame_format == UVC_FRAME_FORMAT_MJPEG && strmh->bfh_err)) {
-		_uvc_discard_assembled_frame(strmh, reason);
-		return;
-	}
-
 	if (UNLIKELY(!_uvc_mjpeg_payload_has_markers(strmh))) {
 		_uvc_discard_assembled_frame(strmh, reason);
 		return;
@@ -1249,10 +1244,7 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 			/* The frame ID bit was flipped, but we have image data sitting
 				around from prior transfers. This means the camera didn't send
 				an EOF for the last transfer of the previous frame. */
-			if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG)
-				_uvc_discard_assembled_frame(strmh, "bulk-fid");
-			else
-				_uvc_swap_buffers(strmh, "bulk-fid");
+			_uvc_swap_buffers(strmh, "bulk-fid");
 		}
 
 		strmh->fid = header_info & UVC_STREAM_FID;
@@ -1365,7 +1357,7 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 			if (LIKELY(check_header)) {
 				header_info = pktbuf[1];
 				if (UNLIKELY(header_info & UVC_STREAM_ERR)) {
-					strmh->bfh_err |= UVC_STREAM_ERR;
+//					strmh->bfh_err |= UVC_STREAM_ERR;
 					MARK("bad packet:status=0x%2x", header_info);
 					libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
 //					uvc_vc_get_error_code(strmh->devh, &vc_error_code, UVC_GET_CUR);
@@ -1377,10 +1369,7 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 				/* The frame ID bit was flipped, but we have image data sitting
 	             around from prior transfers. This means the camera didn't send
     		     an EOF for the last transfer of the previous frame or some frames losted. */
-					if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG)
-						_uvc_discard_assembled_frame(strmh, "iso-fid");
-					else
-						_uvc_swap_buffers(strmh, "iso-fid");
+					_uvc_swap_buffers(strmh, "iso-fid");
 				}
 				strmh->fid = header_info & UVC_STREAM_FID;
 #else
