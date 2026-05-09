@@ -928,24 +928,27 @@ class MainActivity : ComponentActivity() {
 
     private fun buildTelemetryOverlayCompactText(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot): String {
         val payload = formatTelemetryPayloadLabel(stats.nativePayloadAvgKb)
+        val intervalMs = stats.nativeFrameInterval100ns / 10_000.0
+        val usbLabel = if (stats.nativeIsIsochronous) {
+            "USB: Iso ${stats.nativeAltSetting}"
+        } else {
+            "USB: Bulk"
+        }
         return listOf(
-            "Res:${stats.width}x${stats.height}/${stats.configuredFps}",
-            "Fmt:${stats.pixelFormat}",
+            "${stats.width}x${stats.height}/${stats.configuredFps}",
+            "${stats.pixelFormat}",
             "Fps:${stats.fps}",
-            "Drop:${stats.droppedFrames}",
-            "QD:${format0(stats.nativeQueuedAvgFrames)}",
-            "QE:${format0(stats.nativeQueueEnqAvgFrames)}",
+            "LAG: ${format0(stats.nativeEndToEndLatencyAvgMs)}",
+            "FDrop:${stats.droppedFrames}",
+            "Evct:${format0(stats.nativeQueueEnqAvgFrames)}",
             "Cb:${format0(stats.nativeUvcCbAvgMs)}",
-            "Lag:${format0(stats.nativeCbLagAvgMs)}",
-            "LagCnt:${stats.nativeCbLagCount}",
-            "Pub/s:${format0(stats.nativePubFps)}",
-            "PreSk:${stats.nativePreCbSkip}",
+            "CbLg:${format0(stats.nativeCbLagAvgMs)}",
+            "CbSkp:${stats.nativePreCbSkip}",
             "SDrop:${stats.nativeStreamDrop}",
-            "Intv:${stats.nativeFrameInterval100ns}",
-            "Alt:${stats.nativeAltSetting}",
-            "Cv:${format0(stats.nativePreviewConvAvgMs)}",
-            "E2E:${format0(stats.nativeEndToEndLatencyAvgMs)}",
-            "Pay:${payload}",
+            "Cnv:${format0(stats.nativePreviewConvAvgMs)}",
+            "Cad:${format1(intervalMs)}",
+            usbLabel,
+            "${payload}",
         ).joinToString(" | ")
     }
 

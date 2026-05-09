@@ -1929,6 +1929,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	/* A VS interface uses isochronous transfers if it has multiple altsettings.
 	 * (UVC 1.5: 2.4.3. VideoStreaming Interface, on page 19) */
 	isochronous = interface->num_altsetting > 1;
+	strmh->diag_selected_isochronous = isochronous ? 1 : 0;
 
 	if (isochronous) {
 		MARK("isochronous transfer mode:num_altsetting=%d", interface->num_altsetting);
@@ -2451,6 +2452,7 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 uvc_error_t uvc_get_stream_runtime_diag(uvc_device_handle_t *devh,
 		uint32_t *frame_interval_100ns,
 		int *altsetting,
+		uint8_t *is_isochronous,
 		uint32_t *published_count,
 		uint32_t *dropped_before_cb_count) {
 	uvc_stream_handle_t *strmh;
@@ -2466,6 +2468,8 @@ uvc_error_t uvc_get_stream_runtime_diag(uvc_device_handle_t *devh,
 		*frame_interval_100ns = strmh->diag_selected_frame_interval_100ns;
 	if (altsetting)
 		*altsetting = strmh->diag_selected_altsetting;
+	if (is_isochronous)
+		*is_isochronous = strmh->diag_selected_isochronous;
 	if (published_count)
 		*published_count = strmh->diag_mjpeg_publish_count;
 	if (dropped_before_cb_count)

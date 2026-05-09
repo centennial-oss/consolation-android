@@ -27,6 +27,7 @@ data class TelemetrySnapshot(
     val nativeStreamDrop: Long = 0L,
     val nativeFrameInterval100ns: Long = 0L,
     val nativeAltSetting: Long = 0L,
+    val nativeIsIsochronous: Boolean = false,
 )
 
 interface LatencyTelemetry {

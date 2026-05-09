@@ -630,6 +630,7 @@ void uvc_stream_close(uvc_stream_handle_t *strmh);
 uvc_error_t uvc_get_stream_runtime_diag(uvc_device_handle_t *devh,
 		uint32_t *frame_interval_100ns,
 		int *altsetting,
+		uint8_t *is_isochronous,
 		uint32_t *published_count,
 		uint32_t *dropped_before_cb_count);
 

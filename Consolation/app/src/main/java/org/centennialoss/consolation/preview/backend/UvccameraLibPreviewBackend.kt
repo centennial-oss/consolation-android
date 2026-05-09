@@ -171,6 +171,7 @@ class UvccameraLibPreviewBackend(
     private var lastNativeStreamDrop: Long = 0L
     private var lastNativeFrameInterval100ns: Long = 0L
     private var lastNativeAltSetting: Long = 0L
+    private var lastNativeIsIsochronous: Boolean = false
     private var lastNativePublishedCountRaw: Long = 0L
 
     private val surfaceListener = object : TextureView.SurfaceTextureListener {
@@ -591,6 +592,7 @@ class UvccameraLibPreviewBackend(
             lastNativePubFps = publishedDelta * 1000.0 / elapsed.toDouble()
             lastNativePublishedCountRaw = nativePublishedCount
             lastNativeStreamDrop = processingStats.getOrElse(28) { 0L }
+            lastNativeIsIsochronous = processingStats.getOrElse(29) { 0L } != 0L
             return TelemetrySnapshot(
                 fps = actualFps,
                 droppedFrames = droppedFrames,
@@ -617,6 +619,7 @@ class UvccameraLibPreviewBackend(
                 nativeStreamDrop = lastNativeStreamDrop,
                 nativeFrameInterval100ns = lastNativeFrameInterval100ns,
                 nativeAltSetting = lastNativeAltSetting,
+                nativeIsIsochronous = lastNativeIsIsochronous,
             )
         }
         return TelemetrySnapshot(
@@ -645,6 +648,7 @@ class UvccameraLibPreviewBackend(
             nativeStreamDrop = lastNativeStreamDrop,
             nativeFrameInterval100ns = lastNativeFrameInterval100ns,
             nativeAltSetting = lastNativeAltSetting,
+            nativeIsIsochronous = lastNativeIsIsochronous,
         )
     }
 
@@ -1405,6 +1409,7 @@ class UvccameraLibPreviewBackend(
         lastNativeStreamDrop = 0L
         lastNativeFrameInterval100ns = 0L
         lastNativeAltSetting = 0L
+        lastNativeIsIsochronous = false
         lastNativePublishedCountRaw = 0L
     }
 

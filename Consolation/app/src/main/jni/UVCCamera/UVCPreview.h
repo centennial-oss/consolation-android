@@ -43,7 +43,7 @@
 #define DEFAULT_PREVIEW_FPS_MAX 30
 #define DEFAULT_PREVIEW_MODE 0
 #define DEFAULT_BANDWIDTH 1.0f
-#define UVC_PROCESSING_STATS_COUNT 29
+#define UVC_PROCESSING_STATS_COUNT 30
 
 typedef uvc_error_t (*convFunc_t)(uvc_frame_t *in, uvc_frame_t *out);
 

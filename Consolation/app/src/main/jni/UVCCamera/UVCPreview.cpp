@@ -530,12 +530,14 @@ static inline void recordPreviewEnqueueDepthSample(
 void UVCPreview::getAndResetProcessingStats(uint64_t stats[UVC_PROCESSING_STATS_COUNT]) {
 	uint32_t stream_interval_100ns = 0;
 	int stream_altsetting = -1;
+	uint8_t stream_is_isochronous = 0;
 	uint32_t stream_published_count = 0;
 	uint32_t stream_dropped_before_cb_count = 0;
 	(void)uvc_get_stream_runtime_diag(
 		mDeviceHandle,
 		&stream_interval_100ns,
 		&stream_altsetting,
+		&stream_is_isochronous,
 		&stream_published_count,
 		&stream_dropped_before_cb_count);
 	pthread_mutex_lock(&processing_stats_mutex);
@@ -577,6 +579,7 @@ void UVCPreview::getAndResetProcessingStats(uint64_t stats[UVC_PROCESSING_STATS_
 	stats[26] = stream_altsetting >= 0 ? (uint64_t)stream_altsetting : 0;
 	stats[27] = stream_published_count;
 	stats[28] = stream_dropped_before_cb_count;
+	stats[29] = stream_is_isochronous ? 1 : 0;
 	processingPreviewConvertCount = 0;
 	processingPreviewConvertTotalNs = 0;
 	processingPreviewConvertMaxNs = 0;
