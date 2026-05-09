@@ -16,7 +16,6 @@ import androidx.core.content.ContextCompat
 import org.centennialoss.consolation.logging.AppLog as Log
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -37,7 +36,7 @@ class UsbCaptureAudioLoop(
     private var playThread: Thread? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
-    private var pcmQueue: ArrayBlockingQueue<PcmChunk>? = null
+    private var pcmQueue: PcmChunkQueue? = null
 
     private var volumeLinear: Float = 1f
 
@@ -172,7 +171,7 @@ class UsbCaptureAudioLoop(
 
         audioRecord = inputCapture
         audioTrack = track
-        val queue = ArrayBlockingQueue<PcmChunk>(queueDepth)
+        val queue = PcmChunkQueue(queueDepth)
         val pcmBufferPool = ArrayBlockingQueue<PcmChunk>(queueDepth + PCM_POOL_EXTRA_BUFFERS)
         repeat(queueDepth + PCM_POOL_EXTRA_BUFFERS) {
             pcmBufferPool.add(PcmChunk(ByteBuffer.allocateDirect(chunkBytes)))
@@ -245,7 +244,7 @@ class UsbCaptureAudioLoop(
 
     private fun recordLoop(
         inputCapture: AudioRecord,
-        queue: ArrayBlockingQueue<PcmChunk>,
+        queue: PcmChunkQueue,
         pcmBufferPool: ArrayBlockingQueue<PcmChunk>,
         chunkBytes: Int,
     ) {
@@ -282,19 +281,9 @@ class UsbCaptureAudioLoop(
                     recyclePcmBuffer(pcmBufferPool, chunk)
                     break
                 }
-                // Drop the *oldest* queued chunk when the queue is full so audio stays
-                // as close to real-time as possible rather than drifting further behind.
-                if (queue.size >= queueDepth) {
-                    queue.poll()?.let { recyclePcmBuffer(pcmBufferPool, it) }
+                queue.offerDroppingOldest(chunk)?.let {
+                    recyclePcmBuffer(pcmBufferPool, it)
                     Log.v(logTag, "Audio queue full; dropped oldest chunk to maintain sync.")
-                }
-                try {
-                    if (!queue.offer(chunk, OFFER_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                        recyclePcmBuffer(pcmBufferPool, chunk)
-                    }
-                } catch (_: InterruptedException) {
-                    recyclePcmBuffer(pcmBufferPool, chunk)
-                    break
                 }
             }
         } catch (e: Exception) {
@@ -307,19 +296,19 @@ class UsbCaptureAudioLoop(
 
     private fun playLoop(
         track: AudioTrack,
-        queue: ArrayBlockingQueue<PcmChunk>,
+        queue: PcmChunkQueue,
         pcmBufferPool: ArrayBlockingQueue<PcmChunk>,
     ) {
         try {
             while (true) {
                 val chunk = try {
-                    queue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    queue.poll(POLL_TIMEOUT_MS)
                 } catch (_: InterruptedException) {
-                    if (!running.get() && queue.isEmpty()) break
+                    if (!running.get() && queue.isEmpty) break
                     continue
                 }
                 if (chunk == null) {
-                    if (!running.get() && queue.isEmpty()) break
+                    if (!running.get() && queue.isEmpty) break
                     continue
                 }
                 val buffer = chunk.buffer
@@ -344,11 +333,11 @@ class UsbCaptureAudioLoop(
     }
 
     private fun acquirePcmBuffer(
-        queue: ArrayBlockingQueue<PcmChunk>,
+        queue: PcmChunkQueue,
         pcmBufferPool: ArrayBlockingQueue<PcmChunk>,
     ): PcmChunk? =
         pcmBufferPool.poll()
-            ?: queue.poll()?.also {
+            ?: queue.pollNow()?.also {
                 Log.v(logTag, "Audio buffer pool empty; dropped oldest queued chunk to reuse buffer.")
             }
             ?: run {
@@ -366,6 +355,43 @@ class UsbCaptureAudioLoop(
 
     private class PcmChunk(val buffer: ByteBuffer) {
         var sizeBytes: Int = 0
+    }
+
+    private class PcmChunkQueue(private val capacity: Int) {
+        private val lock = Object()
+        private val chunks = ArrayDeque<PcmChunk>(capacity)
+
+        val isEmpty: Boolean
+            get() = synchronized(lock) { chunks.isEmpty() }
+
+        fun offerDroppingOldest(chunk: PcmChunk): PcmChunk? =
+            synchronized(lock) {
+                val dropped = if (chunks.size >= capacity) chunks.removeFirst() else null
+                chunks.addLast(chunk)
+                lock.notify()
+                dropped
+            }
+
+        fun pollNow(): PcmChunk? =
+            synchronized(lock) {
+                chunks.removeFirstOrNull()
+            }
+
+        @Throws(InterruptedException::class)
+        fun poll(timeoutMs: Long): PcmChunk? =
+            synchronized(lock) {
+                if (chunks.isEmpty()) {
+                    lock.wait(timeoutMs)
+                }
+                chunks.removeFirstOrNull()
+            }
+
+        fun clear() {
+            synchronized(lock) {
+                chunks.clear()
+                lock.notifyAll()
+            }
+        }
     }
 
     private fun pickSampleRate(device: AudioDeviceInfo): Int {
@@ -464,8 +490,7 @@ class UsbCaptureAudioLoop(
         private const val DEFAULT_SAMPLE_RATE: Int = 48_000
         private val preferredRates: IntArray = intArrayOf(48_000, 44_100, 96_000, 32_000)
         private const val POLL_TIMEOUT_MS: Long = 60L
-        private const val OFFER_TIMEOUT_MS: Long = 100L
         private const val JOIN_TIMEOUT_MS: Long = 2500L
-        private const val DEFAULT_QUEUE_DEPTH: Int = 2
+        private const val DEFAULT_QUEUE_DEPTH: Int = 4
     }
 }
