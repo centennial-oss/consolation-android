@@ -246,13 +246,6 @@ if test "x$have_syslog" != "xno"; then
 	AC_DEFINE([HAVE_SYSLOG_FUNC], 1, [syslog() function available])
 fi
 
-# Examples build
-AC_ARG_ENABLE([examples-build], [AS_HELP_STRING([--enable-examples-build],
-	[build example applications [default=no]])],
-	[build_examples=$enableval],
-	[build_examples='no'])
-AM_CONDITIONAL([BUILD_EXAMPLES], [test "x$build_examples" != "xno"])
-
 # Tests build
 AC_ARG_ENABLE([tests-build], [AS_HELP_STRING([--enable-tests-build],
 	[build test applications [default=no]])],
@@ -296,7 +289,6 @@ AC_SUBST(LTLDFLAGS)
 AC_CONFIG_FILES([libusb-1.0.pc])
 AC_CONFIG_FILES([Makefile])
 AC_CONFIG_FILES([libusb/Makefile])
-AC_CONFIG_FILES([examples/Makefile])
 AC_CONFIG_FILES([tests/Makefile])
 AC_CONFIG_FILES([doc/Makefile])
 AC_CONFIG_FILES([doc/doxygen.cfg])

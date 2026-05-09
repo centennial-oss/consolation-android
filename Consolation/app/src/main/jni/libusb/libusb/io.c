@@ -2323,39 +2323,6 @@ int API_EXPORTED libusb_handle_events_completed(libusb_context *ctx,
 }
 
 /** \ingroup poll
- * Handle any pending events by polling file descriptors, without checking if
- * any other threads are already doing so. Must be called with the event lock
- * held, see libusb_lock_events().
- *
- * This function is designed to be called under the situation where you have
- * taken the event lock and are calling poll()/select() directly on libusb's
- * file descriptors (as opposed to using libusb_handle_events() or similar).
- * You detect events on libusb's descriptors, so you then call this function
- * with a zero timeout value (while still holding the event lock).
- *
- * \param ctx the context to operate on, or NULL for the default context
- * \param tv the maximum time to block waiting for events, or zero for
- * non-blocking mode
- * \returns 0 on success, or a LIBUSB_ERROR code on failure
- * \ref mtasync
- */
-int API_EXPORTED libusb_handle_events_locked(libusb_context *ctx,
-	struct timeval *tv) {
-	
-	int r;
-	struct timeval poll_timeout;
-
-	USBI_GET_CONTEXT(ctx);
-	r = get_next_timeout(ctx, tv, &poll_timeout);
-	if (r) {
-		/* timeout already expired */
-		return handle_timeouts(ctx);
-	}
-
-	return handle_events(ctx, &poll_timeout);
-}
-
-/** \ingroup poll
  * Determines whether your application must apply special timing considerations
  * when monitoring libusb's file descriptors.
  *

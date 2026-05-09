@@ -10,6 +10,18 @@ libusb is abstracted internally in such a way that it can hopefully
 be ported to other operating systems. Please see the PORTING file
 for more information.
 
+--- 
+
+This version of libusb, based on 1.0.18, has been highly optimized and
+stripped down for Android projects by Centennial OSS Inc. and likely
+will NOT work with the other platforms listed above.
+
+james@ranson.org or libusb@centennialoss.org
+
+----
+
+Original authors / websites:
+
 libusb homepage:
 http://libusb.info/
 
