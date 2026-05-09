@@ -44,8 +44,35 @@
 #include <jpeglib.h>
 #include <pthread.h>
 #include <setjmp.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 extern uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes);
+
+#ifndef UVC_RUNTIME_DIAG_ENABLED
+#if defined(NDEBUG)
+#define UVC_RUNTIME_DIAG_ENABLED 0
+#else
+#define UVC_RUNTIME_DIAG_ENABLED 1
+#endif
+#endif
+
+#if UVC_RUNTIME_DIAG_ENABLED
+#if defined(__ANDROID__)
+#define UVC_DIAG_LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#else
+#define UVC_DIAG_LOGI(...) LOGI(__VA_ARGS__)
+#endif
+#else
+#define UVC_DIAG_LOGI(...)
+#endif
+
+static pthread_once_t uvc_mjpeg_rgbx_diag_once = PTHREAD_ONCE_INIT;
+
+static void uvc_mjpeg_rgbx_diag_enabled_once(void) {
+	UVC_DIAG_LOGI("mjpeg-diag:decoder-active rgbx diag=%d", UVC_RUNTIME_DIAG_ENABLED);
+}
 
 struct error_mgr {
 	struct jpeg_error_mgr super;
@@ -227,6 +254,32 @@ static inline int uvc_mjpeg_lines_match_height(size_t lines_decoded, int height_
 		return 0;
 	return lines_decoded == (size_t) height_px;
 }
+
+#if UVC_RUNTIME_DIAG_ENABLED
+static uint32_t uvc_mjpeg_diag_hash_range(uint32_t hash, const uint8_t *data,
+	size_t len) {
+	size_t i;
+	for (i = 0; i < len; i++) {
+		hash ^= data[i];
+		hash *= 16777619u;
+	}
+	return hash;
+}
+
+static uint32_t uvc_mjpeg_diag_source_hash(const uint8_t *data, size_t len) {
+	uint32_t hash = 2166136261u;
+	const uint64_t len64 = (uint64_t)len;
+
+	if (!data || !len)
+		return 0;
+
+	hash ^= (uint32_t)len64;
+	hash *= 16777619u;
+	hash ^= (uint32_t)(len64 >> 32);
+	hash *= 16777619u;
+	return uvc_mjpeg_diag_hash_range(hash, data, len);
+}
+#endif
 
 /** @brief Convert an MJPEG frame to RGB
  * @ingroup frame
@@ -471,6 +524,11 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 #endif
 	struct error_mgr jerr;
 	size_t lines_read;
+#if UVC_RUNTIME_DIAG_ENABLED
+	const uint8_t *diag_src = (const uint8_t *)in->data;
+	const size_t diag_src_len = in->actual_bytes;
+	const uint32_t diag_hash_before = uvc_mjpeg_diag_source_hash(diag_src, diag_src_len);
+#endif
 
 	int num_scanlines, i;
 	lines_read = 0;
@@ -479,6 +537,7 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	out->actual_bytes = 0;	// XXX
 	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_MJPEG))
 		return UVC_ERROR_INVALID_PARAM;
+	pthread_once(&uvc_mjpeg_rgbx_diag_once, uvc_mjpeg_rgbx_diag_enabled_once);
 
 	if (uvc_ensure_frame_size(out, in->width * in->height * 4) < 0)
 		return UVC_ERROR_NO_MEM;
@@ -552,10 +611,42 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 #if !UVC_MJPEG_RGBX_REUSE_DECODER
 	jpeg_destroy_decompress(dinfo);
 #endif
+#if UVC_RUNTIME_DIAG_ENABLED
+	{
+		const uint32_t diag_hash_after = uvc_mjpeg_diag_source_hash(diag_src, diag_src_len);
+		if (UNLIKELY(diag_hash_before && diag_hash_after
+				&& diag_hash_before != diag_hash_after)) {
+			UVC_DIAG_LOGI("mjpeg-diag:source-mutated rgbx seq=%u bytes=%zu "
+				"before=%08x after=%08x lines=%zu/%d",
+				in->sequence,
+				in->actual_bytes,
+				diag_hash_before,
+				diag_hash_after,
+				lines_read,
+				out->height);
+		}
+	}
+#endif
 	return uvc_mjpeg_lines_match_height(lines_read, out->height)
 		? UVC_SUCCESS : UVC_ERROR_OTHER;
 
 fail:
+#if UVC_RUNTIME_DIAG_ENABLED
+	{
+		const uint32_t diag_hash_after = uvc_mjpeg_diag_source_hash(diag_src, diag_src_len);
+		if (UNLIKELY(diag_hash_before && diag_hash_after
+				&& diag_hash_before != diag_hash_after)) {
+			UVC_DIAG_LOGI("mjpeg-diag:source-mutated rgbx-fail seq=%u bytes=%zu "
+				"before=%08x after=%08x lines=%zu/%d",
+				in->sequence,
+				in->actual_bytes,
+				diag_hash_before,
+				diag_hash_after,
+				lines_read,
+				out->height);
+		}
+	}
+#endif
 #if UVC_MJPEG_RGBX_REUSE_DECODER
 	_mjpeg_decoder_reset(decoder);
 #else

@@ -45,6 +45,9 @@
 #include "libuvc_internal.h"
 
 #include <sys/resource.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 #ifndef UVC_RUNTIME_DIAG_ENABLED
 #if defined(NDEBUG)
@@ -55,7 +58,11 @@
 #endif
 
 #if UVC_RUNTIME_DIAG_ENABLED
+#if defined(__ANDROID__)
+#define UVC_DIAG_LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#else
 #define UVC_DIAG_LOGI(...) LOGI(__VA_ARGS__)
+#endif
 #else
 #define UVC_DIAG_LOGI(...)
 #endif
@@ -474,6 +481,19 @@ void UVCPreview::recordMjpegDecodedVisualSample(uint32_t sequence, size_t bytes,
 			"b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u",
 			diagMjpegDecodedCount,
 			sequence,
+			band_luma[0], band_luma[1], band_luma[2], band_luma[3],
+			band_luma[4], band_luma[5], band_luma[6], band_luma[7]);
+	}
+	if ((band_luma[5] >= 240 && band_luma[6] >= 240 && band_luma[7] >= 240)
+			|| (band_luma[5] + 80 < band_luma[0] && band_luma[6] + 80 < band_luma[0]
+				&& band_luma[7] + 80 < band_luma[0])) {
+		UVC_DIAG_LOGI("mjpeg-diag:band-anomaly count=%u seq=%u bytes=%zu rgbx=%p "
+			"stride=%zu bands=%u,%u,%u,%u,%u,%u,%u,%u",
+			diagMjpegDecodedCount,
+			sequence,
+			bytes,
+			rgbx,
+			stride_bytes,
 			band_luma[0], band_luma[1], band_luma[2], band_luma[3],
 			band_luma[4], band_luma[5], band_luma[6], band_luma[7]);
 	}

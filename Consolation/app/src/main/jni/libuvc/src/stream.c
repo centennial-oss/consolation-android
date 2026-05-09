@@ -59,6 +59,9 @@
 
 #include <assert.h>		// XXX add assert for debugging
 #include <time.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
@@ -72,7 +75,11 @@
 #endif
 
 #if UVC_RUNTIME_DIAG_ENABLED
+#if defined(__ANDROID__)
+#define UVC_DIAG_LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#else
 #define UVC_DIAG_LOGI(...) LOGI(__VA_ARGS__)
+#endif
 #else
 #define UVC_DIAG_LOGI(...)
 #endif
@@ -276,6 +283,16 @@ static void _uvc_diag_mjpeg_drop(uvc_stream_handle_t *strmh, const char *reason)
 			strmh->pts,
 			strmh->last_scr);
 	}
+}
+
+static void _uvc_discard_assembled_frame(uvc_stream_handle_t *strmh, const char *reason) {
+	if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG)
+		_uvc_diag_mjpeg_drop(strmh, reason);
+	strmh->got_bytes = 0;
+	strmh->frame_start_monotonic_ns = 0;
+	strmh->last_scr = 0;
+	strmh->pts = 0;
+	strmh->bfh_err = 0;
 }
 
 static void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason) {
@@ -986,13 +1003,13 @@ uvc_error_t uvc_probe_stream_ctrl(uvc_device_handle_t *devh,
 static void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 	uint32_t next_out_slot;
 
+	if (UNLIKELY(strmh->frame_format == UVC_FRAME_FORMAT_MJPEG && strmh->bfh_err)) {
+		_uvc_discard_assembled_frame(strmh, reason);
+		return;
+	}
+
 	if (UNLIKELY(!_uvc_mjpeg_payload_has_markers(strmh))) {
-		_uvc_diag_mjpeg_drop(strmh, reason);
-		strmh->got_bytes = 0;
-		strmh->frame_start_monotonic_ns = 0;
-		strmh->last_scr = 0;
-		strmh->pts = 0;
-		strmh->bfh_err = 0;
+		_uvc_discard_assembled_frame(strmh, reason);
 		return;
 	}
 
@@ -1232,7 +1249,10 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 			/* The frame ID bit was flipped, but we have image data sitting
 				around from prior transfers. This means the camera didn't send
 				an EOF for the last transfer of the previous frame. */
-			_uvc_swap_buffers(strmh, "bulk-fid");
+			if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG)
+				_uvc_discard_assembled_frame(strmh, "bulk-fid");
+			else
+				_uvc_swap_buffers(strmh, "bulk-fid");
 		}
 
 		strmh->fid = header_info & UVC_STREAM_FID;
@@ -1345,7 +1365,7 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 			if (LIKELY(check_header)) {
 				header_info = pktbuf[1];
 				if (UNLIKELY(header_info & UVC_STREAM_ERR)) {
-//					strmh->bfh_err |= UVC_STREAM_ERR;
+					strmh->bfh_err |= UVC_STREAM_ERR;
 					MARK("bad packet:status=0x%2x", header_info);
 					libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
 //					uvc_vc_get_error_code(strmh->devh, &vc_error_code, UVC_GET_CUR);
@@ -1357,7 +1377,10 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 				/* The frame ID bit was flipped, but we have image data sitting
 	             around from prior transfers. This means the camera didn't send
     		     an EOF for the last transfer of the previous frame or some frames losted. */
-					_uvc_swap_buffers(strmh, "iso-fid");
+					if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG)
+						_uvc_discard_assembled_frame(strmh, "iso-fid");
+					else
+						_uvc_swap_buffers(strmh, "iso-fid");
 				}
 				strmh->fid = header_info & UVC_STREAM_FID;
 #else
@@ -1883,6 +1906,15 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 		ret = UVC_ERROR_NOT_SUPPORTED;
 		LOGE("unlnown frame format");
 		goto fail;
+	}
+	if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG) {
+		UVC_DIAG_LOGI("mjpeg-diag:enabled stream fmt=%u frm=%u %ux%u interval=%u diag=%d",
+			(unsigned)ctrl->bFormatIndex,
+			(unsigned)ctrl->bFrameIndex,
+			(unsigned)frame_desc->wWidth,
+			(unsigned)frame_desc->wHeight,
+			(unsigned)ctrl->dwFrameInterval,
+			UVC_RUNTIME_DIAG_ENABLED);
 	}
 
 	UVC_DIAG_LOGI("stream-ctrl: fmt=%u frm=%u %ux%u interval=%u "

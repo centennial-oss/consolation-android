@@ -250,7 +250,7 @@ typedef struct uvc_device_info {
   Override at **ndk-build compile time**, e.g. `LOCAL_CPPFLAGS += -DLIBUVC_NUM_TRANSFER_BUFS=12`
  */
 #ifndef LIBUVC_NUM_TRANSFER_BUFS
-#define LIBUVC_NUM_TRANSFER_BUFS 10
+#define LIBUVC_NUM_TRANSFER_BUFS 24
 #endif
 #ifndef LIBUVC_FRAME_POOL_SLOTS
 #define LIBUVC_FRAME_POOL_SLOTS 6

@@ -37,7 +37,7 @@ val appVersionName: String =
 val nativeReleaseInDebug: Boolean =
     findProperty("consolation.uvccamera.nativeReleaseInDebug")?.toString()?.toBoolean() == true
 
-/** Optional isoch transfer ring depth for bundled libuvc (default 10 when unset). Range 3…128. */
+/** Optional isoch transfer ring depth for bundled libuvc (default 24 when unset). Range 3…128. */
 val libuvcNumTransferBufs: Int? =
     findProperty("consolation.libuvc.numTransferBuffers")?.toString()?.trim()?.toIntOrNull()
         ?.takeIf { candidate -> candidate in 3..128 }
