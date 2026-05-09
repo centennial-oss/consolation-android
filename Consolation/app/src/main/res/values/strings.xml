@@ -37,6 +37,7 @@
     <string name="compatibility_issue_about_title">About Your Capture Card</string>
     <string name="settings_show_stats">Show Video Stats</string>
     <string name="settings_low_fps_warnings">Low FPS Warnings</string>
+    <string name="settings_show_debug_stats">Show Debug Stats</string>
     <string name="settings_picture_in_picture">Use Picture-in-Picture</string>
     <string name="settings_rotation">Video Rotation</string>
     <string name="settings_flip">Video Flip</string>

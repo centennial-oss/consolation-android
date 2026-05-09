@@ -107,6 +107,7 @@ class MainActivity : ComponentActivity() {
     private var isStatsVisible = false
     private var statsPosition = StatsPosition.OFF
     private var isLowFpsWarningEnabled = true
+    private var isDebugStatsEnabled = false
     private var isPipEnabled = true
     private var currentRotation = 0
     private var isFlippedHorizontal = false
@@ -931,6 +932,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildTelemetryOverlayCompactText(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot): String {
+        val base = listOf(
+            "${stats.width}x${stats.height}/${stats.configuredFps}",
+            "${stats.pixelFormat}",
+            "Fps:${stats.fps}",
+            "Lag: ${format0(stats.nativeEndToEndLatencyAvgMs)}ms",
+        )
+        if (!isDebugStatsEnabled) {
+            return base.joinToString(" | ")
+        }
         val payload = formatTelemetryPayloadLabel(stats.nativePayloadAvgKb)
         val intervalMs = stats.nativeFrameInterval100ns / 10_000.0
         val usbLabel = if (stats.nativeIsIsochronous) {
@@ -938,11 +948,7 @@ class MainActivity : ComponentActivity() {
         } else {
             "USB: Bulk"
         }
-        return listOf(
-            "${stats.width}x${stats.height}/${stats.configuredFps}",
-            "${stats.pixelFormat}",
-            "Fps:${stats.fps}",
-            "LAG: ${format0(stats.nativeEndToEndLatencyAvgMs)}",
+        return (base + listOf(
             "FDrop:${stats.droppedFrames}",
             "Evct:${format0(stats.nativeQueueEnqAvgFrames)}",
             "Cb:${format0(stats.nativeUvcCbAvgMs)}",
@@ -953,7 +959,7 @@ class MainActivity : ComponentActivity() {
             "Cad:${format1(intervalMs)}",
             usbLabel,
             "${payload}",
-        ).joinToString(" | ")
+        )).joinToString(" | ")
     }
 
     private fun buildTelemetryLogText(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot): String {
@@ -1073,10 +1079,12 @@ class MainActivity : ComponentActivity() {
         val popup = AppCompatPopupMenu(popupMenuContext(), view)
         popup.menuInflater.inflate(R.menu.playback_settings, popup.menu)
 
-        popup.menu.findItem(R.id.menu_show_stats_off)?.isChecked = statsPosition == StatsPosition.OFF
-        popup.menu.findItem(R.id.menu_show_stats_left)?.isChecked = statsPosition == StatsPosition.BOTTOM_LEFT
-        popup.menu.findItem(R.id.menu_show_stats_right)?.isChecked = statsPosition == StatsPosition.BOTTOM_RIGHT
-        popup.menu.findItem(R.id.menu_low_fps_warning)?.isChecked = isLowFpsWarningEnabled
+        val statsSubMenu = popup.menu.findItem(R.id.menu_show_stats)?.subMenu
+        statsSubMenu?.findItem(R.id.menu_show_stats_off)?.isChecked = statsPosition == StatsPosition.OFF
+        statsSubMenu?.findItem(R.id.menu_show_stats_left)?.isChecked = statsPosition == StatsPosition.BOTTOM_LEFT
+        statsSubMenu?.findItem(R.id.menu_show_stats_right)?.isChecked = statsPosition == StatsPosition.BOTTOM_RIGHT
+        statsSubMenu?.findItem(R.id.menu_low_fps_warning)?.isChecked = isLowFpsWarningEnabled
+        statsSubMenu?.findItem(R.id.menu_show_debug_stats)?.isChecked = isDebugStatsEnabled
         popup.menu.findItem(R.id.menu_picture_in_picture)?.isChecked = isPipEnabled
 
         popup.menu.findItem(R.id.menu_rotate_0)?.isChecked = currentRotation == 0
@@ -1108,6 +1116,10 @@ class MainActivity : ComponentActivity() {
                         lowFpsBelowThresholdSinceMs = 0L
                         binding.lowFpsWarning.isVisible = false
                     }
+                }
+                R.id.menu_show_debug_stats -> {
+                    isDebugStatsEnabled = !isDebugStatsEnabled
+                    item.isChecked = isDebugStatsEnabled
                 }
                 R.id.menu_picture_in_picture -> {
                     isPipEnabled = !isPipEnabled
@@ -1141,6 +1153,14 @@ class MainActivity : ComponentActivity() {
                 R.id.menu_help -> showHelpDialog()
                 R.id.menu_about -> showAboutDialog()
                 else -> return@setOnMenuItemClickListener false
+            }
+            if (
+                item.itemId == R.id.menu_show_stats_off ||
+                item.itemId == R.id.menu_show_stats_left ||
+                item.itemId == R.id.menu_show_stats_right ||
+                item.itemId == R.id.menu_show_debug_stats
+            ) {
+                updateStatsOverlay(previewBackend.getTelemetry())
             }
             persistSettings()
             true
@@ -1826,6 +1846,7 @@ class MainActivity : ComponentActivity() {
             statsPosition = StatsPosition.OFF
         }
         isLowFpsWarningEnabled = prefs.getBoolean(KEY_LOW_FPS_WARN, true)
+        isDebugStatsEnabled = prefs.getBoolean(KEY_SHOW_DEBUG_STATS, false)
         isPipEnabled = prefs.getBoolean(KEY_PIP_ENABLED, true)
         currentRotation = prefs.getInt(KEY_ROTATION, 0)
         isFlippedHorizontal = prefs.getBoolean(KEY_FLIP_H, false)
@@ -1840,6 +1861,7 @@ class MainActivity : ComponentActivity() {
             .putInt(KEY_STATS_POSITION, statsPosition.ordinal)
             .putBoolean(KEY_STATS_VISIBLE, isStatsVisible)
             .putBoolean(KEY_LOW_FPS_WARN, isLowFpsWarningEnabled)
+            .putBoolean(KEY_SHOW_DEBUG_STATS, isDebugStatsEnabled)
             .putBoolean(KEY_PIP_ENABLED, isPipEnabled)
             .putInt(KEY_ROTATION, currentRotation)
             .putBoolean(KEY_FLIP_H, isFlippedHorizontal)
@@ -1919,6 +1941,7 @@ class MainActivity : ComponentActivity() {
         private const val KEY_STATS_POSITION = "stats_position"
         private const val KEY_STATS_VISIBLE = "stats_visible"
         private const val KEY_LOW_FPS_WARN = "low_fps_warn"
+        private const val KEY_SHOW_DEBUG_STATS = "show_debug_stats"
         private const val KEY_PIP_ENABLED = "pip_enabled"
         private const val KEY_ROTATION = "rotation"
         private const val KEY_FLIP_H = "flip_h"

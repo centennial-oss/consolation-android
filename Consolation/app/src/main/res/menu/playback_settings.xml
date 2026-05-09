@@ -18,12 +18,20 @@
                     android:checkable="true"
                     android:title="@string/settings_stats_bottom_right" />
             </group>
+            <group android:checkableBehavior="single">
+                <item
+                    android:id="@+id/menu_low_fps_warning"
+                    android:checkable="true"
+                    android:title="@string/settings_low_fps_warnings" />
+            </group>
+            <group android:checkableBehavior="single">
+                <item
+                    android:id="@+id/menu_show_debug_stats"
+                    android:checkable="true"
+                    android:title="@string/settings_show_debug_stats" />
+            </group>
         </menu>
     </item>
-    <item
-        android:id="@+id/menu_low_fps_warning"
-        android:checkable="true"
-        android:title="@string/settings_low_fps_warnings" />
     <item
         android:id="@+id/menu_picture_in_picture"
         android:checkable="true"
