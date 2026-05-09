@@ -27,6 +27,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <stdarg.h>
 #ifdef HAVE_POLL_H
@@ -297,10 +298,11 @@ struct libusb_context {
 #endif
 
 struct libusb_device {
-	/* lock protects refcnt, everything else is finalized at initialization
-	 * time */
+	/* lock protects attached; refcnt is atomic so transfer submit/completion
+	 * can avoid taking this mutex on the hot path. Other fields are
+	 * finalized at initialization time. */
 	usbi_mutex_t lock;
-	int refcnt;
+	_Atomic int refcnt;
 
 	struct libusb_context *ctx;
 

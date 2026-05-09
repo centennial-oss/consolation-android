@@ -554,7 +554,7 @@ struct libusb_device *usbi_alloc_device(struct libusb_context *ctx,
 	}
 
 	dev->ctx = ctx;
-	dev->refcnt = 1;
+	atomic_init(&dev->refcnt, 1);
 	dev->session_data = session_id;
 	dev->speed = LIBUSB_SPEED_UNKNOWN;
 
@@ -1078,12 +1078,8 @@ out:
 DEFAULT_VISIBILITY
 libusb_device * LIBUSB_CALL libusb_ref_device(libusb_device *dev) {
 
-	int refcnt;
-	usbi_mutex_lock(&dev->lock);
-	{
-		refcnt = ++dev->refcnt;
-	}
-	usbi_mutex_unlock(&dev->lock);
+	int refcnt = atomic_fetch_add_explicit(&dev->refcnt, 1,
+		memory_order_relaxed) + 1;
 //	LOGI("refcnt=%d", refcnt);
 	return dev;
 }
@@ -1100,12 +1096,9 @@ void API_EXPORTED libusb_unref_device(libusb_device *dev) {
 	if (UNLIKELY(!dev))
 		return;
 
-	usbi_mutex_lock(&dev->lock);
-	{
-		refcnt = --dev->refcnt;
-	}
-	usbi_mutex_unlock(&dev->lock);
-//	LOGI("refcnt=%d", dev->refcnt);
+	refcnt = atomic_fetch_sub_explicit(&dev->refcnt, 1,
+		memory_order_acq_rel) - 1;
+//	LOGI("refcnt=%d", refcnt);
 
 	if (refcnt == 0) {
 		usbi_dbg("destroy device %d.%d", dev->bus_number, dev->device_address);
