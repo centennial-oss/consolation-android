@@ -735,8 +735,8 @@ class MainActivity : ComponentActivity() {
             probedFormatSizes = effectiveSizes
             if (effectiveSizes.isNotEmpty()) {
                 previewBackend.consumeLastProbeOpenFailed()
-                val remembered = loadRememberedFormat(device, effectiveSizes)
-                val compatibilityDefault = pickDefaultFormat(effectiveSizes, selectedDeviceCompatibilityIssue())
+                val remembered = loadRememberedFormat(device, effectiveSizes, sizes)
+                val compatibilityDefault = pickDefaultFormat(effectiveSizes, selectedDeviceCompatibilityIssue(), sizes)
                 val defaultSeed = remembered?.first
                         ?: compatibilityDefault
                         ?: effectiveSizes.first().let { Size(it) }
@@ -752,6 +752,7 @@ class MainActivity : ComponentActivity() {
                         } catch (_: Exception) {
                             null
                         },
+                        reportedProbeSizes = sizes,
                     ) ?: Size(defaultSeed)
                     )
                 val defaultSource = when {
@@ -866,6 +867,9 @@ class MainActivity : ComponentActivity() {
                 choice.height,
                 choice.pixelPreference,
                 requestedFps = choice.fps,
+                reportedProbeSizes = probedFormatSizesReported.takeIf {
+                    choice.pixelPreference == PixelFormatPreference.AUTO
+                },
             )
                 ?: return@setOnMenuItemClickListener false
             selectedPixelFormatPreference = choice.pixelPreference
@@ -1571,6 +1575,7 @@ class MainActivity : ComponentActivity() {
     private fun loadRememberedFormat(
         device: CaptureDevice,
         sizes: List<Size>,
+        reportedProbeSizes: List<Size>,
     ): Pair<Size, PixelFormatPreference>? {
         val parts = prefs.getString(formatPreferenceKey(device), null)
             ?.split(',')
@@ -1590,6 +1595,9 @@ class MainActivity : ComponentActivity() {
                 height,
                 pixelPreference,
                 requestedFps = fps,
+                reportedProbeSizes = reportedProbeSizes.takeIf {
+                    pixelPreference == PixelFormatPreference.AUTO
+                },
             ) ?: return null
         return resolved to pixelPreference
     }
@@ -1616,10 +1624,10 @@ class MainActivity : ComponentActivity() {
             var pixelPreference = selectedPixelFormatPreference
             if (format == null || snapshotProbedEmpty) {
                 newProbed = previewBackend.probeSupportedSizes(device)
-                val remembered = loadRememberedFormat(device, newProbed)
+                val remembered = loadRememberedFormat(device, newProbed, newProbed)
                 val seed =
                     remembered?.first
-                        ?: pickDefaultFormat(newProbed, DeviceCompatibilityIssues.issueFor(device))
+                        ?: pickDefaultFormat(newProbed, DeviceCompatibilityIssues.issueFor(device), newProbed)
                         ?: newProbed.firstOrNull()?.let { Size(it) }
                 pixelPreference = remembered?.second ?: PixelFormatPreference.AUTO
                 format = seed?.let {
@@ -1633,6 +1641,7 @@ class MainActivity : ComponentActivity() {
                         } catch (_: Exception) {
                             null
                         },
+                        reportedProbeSizes = newProbed,
                     )
                 } ?: seed
             }
@@ -2013,6 +2022,20 @@ class MainActivity : ComponentActivity() {
             return if (unsafeDebug) "$base (DEBUG / UNSAFE)" else base
         }
 
+        /** True if this exact mode exists on the probe list (never matches DEBUG-synthesized entries). */
+        private fun reportedProbeOverlapsCandidate(reportedSizes: List<Size>, candidate: Size): Boolean {
+            return reportedSizes.any { r ->
+                r.width == candidate.width &&
+                    r.height == candidate.height &&
+                    r.frame_type == candidate.frame_type &&
+                    (r.fps ?: floatArrayOf()).any { rf ->
+                        (candidate.fps ?: floatArrayOf()).any { sf ->
+                            abs(rf - sf) <= DEFAULT_TARGET_FPS_TOLERANCE
+                        }
+                    }
+            }
+        }
+
         private fun isDebugUnsafeFormatChoice(
             reportedSizes: List<Size>,
             width: Int,
@@ -2079,6 +2102,7 @@ class MainActivity : ComponentActivity() {
         private fun pickDefaultFormat(
             sizes: List<Size>,
             compatibilityIssue: DeviceCompatibilityIssue? = null,
+            reportedProbeSizes: List<Size>,
         ): Size? {
             if (sizes.isEmpty()) return null
             val groups = groupSizesByResolution(sizes)
@@ -2095,6 +2119,7 @@ class MainActivity : ComponentActivity() {
                         defaultFormat.height,
                         PixelFormatPreference.AUTO,
                         fps,
+                        reportedProbeSizes = reportedProbeSizes,
                     )
                 }
             }
@@ -2112,6 +2137,7 @@ class MainActivity : ComponentActivity() {
                     height,
                     PixelFormatPreference.AUTO,
                     fps,
+                    reportedProbeSizes = reportedProbeSizes,
                 )
             }
 
@@ -2123,6 +2149,7 @@ class MainActivity : ComponentActivity() {
                 best.height,
                 PixelFormatPreference.AUTO,
                 maxFps,
+                reportedProbeSizes = reportedProbeSizes,
             )
         }
 
@@ -2132,9 +2159,15 @@ class MainActivity : ComponentActivity() {
             height: Int,
             preference: PixelFormatPreference,
             requestedFps: Float?,
+            reportedProbeSizes: List<Size>? = null,
         ): Size? {
             if (allSizes.isEmpty()) return null
-            val resolutionCandidates = allSizes.filter { it.width == width && it.height == height }
+            var resolutionCandidates = allSizes.filter { it.width == width && it.height == height }
+            val reported = reportedProbeSizes?.takeIf { it.isNotEmpty() }
+            if (preference == PixelFormatPreference.AUTO && reported != null) {
+                resolutionCandidates =
+                    resolutionCandidates.filter { reportedProbeOverlapsCandidate(reported, it) }
+            }
             if (resolutionCandidates.isEmpty()) return null
             val prioritized = when (preference) {
                 PixelFormatPreference.AUTO ->
