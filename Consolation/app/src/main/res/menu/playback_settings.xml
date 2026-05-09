@@ -18,6 +18,9 @@
                     android:checkable="true"
                     android:title="@string/settings_stats_bottom_right" />
             </group>
+            <item
+                android:id="@+id/menu_show_stats_divider"
+                android:title="──────────────────" />
             <group android:checkableBehavior="single">
                 <item
                     android:id="@+id/menu_low_fps_warning"
