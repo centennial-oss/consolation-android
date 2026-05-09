@@ -285,6 +285,11 @@ struct uvc_stream_handle {
   pthread_mutex_t cb_mutex;
   pthread_cond_t cb_cond;
   pthread_t cb_thread;
+  pthread_t stall_recovery_thread;
+  uint8_t stall_recovery_thread_started;
+  uint8_t stall_recovery_stop;
+  uint8_t pending_clear_halt_ep;
+  uint8_t stalled_transfer_slots[LIBUVC_NUM_TRANSFER_BUFS];
   uint32_t last_polled_seq;
   uvc_frame_callback_t *user_cb;
   void *user_ptr;

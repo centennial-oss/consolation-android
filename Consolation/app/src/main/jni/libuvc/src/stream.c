@@ -84,6 +84,7 @@ uvc_frame_desc_t *uvc_find_frame_desc(uvc_device_handle_t *devh,
 static void *_uvc_user_caller(void *arg);
 static void _uvc_populate_frame(uvc_stream_handle_t *strmh);
 static void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason);
+static void *_uvc_stall_recovery_caller(void *arg);
 static inline int _uvc_frame_slot_valid(uint32_t slot) {
 	return slot < LIBUVC_FRAME_POOL_SLOTS;
 }
@@ -1090,6 +1091,46 @@ static void _uvc_delete_transfer(struct libusb_transfer *transfer) {
 	EXIT();
 }
 
+static void _uvc_release_stalled_transfers_locked(uvc_stream_handle_t *strmh) {
+	int i;
+
+	for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+		if (strmh->stalled_transfer_slots[i]) {
+			strmh->stalled_transfer_slots[i] = 0;
+			_uvc_release_transfer_slot(strmh, i);
+		}
+	}
+	strmh->pending_clear_halt_ep = 0;
+	pthread_cond_broadcast(&strmh->cb_cond);
+}
+
+static int _uvc_find_transfer_id(uvc_stream_handle_t *strmh,
+		struct libusb_transfer *transfer) {
+	int i;
+
+	for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+		if (strmh->transfers[i] == transfer)
+			return i;
+	}
+	return -1;
+}
+
+static void _uvc_mark_stalled_transfer(uvc_stream_handle_t *strmh,
+		struct libusb_transfer *transfer) {
+	int transfer_id;
+
+	pthread_mutex_lock(&strmh->cb_mutex);
+	{
+		transfer_id = _uvc_find_transfer_id(strmh, transfer);
+		if (LIKELY(transfer_id >= 0)) {
+			strmh->stalled_transfer_slots[transfer_id] = 1;
+			strmh->pending_clear_halt_ep = transfer->endpoint;
+			pthread_cond_broadcast(&strmh->cb_cond);
+		}
+	}
+	pthread_mutex_unlock(&strmh->cb_mutex);
+}
+
 static void _uvc_free_transfer(uvc_stream_handle_t *strmh, int transfer_id) {
 	_uvc_release_transfer_slot(strmh, transfer_id);
 }
@@ -1110,9 +1151,6 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 	size_t header_len;
 	uint8_t header_info;
 	size_t data_len;
-	struct libusb_iso_packet_descriptor *pkt;
-	uvc_vc_error_code_control_t vc_error_code;
-	uvc_vs_error_code_control_t vs_error_code;
 
 	// magic numbers for identifying header packets from some iSight cameras
 	static const uint8_t isight_tag[] = {
@@ -1183,18 +1221,10 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 			LOGI("startup-diag:libuvc bulk ERR bit set in header "
 				"(before_first_payload=%d)",
 				!strmh->first_video_payload_received);
-			/* Skip clear_halt + vs_get_error before the first real video payload.
-			 * Many bulk UVC devices send ERR=1 on their very first header packet to
-			 * signal "no prior frame was complete" — this is informational, not an
-			 * actionable error.  Calling libusb_clear_halt here causes the device to
-			 * restart its streaming pipeline (~5 s), creating the startup delay.
-			 * Once real video is flowing, ERR packets are genuine and should still
-			 * trigger the halt-clear. */
-			if (strmh->first_video_payload_received) {
-				libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
-//				uvc_vc_get_error_code(strmh->devh, &vc_error_code, UVC_GET_CUR);
-				uvc_vs_get_error_code(strmh->devh, &vs_error_code, UVC_GET_CUR);
-			}
+			/* A BFH ERR bit in a completed bulk payload is a device stream
+			 * condition, not a USB endpoint halt. Do not issue synchronous
+			 * control transfers from this hot path; true endpoint halts are
+			 * reported separately as LIBUSB_TRANSFER_STALL. */
 //			return;
 		}
 
@@ -1420,6 +1450,7 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 	if UNLIKELY(!strmh) return;
 
 	int resubmit = 1;
+	int keep_transfer = 0;
 
 #ifndef NDEBUG
 	static int cnt = 0;
@@ -1467,6 +1498,12 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 		UVC_DEBUG("retrying transfer, status = %d", transfer->status);
 		break;
 	case LIBUSB_TRANSFER_STALL:
+		diag_first_xfer_issue(strmh, transfer);
+		UVC_DEBUG("deferring halt-clear for stalled transfer, status = %d", transfer->status);
+		_uvc_mark_stalled_transfer(strmh, transfer);
+		resubmit = 0;
+		keep_transfer = 1;
+		break;
 	case LIBUSB_TRANSFER_OVERFLOW:
 		diag_first_xfer_issue(strmh, transfer);
 		UVC_DEBUG("retrying transfer, status = %d", transfer->status);
@@ -1475,11 +1512,64 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 
 	if (LIKELY(strmh->running && resubmit)) {
 		libusb_submit_transfer(transfer);
-	} else {
+	} else if (!keep_transfer) {
 		// XXX delete non-reusing transfer
 		// real implementation of deleting transfer moves to _uvc_delete_transfer
 		_uvc_delete_transfer(transfer);
 	}
+}
+
+static void *_uvc_stall_recovery_caller(void *arg) {
+	uvc_stream_handle_t *strmh = (uvc_stream_handle_t *)arg;
+	uint8_t endpoint;
+	int i;
+
+	for (;;) {
+		pthread_mutex_lock(&strmh->cb_mutex);
+		{
+			while (strmh->running && !strmh->stall_recovery_stop
+					&& !strmh->pending_clear_halt_ep) {
+				pthread_cond_wait(&strmh->cb_cond, &strmh->cb_mutex);
+			}
+
+			if (UNLIKELY(!strmh->running || strmh->stall_recovery_stop)) {
+				_uvc_release_stalled_transfers_locked(strmh);
+				pthread_mutex_unlock(&strmh->cb_mutex);
+				break;
+			}
+
+			endpoint = strmh->pending_clear_halt_ep;
+		}
+		pthread_mutex_unlock(&strmh->cb_mutex);
+
+		UVC_DEBUG("clearing halted stream endpoint 0x%02x", endpoint);
+		if (UNLIKELY(libusb_clear_halt(strmh->devh->usb_devh, endpoint) != LIBUSB_SUCCESS)) {
+			UVC_DEBUG("libusb_clear_halt failed for endpoint 0x%02x", endpoint);
+		}
+
+		pthread_mutex_lock(&strmh->cb_mutex);
+		{
+			if (LIKELY(strmh->running && !strmh->stall_recovery_stop)) {
+				for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+					if (strmh->stalled_transfer_slots[i] && strmh->transfers[i]) {
+						if (UNLIKELY(libusb_submit_transfer(strmh->transfers[i])
+								!= LIBUSB_SUCCESS)) {
+							UVC_DEBUG("resubmit after halt-clear failed");
+							_uvc_release_transfer_slot(strmh, i);
+						}
+						strmh->stalled_transfer_slots[i] = 0;
+					}
+				}
+				strmh->pending_clear_halt_ep = 0;
+			} else {
+				_uvc_release_stalled_transfers_locked(strmh);
+			}
+			pthread_cond_broadcast(&strmh->cb_cond);
+		}
+		pthread_mutex_unlock(&strmh->cb_mutex);
+	}
+
+	return NULL;
 }
 
 /** Begin streaming video from the camera into the callback function.
@@ -1776,6 +1866,9 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	strmh->pts = 0;
 	strmh->last_scr = 0;
 	strmh->bfh_err = 0;	// XXX
+	strmh->stall_recovery_stop = 0;
+	strmh->pending_clear_halt_ep = 0;
+	memset(strmh->stalled_transfer_slots, 0, sizeof(strmh->stalled_transfer_slots));
 
 	frame_desc = uvc_find_frame_desc_stream(strmh, ctrl->bFormatIndex, ctrl->bFrameIndex);
 	if (UNLIKELY(!frame_desc)) {
@@ -1994,6 +2087,13 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	strmh->user_ptr = user_ptr;
 	strmh->diag_selected_frame_interval_100ns = strmh->cur_ctrl.dwFrameInterval;
 
+	if (UNLIKELY(pthread_create(&strmh->stall_recovery_thread, NULL,
+			_uvc_stall_recovery_caller, (void*) strmh))) {
+		ret = UVC_ERROR_NO_MEM;
+		goto fail;
+	}
+	strmh->stall_recovery_thread_started = 1;
+
 	/* If the user wants it, set up a thread that calls the user's function
 	 * with the contents of each frame.
 	 */
@@ -2029,7 +2129,7 @@ fail:
 	for (transfer_id = submitted_transfers; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; transfer_id++) {
 		_uvc_free_transfer(strmh, transfer_id);
 	}
-	if (submitted_transfers || cb_thread_started) {
+	if (submitted_transfers || cb_thread_started || strmh->stall_recovery_thread_started) {
 		uvc_stream_stop(strmh);
 	} else {
 		strmh->running = 0;
@@ -2269,6 +2369,9 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 
 	pthread_mutex_lock(&strmh->cb_mutex);
 	{
+		strmh->stall_recovery_stop = 1;
+		pthread_cond_broadcast(&strmh->cb_cond);
+
 		for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
 			if (strmh->transfers[i]) {
 				int res = libusb_cancel_transfer(strmh->transfers[i]);
@@ -2310,6 +2413,11 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 	pthread_mutex_unlock(&strmh->cb_mutex);
 
 	/** @todo stop the actual stream, camera side? */
+
+	if (strmh->stall_recovery_thread_started) {
+		pthread_join(strmh->stall_recovery_thread, NULL);
+		strmh->stall_recovery_thread_started = 0;
+	}
 
 	if (strmh->user_cb) {
 		/* wait for the thread to stop (triggered by LIBUSB_TRANSFER_CANCELLED transfer) */
