@@ -33,7 +33,9 @@ Consolation/**/.idea/modules.xml
 Consolation/**/.idea/workspace.xml
 Consolation/**/.idea/navEditor.xml
 Consolation/**/.idea/assetWizardSettings.xml
+Consolation/**/.idea/deploymentTargetSelector.xml
 Consolation/**/captures/
+
 
 # Signing keys and Play App Signing export files (never commit)
 *.jks
