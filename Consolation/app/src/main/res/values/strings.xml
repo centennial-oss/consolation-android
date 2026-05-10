@@ -4,6 +4,8 @@
     <string name="label_subtitle">First-pass port from SwiftUI with USB discovery and watch-only controls.</string>
     <string name="label_device">Device</string>
     <string name="label_resolution">Resolution &amp; Frame Rate</string>
+    <string name="hint_select_resolution">Tap to choose resolution, frame rate, and pixel format</string>
+    <string name="menu_other_resolutions_header">Other resolutions</string>
     <string name="hint_select_device">Choose a connected USB capture device</string>
     <string name="hint_no_capture_devices">No device found. Connect a Capture Card to continue.</string>
     <string name="startup_permission_notice">You\'ll be asked to allow camera, microphone, and USB access, which is required because Android treats capture cards as USB webcams.</string>

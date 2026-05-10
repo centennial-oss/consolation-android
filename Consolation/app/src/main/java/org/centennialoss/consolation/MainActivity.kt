@@ -876,7 +876,14 @@ class MainActivity : ComponentActivity() {
         )
         val choiceIds = mutableMapOf<Int, MenuChoice>()
         var nextId = MENU_ID_RESOLUTION_BASE
-        for (group in groupSizesByResolution(probedFormatSizes)) {
+        val resolutionGroups = groupSizesByResolution(probedFormatSizes)
+        var addedOtherResolutionsHeader = false
+        for (group in resolutionGroups) {
+            val isStandard = isStandardResolution(group.width, group.height)
+            if (!isStandard && !addedOtherResolutionsHeader) {
+                addMenuHeaderWithDivider(menu, getString(R.string.menu_other_resolutions_header))
+                addedOtherResolutionsHeader = true
+            }
             val resolutionSub: Menu =
                 menu.addSubMenu(Menu.NONE, Menu.NONE, Menu.NONE, "${group.width}x${group.height}")
             addMenuHeaderWithDivider(resolutionSub, "Frame Rate")
@@ -2005,6 +2012,23 @@ class MainActivity : ComponentActivity() {
 
         private const val MENU_ID_RESOLUTION_BASE = 10_000
 
+        /**
+         * Common output modes shown first in the resolution menu and used for automatic
+         * format selection. Order is highest to lowest total pixel count within this set.
+         */
+        private val STANDARD_RESOLUTION_ORDERED: List<Pair<Int, Int>> = listOf(
+            3840 to 2160,
+            2560 to 1440,
+            1920 to 1080,
+            1280 to 720,
+        )
+
+        private val STANDARD_RESOLUTION_KEYS: Set<Pair<Int, Int>> =
+            STANDARD_RESOLUTION_ORDERED.toSet()
+
+        private fun isStandardResolution(width: Int, height: Int): Boolean =
+            (width to height) in STANDARD_RESOLUTION_KEYS
+
         private const val LOW_FPS_MIN_DELTA = 10
         private const val LOW_FPS_SUSTAIN_MS = 3_000L
         private const val CONNECTING_RETRY_TIMEOUT_MS = 7_000L
@@ -2020,19 +2044,32 @@ class MainActivity : ComponentActivity() {
             val fpsOptions: List<Float>,
         )
 
+        private fun sortResolutionGroups(groups: List<ResolutionGroup>): List<ResolutionGroup> {
+            val byKey = groups.associateBy { it.width to it.height }
+            val standardFirst = STANDARD_RESOLUTION_ORDERED.mapNotNull { byKey[it] }
+            val niche = groups
+                .filter { (it.width to it.height) !in STANDARD_RESOLUTION_KEYS }
+                .sortedWith(
+                    compareByDescending<ResolutionGroup> { it.width }
+                        .thenByDescending { it.height },
+                )
+            return standardFirst + niche
+        }
+
         private fun groupSizesByResolution(sizes: List<Size>): List<ResolutionGroup> {
             val map = linkedMapOf<Pair<Int, Int>, MutableList<Size>>()
             for (s in sizes) {
                 val key = s.width to s.height
                 map.getOrPut(key) { mutableListOf() }.add(s)
             }
-            return map.map { (k, v) ->
+            val unsorted = map.map { (k, v) ->
                 val fpsOptions = collapseFpsOptions(
                     v.flatMap { it.fps?.toList().orEmpty() },
                     MENU_FPS_DEDUP_TOLERANCE,
                 )
                 ResolutionGroup(k.first, k.second, fpsOptions)
-            }.sortedByDescending { it.width * it.height }
+            }
+            return sortResolutionGroups(unsorted)
         }
 
         /**
@@ -2198,6 +2235,37 @@ class MainActivity : ComponentActivity() {
                         reportedProbeSizes = reportedProbeSizes,
                     )
                 }
+            }
+
+            val groupsByResolution = groups.associateBy { it.width to it.height }
+            val standardGroups = STANDARD_RESOLUTION_ORDERED.mapNotNull { groupsByResolution[it] }
+            if (standardGroups.isNotEmpty()) {
+                val best60pStandard = standardGroups.firstNotNullOfOrNull { group ->
+                    val fps = group.fpsOptions.minByOrNull { abs(it - DEFAULT_TARGET_FPS) }
+                        ?.takeIf { abs(it - DEFAULT_TARGET_FPS) <= DEFAULT_TARGET_FPS_TOLERANCE }
+                    fps?.let { Triple(group.width, group.height, it) }
+                }
+                if (best60pStandard != null) {
+                    val (width, height, fps) = best60pStandard
+                    return resolveFormatChoiceForPreference(
+                        sizes,
+                        width,
+                        height,
+                        PixelFormatPreference.AUTO,
+                        fps,
+                        reportedProbeSizes = reportedProbeSizes,
+                    )
+                }
+                val topStandard = standardGroups.first()
+                val maxFps = topStandard.fpsOptions.maxOrNull() ?: return null
+                return resolveFormatChoiceForPreference(
+                    sizes,
+                    topStandard.width,
+                    topStandard.height,
+                    PixelFormatPreference.AUTO,
+                    maxFps,
+                    reportedProbeSizes = reportedProbeSizes,
+                )
             }
 
             val best60p = groups.firstNotNullOfOrNull { group ->
