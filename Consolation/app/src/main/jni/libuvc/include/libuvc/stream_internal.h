@@ -16,6 +16,7 @@ void _uvc_diag_mjpeg_drop(uvc_stream_handle_t *strmh, const char *reason);
 void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason);
 void _uvc_diag_mjpeg_log_stream_start(const uvc_stream_ctrl_t *ctrl,
 		const uvc_frame_desc_t *frame_desc);
+void _uvc_diag_iso_frame_reset(uvc_stream_handle_t *strmh);
 
 void _uvc_process_payload_bulk(uvc_stream_handle_t *strmh,
 		const uint8_t *payload, size_t payload_len);

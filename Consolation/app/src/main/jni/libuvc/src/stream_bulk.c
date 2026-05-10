@@ -132,7 +132,8 @@ uvc_error_t _uvc_stream_setup_bulk_transfers(uvc_stream_handle_t *strmh,
 
 	MARK("bulk transfer mode");
 	strmh->diag_selected_altsetting = 0;
-	for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
+	strmh->num_transfer_bufs = LIBUVC_NUM_TRANSFER_BUFS;
+	for (transfer_id = 0; transfer_id < (int)strmh->num_transfer_bufs; ++transfer_id) {
 		transfer = libusb_alloc_transfer(0);
 		strmh->transfers[transfer_id] = transfer;
 		strmh->transfer_bufs[transfer_id] = malloc(strmh->cur_ctrl.dwMaxPayloadTransferSize);

@@ -248,9 +248,21 @@ typedef struct uvc_device_info {
   and then allow the user to change the number of buffers as required.
 
   Override at **ndk-build compile time**, e.g. `LOCAL_CPPFLAGS += -DLIBUVC_NUM_TRANSFER_BUFS=12`
- */
+
+  This is the default number of bulk transfer buffers. The fixed capacity of
+  uvc_stream_handle::transfers, transfer_bufs, and stalled_transfer_slots is
+  LIBUVC_MAX_TRANSFER_BUFS below. Any mode-specific transfer count, such as
+  LIBUVC_NUM_ISO_TRANSFER_BUFS in stream_iso.c, must stay at or below
+  LIBUVC_MAX_TRANSFER_BUFS unless those backing arrays are resized too.
+	 */
 #ifndef LIBUVC_NUM_TRANSFER_BUFS
 #define LIBUVC_NUM_TRANSFER_BUFS 24
+#endif
+#ifndef LIBUVC_MAX_TRANSFER_BUFS
+#define LIBUVC_MAX_TRANSFER_BUFS 32
+#endif
+#if LIBUVC_NUM_TRANSFER_BUFS > LIBUVC_MAX_TRANSFER_BUFS
+#error "LIBUVC_NUM_TRANSFER_BUFS cannot exceed LIBUVC_MAX_TRANSFER_BUFS array capacity"
 #endif
 #ifndef LIBUVC_FRAME_POOL_SLOTS
 #define LIBUVC_FRAME_POOL_SLOTS 6
@@ -289,12 +301,15 @@ struct uvc_stream_handle {
   uint8_t stall_recovery_thread_started;
   uint8_t stall_recovery_stop;
   uint8_t pending_clear_halt_ep;
-  uint8_t stalled_transfer_slots[LIBUVC_NUM_TRANSFER_BUFS];
+  uint8_t stalled_transfer_slots[LIBUVC_MAX_TRANSFER_BUFS];
+  uint8_t iso_transfer_pending[LIBUVC_MAX_TRANSFER_BUFS];
   uint32_t last_polled_seq;
   uvc_frame_callback_t *user_cb;
   void *user_ptr;
-  struct libusb_transfer *transfers[LIBUVC_NUM_TRANSFER_BUFS];
-  uint8_t *transfer_bufs[LIBUVC_NUM_TRANSFER_BUFS];
+  uint32_t num_transfer_bufs;
+  uint32_t next_iso_transfer_id;
+  struct libusb_transfer *transfers[LIBUVC_MAX_TRANSFER_BUFS];
+  uint8_t *transfer_bufs[LIBUVC_MAX_TRANSFER_BUFS];
   struct uvc_frame frame;
   enum uvc_frame_format frame_format;
 
@@ -323,6 +338,17 @@ struct uvc_stream_handle {
   uint32_t diag_last_mjpeg_sample_hash;
   uint32_t diag_last_mjpeg_header_hash;
   uint16_t diag_last_mjpeg_restart_interval;
+  size_t diag_iso_payload_bytes;
+  uint32_t diag_iso_payload_hash;
+  uint32_t diag_iso_payload_packets;
+  uint32_t diag_iso_packet_errors;
+  uint32_t diag_iso_zero_packets;
+  uint32_t diag_iso_overflow_count;
+  uint32_t diag_iso_eof_empty_count;
+  uint32_t diag_iso_short_packets;
+  uint32_t diag_iso_min_packet_len;
+  uint32_t diag_iso_max_packet_len;
+  uint32_t diag_iso_packet_len_hash;
 };
 
 /** Handle on an open UVC device

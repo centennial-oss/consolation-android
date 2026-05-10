@@ -76,8 +76,22 @@ static void uvc_mjpeg_rgbx_diag_enabled_once(void) {
 
 struct error_mgr {
 	struct jpeg_error_mgr super;
+	void (*original_emit_message)(j_common_ptr cinfo, int msg_level);
 	jmp_buf jmp;
+	int warning_count;
 };
+
+static void _emit_message(j_common_ptr dinfo, int msg_level) {
+	struct error_mgr *myerr = (struct error_mgr *) dinfo->err;
+	if (msg_level < 0)
+		myerr->warning_count++;
+#ifndef NDEBUG
+	if (myerr->original_emit_message)
+		(*myerr->original_emit_message)(dinfo, msg_level);
+#else
+	(void)dinfo;
+#endif
+}
 
 static void _error_exit(j_common_ptr dinfo) {
 	struct error_mgr *myerr = (struct error_mgr *) dinfo->err;
@@ -278,6 +292,12 @@ static uint32_t uvc_mjpeg_diag_source_hash(const uint8_t *data, size_t len) {
 	hash ^= (uint32_t)(len64 >> 32);
 	hash *= 16777619u;
 	return uvc_mjpeg_diag_hash_range(hash, data, len);
+}
+
+static uint32_t uvc_mjpeg_diag_full_hash(const uint8_t *data, size_t len) {
+	if (!data || !len)
+		return 0;
+	return uvc_mjpeg_diag_hash_range(2166136261u, data, len);
 }
 #endif
 
@@ -528,6 +548,7 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	const uint8_t *diag_src = (const uint8_t *)in->data;
 	const size_t diag_src_len = in->actual_bytes;
 	const uint32_t diag_hash_before = uvc_mjpeg_diag_source_hash(diag_src, diag_src_len);
+	const uint32_t diag_full_hash_before = uvc_mjpeg_diag_full_hash(diag_src, diag_src_len);
 #endif
 
 	int num_scanlines, i;
@@ -564,7 +585,10 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	memset(dinfo, 0, sizeof(*dinfo));
 #endif
 	dinfo->err = jpeg_std_error(&jerr.super);
+	jerr.original_emit_message = jerr.super.emit_message;
 	jerr.super.error_exit = _error_exit;
+	jerr.super.emit_message = _emit_message;
+	jerr.warning_count = 0;
 
 	if (setjmp(jerr.jmp)) {
 		goto fail;
@@ -627,7 +651,17 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 		}
 	}
 #endif
-	return uvc_mjpeg_lines_match_height(lines_read, out->height)
+	if (UNLIKELY(jerr.warning_count)) {
+		UVC_DIAG_LOGI("mjpeg-diag:decode-warning rgbx seq=%u bytes=%zu src=%08x full=%08x warnings=%d lines=%zu/%d",
+			in->sequence,
+			in->actual_bytes,
+			diag_hash_before,
+			diag_full_hash_before,
+			jerr.warning_count,
+			lines_read,
+			out->height);
+	}
+	return !jerr.warning_count && uvc_mjpeg_lines_match_height(lines_read, out->height)
 		? UVC_SUCCESS : UVC_ERROR_OTHER;
 
 fail:

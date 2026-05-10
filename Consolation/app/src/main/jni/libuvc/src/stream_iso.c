@@ -14,9 +14,25 @@
  #include "libuvc/libuvc_internal.h"
  #include "libuvc/stream_internal.h"
  
- #ifndef LIBUVC_NUM_ISO_PACKETS_PER_XFER
- #define LIBUVC_NUM_ISO_PACKETS_PER_XFER 32
- #endif
+#ifndef LIBUVC_NUM_ISO_PACKETS_PER_XFER
+#define LIBUVC_NUM_ISO_PACKETS_PER_XFER 32
+#endif
+/*
+ * This is the number of libusb transfers submitted for ISO streaming, not the
+ * storage capacity for transfer pointers. uvc_stream_handle stores transfers in
+ * arrays sized by LIBUVC_MAX_TRANSFER_BUFS in libuvc_internal.h. If this value
+ * needs to exceed LIBUVC_MAX_TRANSFER_BUFS, resize those arrays at the same
+ * time; otherwise ISO setup will write past the end of the stream handle.
+ */
+#ifndef LIBUVC_NUM_ISO_TRANSFER_BUFS
+#define LIBUVC_NUM_ISO_TRANSFER_BUFS 32
+#endif
+#if LIBUVC_NUM_ISO_TRANSFER_BUFS > LIBUVC_MAX_TRANSFER_BUFS
+#error "LIBUVC_NUM_ISO_TRANSFER_BUFS cannot exceed LIBUVC_MAX_TRANSFER_BUFS array capacity"
+#endif
+#ifndef LIBUVC_ISO_PREFER_MAX_PACKET_SIZE
+#define LIBUVC_ISO_PREFER_MAX_PACKET_SIZE 1
+#endif
  
  static unsigned int _uvc_iso_endpoint_bytes_per_interval(
 		 const struct libusb_endpoint_descriptor *endpoint) {
@@ -78,7 +94,7 @@
 	 return NULL;
  }
  
- static uint32_t _uvc_iso_required_payload_size(uvc_stream_handle_t *strmh,
+static uint32_t _uvc_iso_required_payload_size(uvc_stream_handle_t *strmh,
 		 float bandwidth_factor) {
 	 uint32_t required = strmh->cur_ctrl.dwMaxPayloadTransferSize;
  
@@ -89,11 +105,65 @@
 	 }
 	 return required;
  }
+
+void _uvc_diag_iso_frame_reset(uvc_stream_handle_t *strmh) {
+	if (!strmh)
+		return;
+	strmh->diag_iso_payload_bytes = 0;
+	strmh->diag_iso_payload_hash = 2166136261u;
+	strmh->diag_iso_payload_packets = 0;
+	strmh->diag_iso_packet_errors = 0;
+	strmh->diag_iso_zero_packets = 0;
+	strmh->diag_iso_overflow_count = 0;
+	strmh->diag_iso_eof_empty_count = 0;
+	strmh->diag_iso_short_packets = 0;
+	strmh->diag_iso_min_packet_len = 0;
+	strmh->diag_iso_max_packet_len = 0;
+	strmh->diag_iso_packet_len_hash = 2166136261u;
+}
+
+static void _uvc_diag_iso_payload_bytes(uvc_stream_handle_t *strmh,
+		const uint8_t *data, size_t len) {
+	size_t i;
+
+	if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG || !data || !len)
+		return;
+	if (!strmh->diag_iso_payload_hash)
+		strmh->diag_iso_payload_hash = 2166136261u;
+	for (i = 0; i < len; i++) {
+		strmh->diag_iso_payload_hash ^= data[i];
+		strmh->diag_iso_payload_hash *= 16777619u;
+	}
+	strmh->diag_iso_payload_bytes += len;
+	strmh->diag_iso_payload_packets++;
+}
+
+static void _uvc_diag_iso_packet_shape(uvc_stream_handle_t *strmh,
+		int actual_length, int expected_length) {
+	uint32_t len;
+
+	if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG || actual_length <= 0)
+		return;
+
+	len = (uint32_t)actual_length;
+	if (!strmh->diag_iso_min_packet_len || len < strmh->diag_iso_min_packet_len)
+		strmh->diag_iso_min_packet_len = len;
+	if (len > strmh->diag_iso_max_packet_len)
+		strmh->diag_iso_max_packet_len = len;
+	if (expected_length > 0 && actual_length < expected_length)
+		strmh->diag_iso_short_packets++;
+	if (!strmh->diag_iso_packet_len_hash)
+		strmh->diag_iso_packet_len_hash = 2166136261u;
+	strmh->diag_iso_packet_len_hash ^= len;
+	strmh->diag_iso_packet_len_hash *= 16777619u;
+	strmh->diag_iso_packet_len_hash ^= (uint32_t)(len >> 16);
+	strmh->diag_iso_packet_len_hash *= 16777619u;
+}
  
  static void _uvc_process_payload_iso_packet(uvc_stream_handle_t *strmh,
 		 const uint8_t *payload, size_t payload_len) {
 	 size_t header_len;
-	 uint8_t header_info;
+	 uint8_t header_info = 0;
 	 size_t data_len;
  
 	 if (UNLIKELY(!payload || !payload_len))
@@ -170,15 +240,19 @@
 		 strmh->first_video_payload_received = 1;
 		 _uvc_diag_first_payload(strmh, data_len, "iso");
 		 if (LIKELY(strmh->got_bytes + data_len <= strmh->size_buf)) {
+			 _uvc_diag_iso_payload_bytes(strmh, payload + header_len, data_len);
 			 memcpy(strmh->outbuf + strmh->got_bytes, payload + header_len, data_len);
 			 strmh->got_bytes += data_len;
 		 } else {
+			 strmh->diag_iso_overflow_count++;
 			 strmh->bfh_err |= UVC_STREAM_ERR;
 		 }
- 
-		 if (header_info & UVC_STREAM_EOF) {
-			 _uvc_swap_buffers(strmh, "iso-eof");
-		 }
+	 }
+
+	 if (UNLIKELY((header_info & UVC_STREAM_EOF) && strmh->got_bytes)) {
+		 if (!data_len)
+			 strmh->diag_iso_eof_empty_count++;
+		 _uvc_swap_buffers(strmh, data_len ? "iso-eof" : "iso-eof-empty");
 	 }
  }
  
@@ -192,11 +266,20 @@
 		 struct libusb_iso_packet_descriptor *packet =
 			 transfer->iso_packet_desc + packet_id;
 		 uint8_t *payload;
- 
-		 if (UNLIKELY(packet->status != LIBUSB_TRANSFER_COMPLETED
-				 || packet->actual_length <= 0))
+
+		 if (UNLIKELY(packet->status != LIBUSB_TRANSFER_COMPLETED)) {
+			 strmh->diag_iso_packet_errors++;
+			 strmh->bfh_err |= UVC_STREAM_ERR;
 			 continue;
- 
+		 }
+		 if (UNLIKELY(packet->actual_length <= 0)) {
+			 strmh->diag_iso_zero_packets++;
+			 if (strmh->got_bytes)
+				 strmh->bfh_err |= UVC_STREAM_ERR;
+			 continue;
+		 }
+
+		 _uvc_diag_iso_packet_shape(strmh, packet->actual_length, packet->length);
 		 payload = libusb_get_iso_packet_buffer_simple(transfer, packet_id);
 		 _uvc_process_payload_iso_packet(strmh, payload, packet->actual_length);
 	 }
@@ -236,7 +319,24 @@
 		 packet_size = _uvc_iso_endpoint_bytes_per_interval(endpoint);
 		 if (!packet_size)
 			 continue;
+
+		 UVC_DIAG_LOGI("mjpeg-diag:iso-alt alt=%u ep=0x%02x packet_size=%u "
+			 "wMaxPacketSize=0x%04x interval=%u required=%u",
+			 (unsigned)altsetting->bAlternateSetting,
+			 (unsigned)endpoint->bEndpointAddress,
+			 packet_size,
+			 (unsigned)endpoint->wMaxPacketSize,
+			 (unsigned)endpoint->bInterval,
+			 (unsigned)required_payload_size);
  
+#if LIBUVC_ISO_PREFER_MAX_PACKET_SIZE
+		 if (!selected_altsetting || packet_size > selected_packet_size) {
+			 selected_altsetting = altsetting;
+			 selected_endpoint = endpoint;
+			 selected_packet_size = packet_size;
+			 selected_satisfies_required = packet_size >= required_payload_size;
+		 }
+#else
 		 if (!selected_altsetting
 				 || (!selected_satisfies_required && packet_size > selected_packet_size)
 				 || (selected_satisfies_required && packet_size >= required_payload_size
@@ -246,6 +346,7 @@
 			 selected_packet_size = packet_size;
 			 selected_satisfies_required = packet_size >= required_payload_size;
 		 }
+#endif
  
 	 }
  
@@ -268,13 +369,16 @@
 	 }
  
 	 strmh->diag_selected_altsetting = selected_altsetting->bAlternateSetting;
-	 UVC_DEBUG("iso transfer mode alt=%u ep=0x%02x packet_size=%u required=%u",
+	 strmh->num_transfer_bufs = LIBUVC_NUM_ISO_TRANSFER_BUFS;
+	 UVC_DIAG_LOGI("mjpeg-diag:iso-selected alt=%u ep=0x%02x packet_size=%u "
+		 "required=%u prefer_max=%u",
 		 (unsigned)selected_altsetting->bAlternateSetting,
 		 (unsigned)selected_endpoint->bEndpointAddress,
 		 selected_packet_size,
-		 (unsigned)required_payload_size);
+		 (unsigned)required_payload_size,
+		 (unsigned)LIBUVC_ISO_PREFER_MAX_PACKET_SIZE);
  
-	 for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
+	 for (transfer_id = 0; transfer_id < (int)strmh->num_transfer_bufs; ++transfer_id) {
 		 struct libusb_transfer *transfer =
 			 libusb_alloc_transfer(LIBUVC_NUM_ISO_PACKETS_PER_XFER);
 		 size_t transfer_buf_size =
@@ -304,7 +408,6 @@
 			 return UVC_ERROR_NO_MEM;
 		 }
 	 }
- 
+
 	 return UVC_SUCCESS;
  }
- 

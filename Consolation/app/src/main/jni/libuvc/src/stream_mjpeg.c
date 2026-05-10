@@ -34,6 +34,12 @@ static uint32_t _uvc_diag_hash_bytes(uint32_t hash, const uint8_t *data, size_t 
 	return hash;
 }
 
+static uint32_t _uvc_diag_full_hash(const uint8_t *data, size_t len) {
+	if (!data || !len)
+		return 0;
+	return _uvc_diag_hash_bytes(2166136261u, data, len);
+}
+
 static uint16_t _uvc_diag_read_be16(const uint8_t *data) {
 	return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
 }
@@ -95,6 +101,7 @@ int _uvc_mjpeg_payload_has_markers(const uvc_stream_handle_t *strmh) {
 	const uint8_t *data = strmh->outbuf;
 	const size_t len = strmh->got_bytes;
 	size_t i;
+	int found_sos = 0;
 
 	if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG)
 		return 1;
@@ -107,9 +114,11 @@ int _uvc_mjpeg_payload_has_markers(const uvc_stream_handle_t *strmh) {
 	for (i = 2; i + 1 < len - 2; i++) {
 		if (data[i] == 0xff && data[i + 1] == 0xd8)
 			return 0;
+		if (data[i] == 0xff && data[i + 1] == 0xda)
+			found_sos = 1;
 	}
 
-	return 1;
+	return found_sos;
 }
 
 void _uvc_diag_mjpeg_drop(uvc_stream_handle_t *strmh, const char *reason) {
@@ -135,11 +144,14 @@ void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason) {
 	int pts_anomaly = 0;
 	int scr_anomaly = 0;
 	uint32_t hash;
+	uint32_t full_hash = 0;
 	uint32_t header_hash;
 	uint16_t restart_interval = 0;
 	int sample_hash_repeat = 0;
 	int header_change = 0;
 	int restart_change = 0;
+	int iso_audit_mismatch = 0;
+	int iso_audit_anomaly = 0;
 
 	if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG)
 		return;
@@ -150,8 +162,18 @@ void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason) {
 #endif
 
 	hash = _uvc_diag_sample_hash(strmh->outbuf, strmh->got_bytes);
+	full_hash = _uvc_diag_full_hash(strmh->outbuf, strmh->got_bytes);
 	header_hash = _uvc_diag_mjpeg_header_hash(strmh->outbuf, strmh->got_bytes,
 		&restart_interval);
+	if (strmh->diag_selected_isochronous) {
+		iso_audit_mismatch = strmh->diag_iso_payload_bytes
+			&& (strmh->diag_iso_payload_bytes != strmh->got_bytes
+				|| strmh->diag_iso_payload_hash != full_hash);
+		iso_audit_anomaly = iso_audit_mismatch
+			|| strmh->diag_iso_packet_errors
+			|| strmh->diag_iso_zero_packets
+			|| strmh->diag_iso_overflow_count;
+	}
 	sample_hash_repeat = strmh->diag_last_mjpeg_sample_hash
 		&& hash == strmh->diag_last_mjpeg_sample_hash;
 	header_change = strmh->diag_last_mjpeg_header_hash
@@ -171,12 +193,17 @@ void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason) {
 		&& strmh->last_scr <= strmh->diag_last_mjpeg_scr;
 
 #if UVC_RUNTIME_DIAG_ENABLED
-	if (size_anomaly || pts_anomaly || scr_anomaly || header_change || restart_change
+	if (strmh->diag_selected_isochronous
+			|| size_anomaly || pts_anomaly || scr_anomaly || header_change || restart_change
+			|| iso_audit_anomaly
 			|| strmh->diag_mjpeg_publish_count <= 20
 			|| !(strmh->diag_mjpeg_publish_count % 120)) {
 		UVC_DIAG_LOGI("mjpeg-diag:publish count=%u reason=%s seq=%u bytes=%zu last_bytes=%zu "
 			"fid=%u pts=%u last_pts=%u scr=%u last_scr=%u hash=%08x repeat=%u "
-			"hdr=%08x last_hdr=%08x dri=%u last_dri=%u anomaly=%s%s%s%s%s",
+			"full=%08x hdr=%08x last_hdr=%08x dri=%u last_dri=%u "
+			"iso_bytes=%zu iso_hash=%08x iso_pkts=%u iso_err=%u iso_zero=%u "
+			"iso_ovf=%u iso_eof_empty=%u iso_short=%u iso_min=%u iso_max=%u "
+			"iso_len_hash=%08x anomaly=%s%s%s%s%s%s",
 			strmh->diag_mjpeg_publish_count,
 			reason ? reason : "?",
 			strmh->seq,
@@ -189,15 +216,28 @@ void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason) {
 			strmh->diag_last_mjpeg_scr,
 			hash,
 			(unsigned)sample_hash_repeat,
+			full_hash,
 			header_hash,
 			strmh->diag_last_mjpeg_header_hash,
 			(unsigned)restart_interval,
 			(unsigned)strmh->diag_last_mjpeg_restart_interval,
+			strmh->diag_iso_payload_bytes,
+			strmh->diag_iso_payload_hash,
+			strmh->diag_iso_payload_packets,
+			strmh->diag_iso_packet_errors,
+			strmh->diag_iso_zero_packets,
+			strmh->diag_iso_overflow_count,
+			strmh->diag_iso_eof_empty_count,
+			strmh->diag_iso_short_packets,
+			strmh->diag_iso_min_packet_len,
+			strmh->diag_iso_max_packet_len,
+			strmh->diag_iso_packet_len_hash,
 			size_anomaly ? "size" : "",
 			pts_anomaly ? "|pts" : "",
 			scr_anomaly ? "|scr" : "",
 			header_change ? "|hdr" : "",
-			restart_change ? "|dri" : "");
+			restart_change ? "|dri" : "",
+			iso_audit_mismatch ? "|iso-audit" : "");
 	}
 #endif
 

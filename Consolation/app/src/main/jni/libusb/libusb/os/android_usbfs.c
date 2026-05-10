@@ -2129,6 +2129,8 @@ static int discard_urbs(struct usbi_transfer *itransfer, int first, int last_plu
 
 static void free_iso_urbs(struct android_transfer_priv *tpriv) {
 	int i;
+	if (!tpriv->iso_urbs)
+		return;
 	for (i = 0; i < tpriv->num_urbs; i++) {
 		struct usbfs_urb *urb = tpriv->iso_urbs[i];
 		if (UNLIKELY(!urb))
@@ -2140,6 +2142,8 @@ static void free_iso_urbs(struct android_transfer_priv *tpriv) {
 	tpriv->iso_urbs = NULL;
 	free(tpriv->iso_urb_ctxs);
 	tpriv->iso_urb_ctxs = NULL;
+	tpriv->iso_urbs_preallocated = 0;
+	tpriv->num_urbs = 0;
 }
 
 /*
@@ -2244,6 +2248,7 @@ int API_EXPORTED libusb_prealloc_iso_urbs(struct libusb_transfer *transfer)
 		urb->endpoint = transfer->endpoint;
 		urb->number_of_packets = urb_packet_offset;
 		urb->buffer = urb_buffer_orig;
+		urb->buffer_length = urb_buffer - urb_buffer_orig;
 	}
 
 	tpriv->iso_urbs = urbs;
@@ -2587,6 +2592,11 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 	unsigned int packet_len;
 	unsigned char *urb_buffer = transfer->buffer;
 
+	for (i = 0; i < num_packets; i++) {
+		transfer->iso_packet_desc[i].actual_length = 0;
+		transfer->iso_packet_desc[i].status = LIBUSB_TRANSFER_ERROR;
+	}
+
 	/* --- Fast path: URBs were pre-allocated by libusb_prealloc_iso_urbs() ---
 	 * Reset bookkeeping only; skip all heap allocation and URB struct init.
 	 * iso_urbs, num_urbs, and all URB fields are already correct. */
@@ -2596,7 +2606,19 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 		tpriv->reap_status = LIBUSB_TRANSFER_COMPLETED;
 		tpriv->iso_packet_offset = 0;
 		for (i = 0; i < tpriv->num_urbs; i++) {
-			int r = ioctl(dpriv->fd, IOCTL_USBFS_SUBMITURB, tpriv->iso_urbs[i]);
+			struct usbfs_urb *urb = tpriv->iso_urbs[i];
+			int j;
+			int r;
+
+			urb->status = 0;
+			urb->actual_length = 0;
+			urb->error_count = 0;
+			for (j = 0; j < urb->number_of_packets; j++) {
+				urb->iso_frame_desc[j].actual_length = 0;
+				urb->iso_frame_desc[j].status = 0;
+			}
+
+			r = ioctl(dpriv->fd, IOCTL_USBFS_SUBMITURB, urb);
 			if (UNLIKELY(r < 0)) {
 				if (errno == ENODEV) {
 					r = LIBUSB_ERROR_NO_DEVICE;
@@ -2718,11 +2740,24 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 		urb->endpoint = transfer->endpoint;
 		urb->number_of_packets = urb_packet_offset;
 		urb->buffer = urb_buffer_orig;
+		urb->buffer_length = urb_buffer - urb_buffer_orig;
 	}
 
 	/* submit URBs */
 	for (i = 0; i < num_urbs; i++) {
-		int r = ioctl(dpriv->fd, IOCTL_USBFS_SUBMITURB, urbs[i]);
+		struct usbfs_urb *urb = urbs[i];
+		int j;
+		int r;
+
+		urb->status = 0;
+		urb->actual_length = 0;
+		urb->error_count = 0;
+		for (j = 0; j < urb->number_of_packets; j++) {
+			urb->iso_frame_desc[j].actual_length = 0;
+			urb->iso_frame_desc[j].status = 0;
+		}
+
+		r = ioctl(dpriv->fd, IOCTL_USBFS_SUBMITURB, urb);
 		if (UNLIKELY(r < 0)) {
 			if (errno == ENODEV) {
 				r = LIBUSB_ERROR_NO_DEVICE;
@@ -2854,8 +2889,12 @@ static int op_cancel_transfer(struct usbi_transfer *itransfer) {
 		RETURN(LIBUSB_ERROR_INVALID_PARAM, int);
 	}
 
-	if (UNLIKELY(!tpriv->urbs))
+	if (LIBUSB_TRANSFER_TYPE_ISOCHRONOUS == transfer->type) {
+		if (UNLIKELY(!tpriv->iso_urbs))
+			RETURN(LIBUSB_ERROR_NOT_FOUND, int);
+	} else if (UNLIKELY(!tpriv->urbs)) {
 		RETURN(LIBUSB_ERROR_NOT_FOUND, int);
+	}
 
 	RETURN(discard_urbs(itransfer, 0, tpriv->num_urbs), int);
 }

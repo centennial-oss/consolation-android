@@ -1,4 +1,4 @@
-.PHONY: build build-release test lint clean clean-build clear-config-cache generate-android-build-info generate-android-build-info-manual
+.PHONY: build build-release test lint clean clean-build clear-config-cache generate-android-build-info generate-android-build-info-manual debug-autostart-on debug-autostart-off
 
 APP_NAME := Consolation
 APP_VERSION ?= $(shell awk -F= '/^consolation\.build\.version=/{print $$2}' build.properties)
@@ -18,6 +18,7 @@ BUILD_TYPE ?= $(if $(filter localdev,$(TAG)),localdev,Release)
 BUILD_INFO_COMMIT ?= $(if $(filter localdev,$(TAG)),localdev,$(COMMIT))
 BUILD_INFO_DATE ?= $(if $(filter localdev,$(TAG)),localdev,$(DATE))
 ANDROID_BUILD_INFO := Consolation/app/src/main/java/org/centennialoss/consolation/AppBuildInfo.kt
+DEBUG_AUTOSTART_FILE := Consolation/app/src/debug/java/org/centennialoss/consolation/DebugAutoStartPlayback.kt
 
 # Set JAVA_HOME to the Android Studio bundled JDK
 export JAVA_HOME := /Applications/Android Studio.app/Contents/jbr/Contents/Home
@@ -50,6 +51,14 @@ clean-build:
 	cd Consolation && ./gradlew clean
 
 clean: clean-build clear-config-cache
+
+debug-autostart-on:
+	@sed -i '' -E 's/^(internal const val AUTO_START_PLAYBACK = ).*/\11/' "$(DEBUG_AUTOSTART_FILE)"
+	@grep -n 'AUTO_START_PLAYBACK' "$(DEBUG_AUTOSTART_FILE)"
+
+debug-autostart-off:
+	@sed -i '' -E 's/^(internal const val AUTO_START_PLAYBACK = ).*/\10/' "$(DEBUG_AUTOSTART_FILE)"
+	@grep -n 'AUTO_START_PLAYBACK' "$(DEBUG_AUTOSTART_FILE)"
 
 # Requires BUILD_VERSION_MANUAL (e.g. export BUILD_VERSION_MANUAL=1.2.3). Uses git HEAD, UTC RFC3339 date (.000Z), updates repo-root build.properties.
 generate-android-build-info-manual:
