@@ -1,4 +1,3 @@
-# <img src="assets/app-icon.png" alt="Consolation" height="48" /> Consolation™
 # <img src="assets/app-icon.png" alt="Consolation" height="48" /> Consolation™ [<img align="right" src="assets/play-store-badge.svg" />](https://play.google.com/store/apps/details?id=org.centennialoss.consolation)
 
 
