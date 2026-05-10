@@ -39,6 +39,7 @@ SET(INSTALL_CMAKE_DIR "${CMAKE_INSTALL_PREFIX}/lib/cmake/libuvc" CACHE PATH
 
 SET(SOURCES src/ctrl.c src/device.c src/diag.c
            src/frame.c src/init.c src/stream.c
+           src/stream_bulk.c src/stream_iso.c src/stream_mjpeg.c
            src/misc.c)
 
 include_directories(
