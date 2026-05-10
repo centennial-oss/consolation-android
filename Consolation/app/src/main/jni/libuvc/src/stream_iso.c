@@ -2,8 +2,6 @@
  * Isochronous streaming transfer setup and payload processing (libuvc stream path).
  *********************************************************************/
 
-#include <assert.h>
-#include <time.h>
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -16,22 +14,14 @@
 #define USE_EOF
 
 void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct libusb_transfer *transfer) {
-	/* per packet */
 	uint8_t *pktbuf;
-	uint8_t check_header;
 	size_t header_len;
 	uint8_t header_info;
 	struct libusb_iso_packet_descriptor *pkt;
-
-	/* magic numbers for identifying header packets from some iSight cameras */
-	static const uint8_t isight_tag[] = {
-		0x11, 0x22, 0x33, 0x44, 0xde, 0xad,
-		0xbe, 0xef, 0xde, 0xad, 0xfa, 0xce };
 	int packet_id;
 	uvc_vs_error_code_control_t vs_error_code;
 
 	for (packet_id = 0; packet_id < transfer->num_iso_packets; ++packet_id) {
-		check_header = 1;
 		if (UNLIKELY(!strmh->outbuf)) {
 			_uvc_diag_mjpeg_drop(strmh, "slot-exhausted");
 			continue;
@@ -51,25 +41,11 @@ void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct libusb_transfer
 		}
 		pktbuf = libusb_get_iso_packet_buffer_simple(transfer, packet_id);
 		if (LIKELY(pktbuf)) {
-#ifdef __ANDROID__
-			if (UNLIKELY(strmh->devh->is_isight))
-#else
-			if (strmh->devh->is_isight)
-#endif
-			{
-				if (pkt->actual_length < 30
-					|| (memcmp(isight_tag, pktbuf + 2, sizeof(isight_tag))
-						&& memcmp(isight_tag, pktbuf + 3, sizeof(isight_tag)))) {
-					check_header = 0;
-					header_len = 0;
-				} else {
-					header_len = pktbuf[0];
-				}
-			} else {
-				header_len = pktbuf[0];	// Header length field of Stream Header
-			}
+			header_len = pktbuf[0];
 
-			if (LIKELY(check_header)) {
+			if (UNLIKELY(header_len < 2)) {
+				header_info = 0;
+			} else {
 				header_info = pktbuf[1];
 				if (UNLIKELY(header_info & UVC_STREAM_ERR)) {
 					MARK("bad packet:status=0x%2x", header_info);
@@ -79,9 +55,6 @@ void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct libusb_transfer
 				}
 #ifdef USE_EOF
 				if ((strmh->fid != (header_info & UVC_STREAM_FID)) && strmh->got_bytes) {
-				/* The frame ID bit was flipped, but we have image data sitting
-	             around from prior transfers. This means the camera didn't send
-    		     an EOF for the last transfer of the previous frame or some frames losted. */
 					_uvc_swap_buffers(strmh, "iso-fid");
 				}
 				strmh->fid = header_info & UVC_STREAM_FID;
@@ -108,16 +81,6 @@ void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct libusb_transfer
 						strmh->last_scr = 0;
 					}
 				}
-
-#ifdef __ANDROID__
-				if (UNLIKELY(strmh->devh->is_isight))
-					continue; // don't look for data after an iSight header
-#else
-				if (strmh->devh->is_isight) {
-					MARK("is_isight");
-					continue; // don't look for data after an iSight header
-				}
-#endif
 			}
 
 			if (UNLIKELY(pkt->actual_length < header_len)) {
@@ -140,7 +103,7 @@ void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct libusb_transfer
 				strmh->got_bytes += odd_bytes;
 			}
 #ifdef USE_EOF
-			if ((pktbuf[1] & UVC_STREAM_EOF) && strmh->got_bytes != 0) {
+			if (header_len >= 2 && (pktbuf[1] & UVC_STREAM_EOF) && strmh->got_bytes != 0) {
 				_uvc_swap_buffers(strmh, "iso-eof");
 			}
 #endif

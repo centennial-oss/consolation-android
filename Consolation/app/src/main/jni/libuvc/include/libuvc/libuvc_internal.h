@@ -346,8 +346,6 @@ struct uvc_device_handle {
   void *button_user_ptr;
 
   uvc_stream_handle_t *streams;
-  /** Whether the camera is an iSight that sends one header per frame */
-  uint8_t is_isight;
   uint8_t reset_on_release_if;	// XXX whether interface alt setting needs to reset to 0.
 };
 

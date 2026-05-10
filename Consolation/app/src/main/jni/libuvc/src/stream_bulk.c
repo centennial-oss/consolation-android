@@ -24,12 +24,6 @@ void _uvc_process_payload_bulk(uvc_stream_handle_t *strmh, const uint8_t *payloa
 	uint8_t header_info;
 	size_t data_len;
 
-	// magic numbers for identifying header packets from some iSight cameras
-	static const uint8_t isight_tag[] = {
-		0x11, 0x22, 0x33, 0x44,
-		0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xfa, 0xce
-	};
-
 	// ignore empty payload transfers
 	if (UNLIKELY(!payload || !payload_len))
 		return;
@@ -38,34 +32,15 @@ void _uvc_process_payload_bulk(uvc_stream_handle_t *strmh, const uint8_t *payloa
 		return;
 	}
 
-	/* Certain iSight cameras have strange behavior: They send header
-	 * information in a packet with no image data, and then the following
-  	 * packets have only image data, with no more headers until the next frame.
-	 *
-	 * The iSight header: len(1), flags(1 or 2), 0x11223344(4),
-	 * 0xdeadbeefdeadface(8), ??(16)
-	*/
+	header_len = payload[0];
 
-	if (UNLIKELY(strmh->devh->is_isight &&
-		((payload_len < 14) || memcmp(isight_tag, payload + 2, sizeof(isight_tag)) ) &&
-		((payload_len < 15) || memcmp(isight_tag, payload + 3, sizeof(isight_tag)) ) )) {
-		// The payload transfer doesn't have any iSight magic, so it's all image data
-		header_len = 0;
-		data_len = payload_len;
-	} else {
-		header_len = payload[0];
-
-		if (UNLIKELY(header_len > payload_len)) {
-			strmh->bfh_err |= UVC_STREAM_ERR;
-			UVC_DEBUG("bogus packet: actual_len=%zd, header_len=%zd\n", payload_len, header_len);
-			return;
-		}
-
-		if (UNLIKELY(strmh->devh->is_isight))
-			data_len = 0;
-		else
-			data_len = payload_len - header_len;
+	if (UNLIKELY(header_len > payload_len)) {
+		strmh->bfh_err |= UVC_STREAM_ERR;
+		UVC_DEBUG("bogus packet: actual_len=%zd, header_len=%zd\n", payload_len, header_len);
+		return;
 	}
+
+	data_len = payload_len - header_len;
 
 	if (UNLIKELY(header_len < 2)) {
 		header_info = 0;

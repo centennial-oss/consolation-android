@@ -288,7 +288,6 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 	uvc_error_t ret;
 	struct libusb_device_handle *usb_devh;
 	uvc_device_handle_t *internal_devh;
-	struct libusb_device_descriptor desc;
 
 	UVC_ENTER();
 	const uint64_t t_open_start = uvc_diag_now_ns();
@@ -337,9 +336,6 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 		ret);
 	if (UNLIKELY(ret != UVC_SUCCESS))
 		goto fail;
-
-	libusb_get_device_descriptor(dev->usb_dev, &desc);
-	internal_devh->is_isight = (desc.idVendor == 0x05ac && desc.idProduct == 0x8501);
 
 	if (internal_devh->info->ctrl_if.bEndpointAddress) {
 		UVC_DEBUG("status check transfer:bEndpointAddress=0x%02x", internal_devh->info->ctrl_if.bEndpointAddress);
@@ -677,7 +673,6 @@ uvc_error_t uvc_get_device_list(uvc_context_t *ctx, uvc_device_t ***list) {
 	int dev_idx;
 	struct libusb_device_handle *usb_devh;
 	struct libusb_config_descriptor *config;
-	struct libusb_device_descriptor desc;
 	uint8_t got_interface;
 
 	/* per interface */
@@ -710,30 +705,20 @@ uvc_error_t uvc_get_device_list(uvc_context_t *ctx, uvc_device_t ***list) {
 		if (libusb_get_config_descriptor(usb_dev, 0, &config) != 0)
 			continue;
 
-		if (libusb_get_device_descriptor (usb_dev, &desc) != LIBUSB_SUCCESS) {
-			libusb_free_config_descriptor(config);
-			continue;
-		}
+		for (interface_idx = 0;
+				!got_interface && interface_idx < config->bNumInterfaces;
+				++interface_idx) {
+			interface = &config->interface[interface_idx];
 
-		// Special case for Imaging Source cameras
-		if ((0x199e == desc.idVendor) && (0x8101 == desc.idProduct)) {
-			got_interface = 1;
-		} else {
-			for (interface_idx = 0;
-					!got_interface && interface_idx < config->bNumInterfaces;
-					++interface_idx) {
-				interface = &config->interface[interface_idx];
+			for (altsetting_idx = 0;
+					!got_interface && altsetting_idx < interface->num_altsetting;
+					++altsetting_idx) {
+				if_desc = &interface->altsetting[altsetting_idx];
 
-				for (altsetting_idx = 0;
-						!got_interface && altsetting_idx < interface->num_altsetting;
-						++altsetting_idx) {
-					if_desc = &interface->altsetting[altsetting_idx];
-
-					/* Video, Streaming */
-					if (if_desc->bInterfaceClass == 14
-							&& if_desc->bInterfaceSubClass == 2) {
-						got_interface = 1;
-					}
+				/* Video, Streaming */
+				if (if_desc->bInterfaceClass == 14
+						&& if_desc->bInterfaceSubClass == 2) {
+					got_interface = 1;
 				}
 			}
 		}
@@ -1014,19 +999,6 @@ uvc_error_t uvc_scan_control(uvc_device_t *dev, uvc_device_info_t *info) {
 			if (if_desc->bInterfaceClass == LIBUSB_CLASS_VIDEO/*14*/ && if_desc->bInterfaceSubClass == 1) // Video, Control
 				break;
 
-			// Another TIS camera hack.
-			if (if_desc->bInterfaceClass == 255 && if_desc->bInterfaceSubClass == 1) {
-				uvc_device_descriptor_t* dev_desc;
-				int haveTISCamera = 0;
-				uvc_get_device_descriptor (dev, &dev_desc);
-				if (dev_desc->idVendor == 0x199e && dev_desc->idProduct == 0x8101) {
-					haveTISCamera = 1;
-				}
-				uvc_free_device_descriptor (dev_desc);
-				if (haveTISCamera) {
-					break;
-				}
-			}
 			if_desc = NULL;
 		}
 	}
