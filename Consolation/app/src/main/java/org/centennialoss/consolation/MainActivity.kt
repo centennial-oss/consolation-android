@@ -102,6 +102,7 @@ class MainActivity : ComponentActivity() {
     private var resolutionProbeJob: Job? = null
     private var probingResolutionDeviceId: String? = null
     private var isResolutionProbeInProgress = false
+    private var autoStartPlaybackJob: Job? = null
 
     // Settings
     private var isStatsVisible = false
@@ -504,6 +505,9 @@ class MainActivity : ComponentActivity() {
         binding.startupScreen.root.isVisible = !isRunning
         binding.playbackControls.root.isVisible = isRunning
         previewTexture.isVisible = isRunning
+        if (isRunning) {
+            cancelAutoStartPlayback()
+        }
 
         if (!isRunning) {
             telemetryJob?.cancel()
@@ -519,6 +523,7 @@ class MainActivity : ComponentActivity() {
             binding.startupScreen.deviceDropdown.setAdapter(adapter)
 
             if (devices.isEmpty()) {
+                cancelAutoStartPlayback()
                 selectedDevice = null
                 selectedFormat = null
                 selectedPixelFormatPreference = PixelFormatPreference.AUTO
@@ -530,6 +535,7 @@ class MainActivity : ComponentActivity() {
                 updateStartupActions()
             } else {
                 if (selectedDevice == null || devices.none { it.id == selectedDevice!!.id }) {
+                    cancelAutoStartPlayback()
                     selectedDevice = devices.first()
                     selectedFormat = null
                     selectedPixelFormatPreference = PixelFormatPreference.AUTO
@@ -662,6 +668,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshResolutions() {
         val device = selectedDevice ?: run {
             Log.d(RESOLUTION_PROBE_TAG, "refreshResolutions: skip (no selected device)")
+            cancelAutoStartPlayback()
             resolutionProbeJob?.cancel()
             resolutionProbeJob = null
             probingResolutionDeviceId = null
@@ -674,6 +681,7 @@ class MainActivity : ComponentActivity() {
                 RESOLUTION_PROBE_TAG,
                 "refreshResolutions: skip (no USB permission) id=${device.id} name=${device.name}",
             )
+            cancelAutoStartPlayback()
             resolutionProbeJob?.cancel()
             resolutionProbeJob = null
             probingResolutionDeviceId = null
@@ -696,6 +704,7 @@ class MainActivity : ComponentActivity() {
         }
 
         resolutionProbeJob?.cancel()
+        cancelAutoStartPlayback()
         resolutionProbeJob = null
         probingResolutionDeviceId = device.id
         isResolutionProbeInProgress = true
@@ -804,9 +813,51 @@ class MainActivity : ComponentActivity() {
                     probingResolutionDeviceId = null
                     isResolutionProbeInProgress = false
                     updateStartupActions()
+                    if (selectedDevice?.id == device.id && selectedFormat != null) {
+                        scheduleAutoStartPlaybackAfterResolution(device)
+                    }
                 }
             }
         }
+    }
+
+    private fun scheduleAutoStartPlaybackAfterResolution(device: CaptureDevice) {
+        if (AUTO_START_PLAYBACK != 1) {
+            return
+        }
+        autoStartPlaybackJob?.cancel()
+        autoStartPlaybackJob = lifecycleScope.launch {
+            Log.w(
+                PLAYBACK_DIAG_TAG,
+                "debug AUTO_START_PLAYBACK armed; waiting ${AUTO_START_PLAYBACK_DELAY_MS}ms",
+            )
+            delay(AUTO_START_PLAYBACK_DELAY_MS)
+            if (AUTO_START_PLAYBACK != 1) {
+                return@launch
+            }
+            if (captureEngine.state.value is CaptureState.Running) {
+                return@launch
+            }
+            if (
+                selectedDevice?.id != device.id ||
+                selectedFormat == null ||
+                isResolutionProbeInProgress ||
+                !deviceRepository.hasPermission(device)
+            ) {
+                Log.w(
+                    PLAYBACK_DIAG_TAG,
+                    "debug AUTO_START_PLAYBACK skipped; startup selection changed or is not ready",
+                )
+                return@launch
+            }
+            Log.w(PLAYBACK_DIAG_TAG, "debug AUTO_START_PLAYBACK invoking Play")
+            handlePlayAction()
+        }
+    }
+
+    private fun cancelAutoStartPlayback() {
+        autoStartPlaybackJob?.cancel()
+        autoStartPlaybackJob = null
     }
 
     private fun showResolutionFormatMenu(anchor: View) {
@@ -1920,6 +1971,7 @@ class MainActivity : ComponentActivity() {
         telemetryJob?.cancel()
         controlsAutoHideJob?.cancel()
         cancelConnectingWatchdog()
+        cancelAutoStartPlayback()
         previewBackend.setCaptureAudioFailureListener(null)
         deviceRepository.stop()
         previewBackend.dispose()
@@ -1957,6 +2009,7 @@ class MainActivity : ComponentActivity() {
         private const val LOW_FPS_SUSTAIN_MS = 3_000L
         private const val CONNECTING_RETRY_TIMEOUT_MS = 7_000L
         private const val POST_USB_PERMISSION_SETTLE_MS = 1_500L
+        private const val AUTO_START_PLAYBACK_DELAY_MS = 2_000L
         private const val DEFAULT_TARGET_FPS = 60f
         private const val DEFAULT_TARGET_FPS_TOLERANCE = 0.75f
         private const val MENU_FPS_DEDUP_TOLERANCE = 0.75f
