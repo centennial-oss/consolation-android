@@ -4,6 +4,7 @@
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
 #include <libusb/libusb.h>
+#include "libuvc/stream_diag.h"
 
 struct libusb_interface;
 
@@ -15,8 +16,6 @@ void _uvc_diag_mjpeg_drop(uvc_stream_handle_t *strmh, const char *reason);
 void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason);
 void _uvc_diag_mjpeg_log_stream_start(const uvc_stream_ctrl_t *ctrl,
 		const uvc_frame_desc_t *frame_desc);
-void _uvc_diag_first_payload(uvc_stream_handle_t *strmh,
-		size_t nbytes, const char *path);
 
 void _uvc_process_payload_bulk(uvc_stream_handle_t *strmh,
 		const uint8_t *payload, size_t payload_len);
@@ -27,6 +26,7 @@ void _uvc_stream_callback(struct libusb_transfer *transfer);
 
 void _uvc_free_transfer(uvc_stream_handle_t *strmh, int transfer_id);
 
+/** Transfer timeout for libusb_fill_{bulk,iso}_transfer (see stream_diag.c). Default 0 (infinite). */
 #ifndef LIBUVC_STREAM_XFER_TIMEOUT_MS
 #define LIBUVC_STREAM_XFER_TIMEOUT_MS 0
 #endif

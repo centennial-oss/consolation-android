@@ -3,7 +3,9 @@
 
 #define LOCAL_DEBUG 0
 
+#ifndef LOG_TAG
 #define LOG_TAG "libuvc/stream"
+#endif
 #if 1	// デバッグ情報を出さない時1
 	#ifndef LOG_NDEBUG
 		#define	LOG_NDEBUG		// LOGV/LOGD/MARKを出力しない時

@@ -81,7 +81,8 @@ LOCAL_SRC_FILES := \
 	src/stream.c \
 	src/stream_bulk.c \
 	src/stream_iso.c \
-	src/stream_mjpeg.c
+	src/stream_mjpeg.c \
+	src/stream_diag.c
 
 LOCAL_MODULE := libuvc_static
 include $(BUILD_STATIC_LIBRARY)

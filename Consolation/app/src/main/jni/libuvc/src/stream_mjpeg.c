@@ -2,32 +2,7 @@
  * MJPEG-specific diagnostics and JPEG bitstream checks (libuvc stream path).
  *********************************************************************/
 
-#ifdef __ANDROID__
-#include <android/log.h>
-#endif
-
-#include "libuvc/stream_log.h"
-#include "libuvc/libuvc.h"
-#include "libuvc/libuvc_internal.h"
 #include "libuvc/stream_internal.h"
-
-#ifndef UVC_RUNTIME_DIAG_ENABLED
-#if defined(NDEBUG)
-#define UVC_RUNTIME_DIAG_ENABLED 0
-#else
-#define UVC_RUNTIME_DIAG_ENABLED 1
-#endif
-#endif
-
-#if UVC_RUNTIME_DIAG_ENABLED
-#if defined(__ANDROID__)
-#define UVC_DIAG_LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#else
-#define UVC_DIAG_LOGI(...) LOGI(__VA_ARGS__)
-#endif
-#else
-#define UVC_DIAG_LOGI(...)
-#endif
 
 static uint32_t _uvc_diag_sample_hash(const uint8_t *data, size_t len) {
 	uint32_t hash = 2166136261u;
