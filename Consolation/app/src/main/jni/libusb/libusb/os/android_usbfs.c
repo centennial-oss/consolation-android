@@ -186,6 +186,7 @@ enum reap_action {
 struct iso_urb_ctx {
 	struct usbi_transfer *itransfer;
 	int urb_idx;
+	int first_packet_idx;
 };
 
 struct android_transfer_priv {
@@ -2232,6 +2233,7 @@ int API_EXPORTED libusb_prealloc_iso_urbs(struct libusb_transfer *transfer)
 		urbs[i] = urb;
 		urb_ctxs[i].itransfer = itransfer;
 		urb_ctxs[i].urb_idx = i;
+		urb_ctxs[i].first_packet_idx = packet_offset - urb_packet_offset;
 
 		for (j = 0, k = packet_offset - urb_packet_offset; k < packet_offset; k++, j++)
 			urb->iso_frame_desc[j].length = transfer->iso_packet_desc[k].length;
@@ -2591,6 +2593,7 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 	if (tpriv->iso_urbs_preallocated) {
 		tpriv->num_retired = 0;
 		tpriv->reap_action = NORMAL;
+		tpriv->reap_status = LIBUSB_TRANSFER_COMPLETED;
 		tpriv->iso_packet_offset = 0;
 		for (i = 0; i < tpriv->num_urbs; i++) {
 			int r = ioctl(dpriv->fd, IOCTL_USBFS_SUBMITURB, tpriv->iso_urbs[i]);
@@ -2662,6 +2665,7 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 	tpriv->num_urbs = num_urbs;
 	tpriv->num_retired = 0;
 	tpriv->reap_action = NORMAL;
+	tpriv->reap_status = LIBUSB_TRANSFER_COMPLETED;
 	tpriv->iso_packet_offset = 0;
 
 	/* allocate + initialize each URB with the correct number of packets */
@@ -2698,6 +2702,7 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 		urbs[i] = urb;
 		urb_ctxs[i].itransfer = itransfer;
 		urb_ctxs[i].urb_idx = i;
+		urb_ctxs[i].first_packet_idx = packet_offset - urb_packet_offset;
 
 		/* populate packet lengths */
 		for (j = 0, k = packet_offset - urb_packet_offset;
@@ -3031,7 +3036,7 @@ static int handle_iso_completion(struct libusb_device_handle *handle,	// XXX add
 	struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
 	struct android_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
 	int num_urbs = tpriv->num_urbs;
-	int urb_idx = urb_ctx->urb_idx + 1;
+	int urb_idx = urb_ctx->urb_idx;
 	int i;
 	enum libusb_transfer_status status = LIBUSB_TRANSFER_COMPLETED;
 
@@ -3040,22 +3045,28 @@ static int handle_iso_completion(struct libusb_device_handle *handle,	// XXX add
 		usbi_mutex_unlock(&itransfer->lock);
 		return LIBUSB_TRANSFER_ERROR;
 	}
-	if (UNLIKELY(urb_idx < 1 || urb_idx > num_urbs ||
-			urb != tpriv->iso_urbs[urb_ctx->urb_idx])) {
+	if (UNLIKELY(urb_idx < 0 || urb_idx >= num_urbs ||
+			urb != tpriv->iso_urbs[urb_idx])) {
 		usbi_err(TRANSFER_CTX(transfer), "invalid iso urb context");
 		usbi_mutex_unlock(&itransfer->lock);
 		return LIBUSB_ERROR_NOT_FOUND;
 	}
 
 	usbi_dbg("handling completion status %d of iso urb %d/%d",
-		urb->status, urb_idx, num_urbs);
+		urb->status, urb_idx + 1, num_urbs);
 
 	/* copy isochronous results back in */
 
 	for (i = 0; i < urb->number_of_packets; i++) {
 		struct usbfs_iso_packet_desc *urb_desc = &urb->iso_frame_desc[i];
-		struct libusb_iso_packet_descriptor *lib_desc =
-				&transfer->iso_packet_desc[tpriv->iso_packet_offset++];
+		int packet_idx = urb_ctx->first_packet_idx + i;
+		struct libusb_iso_packet_descriptor *lib_desc;
+		if (UNLIKELY(packet_idx < 0 || packet_idx >= transfer->num_iso_packets)) {
+			usbi_err(TRANSFER_CTX(transfer), "invalid iso packet index");
+			usbi_mutex_unlock(&itransfer->lock);
+			return LIBUSB_ERROR_NOT_FOUND;
+		}
+		lib_desc = &transfer->iso_packet_desc[packet_idx];
 		lib_desc->status = LIBUSB_TRANSFER_COMPLETED;
 		switch (urb_desc->status) {
 		case 0:
@@ -3122,6 +3133,7 @@ static int handle_iso_completion(struct libusb_device_handle *handle,	// XXX add
 	case -ENOENT: /* cancelled */
 	case -ECONNRESET:
 		break;
+	case -ENODEV:
 	case -ESHUTDOWN:
 		usbi_dbg("device removed");
 		status = LIBUSB_TRANSFER_NO_DEVICE;
@@ -3132,14 +3144,18 @@ static int handle_iso_completion(struct libusb_device_handle *handle,	// XXX add
 		status = LIBUSB_TRANSFER_ERROR;
 		break;
 	}
+	if (status != LIBUSB_TRANSFER_COMPLETED
+			&& tpriv->reap_status == LIBUSB_TRANSFER_COMPLETED)
+		tpriv->reap_status = status;
 
-	/* if we're the last urb then we're done */
-	if (urb_idx == num_urbs) {
-		usbi_dbg("last URB in transfer --> complete!");
+	/* ISO URBs may be reaped out of order, especially during unplug. The
+	 * transfer is complete only after every submitted URB has retired. */
+	if (tpriv->num_retired == num_urbs) {
+		usbi_dbg("all URBs in transfer retired --> complete!");
 		if (!tpriv->iso_urbs_preallocated)
 			free_iso_urbs(tpriv);
 		usbi_mutex_unlock(&itransfer->lock);
-		return usbi_handle_transfer_completion(itransfer, status);
+		return usbi_handle_transfer_completion(itransfer, tpriv->reap_status);
 	}
 
 out:
