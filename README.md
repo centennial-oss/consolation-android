@@ -1,4 +1,6 @@
 # <img src="assets/app-icon.png" alt="Consolation" height="48" /> Consolation™
+# <img src="assets/app-icon.png" alt="Consolation" height="48" /> Consolation™ [<img align="right" src="assets/play-store-badge.svg" />](https://play.google.com/store/apps/details?id=org.centennialoss.consolation)
+
 
 A 100% free, no-frills, incredibly performant video capture viewer for Android tablets with no analytics or snooping.
 
@@ -35,6 +37,7 @@ Consolation has been tested by the developers on a Samsung Galaxy Tab S8 Ultra (
 - WANKEDA 4K Capture Card 1080p 60FPS for Streaming (1da603d4) - 👌 🚀
 - blueAVS 4K Capture Card (A3-B) - 👌 🚀
 - Guermok Video Capture Card (GM-29A) - 👌 🚀
+- PERESAL USB 3.0 Video Capture Card with PD 100W - 👌 🚀
 - UGREEN Full HD 1080p Capture Card (model 40189) -  ⚠️ max 30p @ 1920x1080
 
 ## Requirements
