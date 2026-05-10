@@ -2592,6 +2592,11 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 	unsigned int packet_len;
 	unsigned char *urb_buffer = transfer->buffer;
 
+	/* libusb_submit_transfer() holds itransfer->lock for the entire backend
+	 * submit (see io.c). handle_iso_completion also takes this lock, so ISO
+	 * submit bookkeeping and completion are already serialized — do not lock
+	 * here (non-recursive mutex would deadlock). */
+
 	for (i = 0; i < num_packets; i++) {
 		transfer->iso_packet_desc[i].actual_length = 0;
 		transfer->iso_packet_desc[i].status = LIBUSB_TRANSFER_ERROR;
@@ -2607,13 +2612,18 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 		tpriv->iso_packet_offset = 0;
 		for (i = 0; i < tpriv->num_urbs; i++) {
 			struct usbfs_urb *urb = tpriv->iso_urbs[i];
+			struct iso_urb_ctx *ctx = &tpriv->iso_urb_ctxs[i];
 			int j;
+			int k;
 			int r;
 
 			urb->status = 0;
 			urb->actual_length = 0;
 			urb->error_count = 0;
-			for (j = 0; j < urb->number_of_packets; j++) {
+			for (j = 0, k = ctx->first_packet_idx;
+					j < urb->number_of_packets; j++, k++) {
+				urb->iso_frame_desc[j].length =
+					transfer->iso_packet_desc[k].length;
 				urb->iso_frame_desc[j].actual_length = 0;
 				urb->iso_frame_desc[j].status = 0;
 			}
@@ -2632,6 +2642,7 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 					return r;
 				}
 				tpriv->reap_action = SUBMIT_FAILED;
+				/* URBs not yet submitted count as already retired. */
 				tpriv->num_retired = tpriv->num_urbs - i;
 				discard_urbs(itransfer, 0, i);
 				usbi_dbg("reporting successful submission but waiting for %d "
@@ -2682,15 +2693,11 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 		return LIBUSB_ERROR_NO_MEM;
 	}
 
-	tpriv->iso_urbs = urbs;
-	tpriv->iso_urb_ctxs = urb_ctxs;
-	tpriv->num_urbs = num_urbs;
-	tpriv->num_retired = 0;
-	tpriv->reap_action = NORMAL;
-	tpriv->reap_status = LIBUSB_TRANSFER_COMPLETED;
-	tpriv->iso_packet_offset = 0;
-
-	/* allocate + initialize each URB with the correct number of packets */
+	/* allocate + initialize each URB with the correct number of packets.
+	 * tpriv->iso_urbs is intentionally NOT written yet; we only publish it
+	 * to tpriv atomically under the lock after this loop completes, so that
+	 * op_cancel_transfer and handle_iso_completion never see a partially-built
+	 * URB array. */
 	for (i = 0; i < num_urbs; i++) {
 		struct usbfs_urb *urb;
 		unsigned int space_remaining_in_urb = MAX_ISO_BUFFER_LENGTH;
@@ -2718,7 +2725,12 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 			+ (urb_packet_offset * sizeof(struct usbfs_iso_packet_desc));
 		urb = calloc(1, alloc_size);
 		if (UNLIKELY(!urb)) {
-			free_iso_urbs(tpriv);
+			/* tpriv->iso_urbs has not been published yet; free local arrays. */
+			int j2;
+			for (j2 = 0; j2 < i; j2++)
+				free(urbs[j2]);
+			free(urb_ctxs);
+			free(urbs);
 			return LIBUSB_ERROR_NO_MEM;
 		}
 		urbs[i] = urb;
@@ -2742,6 +2754,14 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 		urb->buffer = urb_buffer_orig;
 		urb->buffer_length = urb_buffer - urb_buffer_orig;
 	}
+
+	tpriv->iso_urbs = urbs;
+	tpriv->iso_urb_ctxs = urb_ctxs;
+	tpriv->num_urbs = num_urbs;
+	tpriv->num_retired = 0;
+	tpriv->reap_action = NORMAL;
+	tpriv->reap_status = LIBUSB_TRANSFER_COMPLETED;
+	tpriv->iso_packet_offset = 0;
 
 	/* submit URBs */
 	for (i = 0; i < num_urbs; i++) {
@@ -2790,8 +2810,7 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer) {
 			 */
 			tpriv->reap_action = SUBMIT_FAILED;
 
-			/* The URBs we haven't submitted yet we count as already
-			 * retired. */
+			/* The URBs we haven't submitted yet we count as already retired. */
 			tpriv->num_retired = num_urbs - i;
 			discard_urbs(itransfer, 0, i);
 
@@ -3143,7 +3162,10 @@ static int handle_iso_completion(struct libusb_device_handle *handle,	// XXX add
 			lib_desc->status = LIBUSB_TRANSFER_ERROR;
 			break;
 		}
-		lib_desc->actual_length = urb_desc->actual_length;
+		if (urb_desc->status == 0)
+			lib_desc->actual_length = urb_desc->actual_length;
+		else
+			lib_desc->actual_length = 0;
 	}
 
 	tpriv->num_retired++;
