@@ -2,7 +2,7 @@
 
 A 100% free, no-frills, incredibly performant video capture viewer for Android tablets with no analytics or snooping.
 
-Consolation is coming soon to the Play Store, or can be downloaded directly from [this project's releases](https://github.com/centennial-oss/consolation-android/releases).
+Consolation can be [installed from the Play Store](https://play.google.com/store/apps/details?id=org.centennialoss.consolation), or can be downloaded directly from [this project's releases](https://github.com/centennial-oss/consolation-android/releases).
 
 ## About
 
