@@ -43,7 +43,7 @@ build-release: patch-libusb test
 	cd Consolation && ./gradlew :app:assembleRelease
 	mv "$(RELEASE_APK_PATH)/app-release.apk" "$(RELEASE_APK_PATH)/$(APP_NAME)-$(APP_VERSION)-android.apk"
 
-bundle-release: build-release
+bundle-release: clean-build build-release
 	cd Consolation && ./gradlew :app:bundleRelease
 	mv "$(RELEASE_BUNDLE_PATH)/app-release.aab" "$(RELEASE_BUNDLE_PATH)/$(APP_NAME)-$(APP_VERSION)-android.aab"
 
