@@ -35,6 +35,7 @@ CFLAGS := -Werror
 
 LOCAL_C_INCLUDES := \
 		$(LOCAL_PATH)/ \
+		$(LOCAL_PATH)/../libusb-1.0.29 \
 		$(LOCAL_PATH)/../ \
 		$(LOCAL_PATH)/../rapidjson/include \
 

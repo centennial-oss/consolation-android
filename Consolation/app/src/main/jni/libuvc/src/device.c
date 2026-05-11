@@ -198,33 +198,8 @@ uvc_error_t uvc_find_device(uvc_context_t *ctx, uvc_device_t **dev, int vid,
  */
 uvc_error_t uvc_find_device2(uvc_context_t *ctx, uvc_device_t **device, int vid,
 		int pid, const char *sn, int fd) {
-
-	UVC_ENTER();
-
-	LOGD("call libusb_find_device");
-	struct libusb_device *usb_dev = libusb_find_device(ctx->usb_ctx, vid, pid, sn, fd);
-
-	if (usb_dev) {
-		*device = malloc(sizeof(uvc_device_t/* *device */));
-		if (UNLIKELY(!*device)) {
-			libusb_unref_device(usb_dev);
-			*device = NULL;
-			UVC_EXIT(UVC_ERROR_NO_MEM);
-			return UVC_ERROR_NO_MEM;
-		}
-		(*device)->ctx = ctx;
-		(*device)->ref = 0;
-		(*device)->usb_dev = usb_dev;
-		libusb_set_device_fd(usb_dev, fd);	// assign fd to libusb_device for non-rooted Android devices
-		uvc_ref_device(*device);
-		UVC_EXIT(UVC_SUCCESS);
-		return UVC_SUCCESS;
-	} else {
-		LOGE("could not find specific device");
-		*device = NULL;
-	}
-	UVC_EXIT(UVC_ERROR_NO_DEVICE);
-	return UVC_ERROR_NO_DEVICE;
+	/* Delegate to uvc_get_device_with_fd which uses libusb_wrap_sys_device(). */
+	return uvc_get_device_with_fd(ctx, device, vid, pid, sn, fd, 0, 0);
 }
 
 /**
@@ -237,29 +212,39 @@ uvc_error_t uvc_get_device_with_fd(uvc_context_t *ctx, uvc_device_t **device,
 
 	ENTER();
 
-	LOGD("call libusb_get_device_with_fd");
-	struct libusb_device *usb_dev = libusb_get_device_with_fd(ctx->usb_ctx, vid, pid, serial, fd, busnum, devaddr);
-
-	if (LIKELY(usb_dev)) {
-		*device = malloc(sizeof(uvc_device_t/* *device */));
-		if (UNLIKELY(!*device)) {
-			libusb_unref_device(usb_dev);
-			*device = NULL;
-			UVC_EXIT(UVC_ERROR_NO_MEM);
-			RETURN(UVC_ERROR_NO_MEM, int);
-		}
-		(*device)->ctx = ctx;
-		(*device)->ref = 0;
-		(*device)->usb_dev = usb_dev;
-//		libusb_set_device_fd(usb_dev, fd);	// assign fd to libusb_device for non-rooted Android devices
-		uvc_ref_device(*device);
-		UVC_EXIT(UVC_SUCCESS);
-		RETURN(UVC_SUCCESS, int);
-	} else {
-		LOGE("could not find specific device");
+	/* libusb-1.0.29 replaces the old Android-specific
+	 * libusb_get_device_with_fd() with the standard libusb_wrap_sys_device()
+	 * API, which wraps the pre-opened fd obtained from Android's UsbManager. */
+	LOGD("call libusb_wrap_sys_device fd=%d", fd);
+	libusb_device_handle *usb_devh = NULL;
+	int r = libusb_wrap_sys_device(ctx->usb_ctx, (intptr_t)fd, &usb_devh);
+	if (UNLIKELY(r != LIBUSB_SUCCESS || !usb_devh)) {
+		LOGE("libusb_wrap_sys_device failed: err=%d", r);
 		*device = NULL;
-		RETURN(UVC_ERROR_NO_DEVICE, int);
+		RETURN(UVC_ERROR_IO, int);
 	}
+
+	struct libusb_device *usb_dev = libusb_get_device(usb_devh);
+	/* Add an extra reference owned by uvc_device_t->usb_dev, balanced by
+	 * libusb_unref_device() in uvc_unref_device(). The handle itself holds
+	 * the original reference from usbi_alloc_device(). */
+	libusb_ref_device(usb_dev);
+
+	*device = malloc(sizeof(uvc_device_t));
+	if (UNLIKELY(!*device)) {
+		libusb_unref_device(usb_dev);
+		libusb_close(usb_devh);
+		*device = NULL;
+		UVC_EXIT(UVC_ERROR_NO_MEM);
+		RETURN(UVC_ERROR_NO_MEM, int);
+	}
+	(*device)->ctx = ctx;
+	(*device)->ref = 0;
+	(*device)->usb_dev = usb_dev;
+	(*device)->wrapped_usb_devh = usb_devh;
+	uvc_ref_device(*device);
+	UVC_EXIT(UVC_SUCCESS);
+	RETURN(UVC_SUCCESS, int);
 
 }
 
@@ -293,7 +278,14 @@ uvc_error_t uvc_open(uvc_device_t *dev, uvc_device_handle_t **devh) {
 	const uint64_t t_open_start = uvc_diag_now_ns();
 
 	const uint64_t t_libusb_open = uvc_diag_now_ns();
-	ret = libusb_open(dev->usb_dev, &usb_devh);
+	if (dev->wrapped_usb_devh) {
+		/* Device was opened via libusb_wrap_sys_device(); reuse the handle. */
+		usb_devh = dev->wrapped_usb_devh;
+		dev->wrapped_usb_devh = NULL;
+		ret = UVC_SUCCESS;
+	} else {
+		ret = libusb_open(dev->usb_dev, &usb_devh);
+	}
 	LOGI("startup-diag:libuvc uvc_open/libusb_open %llu ms ret=%d",
 		(unsigned long long)((uvc_diag_now_ns() - t_libusb_open) / 1000000ULL), ret);
 	UVC_DEBUG("libusb_open() = %d", ret);
@@ -884,6 +876,15 @@ void uvc_ref_device(uvc_device_t *dev) {
  */
 void uvc_unref_device(uvc_device_t *dev) {
 	UVC_ENTER();
+
+	if (dev->wrapped_usb_devh) {
+		/* uvc_open() was never called (or failed before consuming the handle).
+		 * libusb_close() will release the handle's reference to usb_dev,
+		 * which is balanced by the extra libusb_ref_device() in
+		 * uvc_get_device_with_fd(). */
+		libusb_close(dev->wrapped_usb_devh);
+		dev->wrapped_usb_devh = NULL;
+	}
 
 	libusb_unref_device(dev->usb_dev);
 	dev->ref--;	// これ排他制御要るんちゃうかなぁ(｡･_･｡)

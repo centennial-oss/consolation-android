@@ -128,7 +128,6 @@ uvc_error_t _uvc_stream_setup_bulk_transfers(uvc_stream_handle_t *strmh,
 		uvc_format_desc_t *format_desc) {
 	struct libusb_transfer *transfer;
 	int transfer_id;
-	int usb_ret;
 
 	MARK("bulk transfer mode");
 	strmh->diag_selected_altsetting = 0;
@@ -147,14 +146,6 @@ uvc_error_t _uvc_stream_setup_bulk_transfers(uvc_stream_handle_t *strmh,
 			strmh->cur_ctrl.dwMaxPayloadTransferSize, _uvc_stream_callback,
 			(void *)strmh, LIBUVC_STREAM_XFER_TIMEOUT_MS);
 
-		/* Pre-allocate kernel URBs once so the bulk hot resubmit path
-		 * skips calloc/free on every completion. */
-		usb_ret = libusb_prealloc_bulk_urbs(transfer);
-		if (UNLIKELY(usb_ret != LIBUSB_SUCCESS)) {
-			UVC_DEBUG("libusb_prealloc_bulk_urbs failed: %d", usb_ret);
-			_uvc_free_transfer(strmh, transfer_id);
-			return UVC_ERROR_NO_MEM;
-		}
 	}
 	return UVC_SUCCESS;
 }

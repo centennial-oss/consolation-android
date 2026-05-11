@@ -63,6 +63,9 @@ You can make a debug build with `make build` and a release build with `make buil
 ### libjpeg-turbo
 We use [libjpeg-turbo v3.1.4.1](https://github.com/libjpeg-turbo/libjpeg-turbo) unmodified to decode the MJPEG pixel format.
 
+### libusb
+We use [libusb v1.0.29](https://github.com/libusb/libusb) to stream from UVC capture cards, with internal modifications for memory optimizations. See the [patches](patches) directory for details.
+
 ### UVCCamera and libuvc
 
 We vendored <https://github.com/alexey-pelykh/UVCCamera> into Consolation for Android. Alexey's project is a fork of <https://github.com/saki4510t/UVCCamera> which has gone dormant. We thank both projects for helping make Consolation for Android possible.
@@ -79,17 +82,6 @@ We have significantly modified our vendored UVCCamera and libuvc libs for stabil
 * fixed protocol defects causing some capture cards to incur unnecessary startup delays
 * numerous other performance improvements for a true real-time experience on modern Android devices with modern capture cards
 
-### libusb
-
-We used UVCCamera's vendored <https://github.com/libusb/libusb> v1.0.18 and made a number of stability improvements on the code paths used by Consolation, including:
-* improved device auto-detection and hot re-plug recovery
-* better heap memory safety on hot and error paths
-* fixed `itransfer->lock` deadlocks on error branch
-* fixed `libusb_lock_events` deadlock in `do_close`
-* protections against potential Java file descriptor leakage on Android
-
-These changes are at [Consolation/app/src/main/jni/libusb](Consolation/app/src/main/jni/libusb).
-
 ### Upstreaming
 
 We really would like to contribute our changes back to their upstreams. But after significant research, we've determined that the lift is too great and our time is better spent improving the core Consolation project and continuing to maintain our modifications inside of this project. As this project is open source, anyone is welcome to attempt to port our improvements back to their respective upstreams or other forks.
@@ -98,9 +90,8 @@ We _may_ publish our own separate disconnected fork of UVCCamera - specific to A
 
 #### Rationale for Upstreaming Declination
 
-* Our modified version of libusb is based on a 2014 release that was bundled with the original version of UVCCamera, and was already heavily modified to get working with Android. The latest release of libusb (1.0.29) is not compatible with Android, despite viable [Pull Requests that add support having gone unmerged for years](https://github.com/libusb/libusb/pull/1164). Since other users have worked hard to make Android happen in the mainline libusb project, only to see their efforts go unacknowledged by that project's maintainers; we would not expect to be treated any differently.
 * libuvc has not been updated in nearly 3 years with dozens of open PRs piling up, so it is unlikely that our overhaul would ever be incorporated into that apparently dormant or abandoned project.
-* Alexey's UVCCamera fork has gained little traction since its creation in late 2024, is largely unchanged from Saki's original project, and has not seen a new release in over a year (and just a few months after the fork was created). It appears to be headed towards dormancy.
+* Alexey's UVCCamera fork has gained little traction since its creation in late 2024, is largely unchanged from Saki's original project excecpt the addition of a flutter plugin, and has not seen a new release in over a year (and just a few months after the fork was created). It appears to be headed towards dormancy.
 
 ## Contributor Disclosure
 

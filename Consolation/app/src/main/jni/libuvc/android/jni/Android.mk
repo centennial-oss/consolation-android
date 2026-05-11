@@ -39,12 +39,14 @@ LOCAL_PATH	:= $(call my-dir)/../..
 include $(CLEAR_VARS)
 
 LOCAL_C_INCLUDES += \
+	$(LOCAL_PATH)/../libusb-1.0.29 \
 	$(LOCAL_PATH)/.. \
 	$(LOCAL_PATH)/include \
 	$(LOCAL_PATH)/include/libuvc \
 	$(LOCAL_PATH)/../libyuv/include
 
 LOCAL_EXPORT_C_INCLUDES := \
+	$(LOCAL_PATH)/../libusb-1.0.29 \
 	$(LOCAL_PATH)/ \
 	$(LOCAL_PATH)/include \
 	$(LOCAL_PATH)/include/libuvc \
