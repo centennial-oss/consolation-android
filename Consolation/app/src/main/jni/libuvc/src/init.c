@@ -123,13 +123,14 @@ uvc_error_t uvc_init2(uvc_context_t **pctx, struct libusb_context *usb_ctx, cons
 	uvc_context_t *ctx = calloc(1, sizeof(*ctx));
 
 	if (usb_ctx == NULL) {
-		if (usbfs && strlen(usbfs) > 0) {
-			LOGD("call #libusb_init2");
-			ret = libusb_init2(&ctx->usb_ctx, usbfs);
-		} else {
-			LOGD("call #libusb_init");
-			ret = libusb_init(&ctx->usb_ctx);
-		}
+		/* Use NO_DEVICE_DISCOVERY so libusb skips usbfs enumeration on
+		 * non-rooted Android; the device is opened later via
+		 * libusb_wrap_sys_device() with the fd from UsbManager. */
+		const struct libusb_init_option opts[] = {
+			{ .option = LIBUSB_OPTION_NO_DEVICE_DISCOVERY }
+		};
+		LOGD("call #libusb_init_context");
+		ret = libusb_init_context(&ctx->usb_ctx, opts, 1);
 		ctx->own_usb_ctx = 1;
 		if (UNLIKELY(ret != UVC_SUCCESS)) {
 			LOGW("failed:err=%d", ret);

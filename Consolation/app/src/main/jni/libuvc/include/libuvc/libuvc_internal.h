@@ -96,6 +96,41 @@
 #define IS_ARRAY(arg) (IS_INDEXABLE(arg) && (((void *) &arg) == ((void *) arg)))
 #define ARRAYSIZE(arr) (sizeof(arr) / (IS_ARRAY(arr) ? sizeof(arr[0]) : 0))
 
+/* USB descriptor type constants removed or renamed in libusb-1.0.29.
+ * Values are from the USB 2.0 specification table 9-5. */
+#ifndef LIBUSB_DT_DEVICE_QUALIFIER
+#define LIBUSB_DT_DEVICE_QUALIFIER          0x06  /* deprecated on USB 3.0 */
+#endif
+#ifndef LIBUSB_DT_OTHER_SPEED_CONFIGURATION
+#define LIBUSB_DT_OTHER_SPEED_CONFIGURATION 0x07  /* deprecated on USB 3.0 */
+#endif
+#ifndef LIBUSB_DT_INTERFACE_POWER
+#define LIBUSB_DT_INTERFACE_POWER           0x08
+#endif
+#ifndef LIBUSB_DT_OTG
+#define LIBUSB_DT_OTG                       0x09
+#endif
+#ifndef LIBUSB_DT_DEBUG
+#define LIBUSB_DT_DEBUG                     0x0a
+#endif
+/* libusb-1.0.29 renamed this to LIBUSB_DT_INTERFACE_ASSOCIATION */
+#ifndef LIBUSB_DT_ASSOCIATION
+#define LIBUSB_DT_ASSOCIATION               0x0b
+#endif
+/* libusb-1.0.29 renamed these, dropping the HID_ prefix */
+#ifndef LIBUSB_DT_HID_REPORT
+#define LIBUSB_DT_HID_REPORT                LIBUSB_DT_REPORT
+#endif
+#ifndef LIBUSB_DT_HID_PHYSICAL
+#define LIBUSB_DT_HID_PHYSICAL              LIBUSB_DT_PHYSICAL
+#endif
+#ifndef LIBUSB_DT_CS_INTERFACE
+#define LIBUSB_DT_CS_INTERFACE              0x24
+#endif
+#ifndef LIBUSB_DT_CS_ENDPOINT
+#define LIBUSB_DT_CS_ENDPOINT               0x25
+#endif
+
 /** Video interface subclass code (A.2) */
 enum uvc_int_subclass_code {
   UVC_SC_UNDEFINED = 0x00,
@@ -228,6 +263,8 @@ struct uvc_device {
   struct uvc_context *ctx;
   int ref;
   libusb_device *usb_dev;
+  /* Pre-opened handle from libusb_wrap_sys_device(); consumed by uvc_open(). */
+  libusb_device_handle *wrapped_usb_devh;
 };
 
 typedef struct uvc_device_info {

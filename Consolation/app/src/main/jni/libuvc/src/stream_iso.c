@@ -401,12 +401,6 @@ static void _uvc_diag_iso_packet_shape(uvc_stream_handle_t *strmh,
 			 LIBUVC_STREAM_XFER_TIMEOUT_MS);
 		 libusb_set_iso_packet_lengths(transfer, selected_packet_size);
  
-		 usb_ret = libusb_prealloc_iso_urbs(transfer);
-		 if (UNLIKELY(usb_ret != LIBUSB_SUCCESS)) {
-			 UVC_DEBUG("libusb_prealloc_iso_urbs failed: %d", usb_ret);
-			 _uvc_free_transfer(strmh, transfer_id);
-			 return UVC_ERROR_NO_MEM;
-		 }
 	 }
 
 	 return UVC_SUCCESS;
