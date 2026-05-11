@@ -53,3 +53,9 @@ planningMode.xml
 *.log
 
 .claude
+
+# Files dropped into libusb-1.0.29 by `make patch-libusb` — not tracked;
+# source of truth lives in patches/libusb-1.0.29-prealloc/
+Consolation/app/src/main/jni/libusb-1.0.29/.prealloc-applied
+Consolation/app/src/main/jni/libusb-1.0.29/libusb/os/libusb_prealloc_ext.c
+Consolation/app/src/main/jni/libusb-1.0.29/libusb/libusb_prealloc.h

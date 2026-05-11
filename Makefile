@@ -1,4 +1,4 @@
-.PHONY: build build-release test lint clean clean-build clear-config-cache generate-android-build-info generate-android-build-info-manual debug-autostart-on debug-autostart-off
+.PHONY: build build-release test lint clean clean-build clear-config-cache generate-android-build-info generate-android-build-info-manual debug-autostart-on debug-autostart-off patch-libusb
 
 APP_NAME := Consolation
 APP_VERSION ?= $(shell awk -F= '/^consolation\.build\.version=/{print $$2}' build.properties)
@@ -23,10 +23,23 @@ DEBUG_AUTOSTART_FILE := Consolation/app/src/debug/java/org/centennialoss/consola
 # Set JAVA_HOME to the Android Studio bundled JDK
 export JAVA_HOME := /Applications/Android Studio.app/Contents/jbr/Contents/Home
 
-build: test
+LIBUSB_DIR    := Consolation/app/src/main/jni/libusb-1.0.29
+PREALLOC_DIR  := patches/libusb-1.0.29-prealloc
+PREALLOC_SENTINEL := $(LIBUSB_DIR)/.prealloc-applied
+
+patch-libusb: $(PREALLOC_SENTINEL)
+
+$(PREALLOC_SENTINEL):
+	patch --forward --batch -p1 \
+		< $(PREALLOC_DIR)/libusb-1.0.29-prealloc.patch
+	cp $(PREALLOC_DIR)/libusb_prealloc_ext.c $(LIBUSB_DIR)/libusb/os/
+	cp $(PREALLOC_DIR)/libusb_prealloc.h     $(LIBUSB_DIR)/libusb/
+	touch $(PREALLOC_SENTINEL)
+
+build: patch-libusb test
 	cd Consolation && ./gradlew :app:assembleDebug
 
-build-release: test
+build-release: patch-libusb test
 	cd Consolation && ./gradlew :app:assembleRelease
 	mv "$(RELEASE_APK_PATH)/app-release.apk" "$(RELEASE_APK_PATH)/$(APP_NAME)-$(APP_VERSION)-android.apk"
 

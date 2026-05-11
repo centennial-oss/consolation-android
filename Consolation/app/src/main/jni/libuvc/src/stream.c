@@ -945,7 +945,8 @@ void _uvc_stream_callback(struct libusb_transfer *transfer) {
 	}
 
 	if (LIKELY(strmh->running && resubmit)) {
-		libusb_submit_transfer(transfer);
+		if (UNLIKELY(libusb_submit_transfer(transfer) != LIBUSB_SUCCESS))
+			_uvc_delete_transfer(transfer);
 	} else if (!keep_transfer) {
 		// XXX delete non-reusing transfer
 		// real implementation of deleting transfer moves to _uvc_delete_transfer
