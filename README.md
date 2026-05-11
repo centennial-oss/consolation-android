@@ -91,7 +91,7 @@ We _may_ publish our own separate disconnected fork of UVCCamera - specific to A
 #### Rationale for Upstreaming Declination
 
 * libuvc has not been updated in nearly 3 years with dozens of open PRs piling up, so it is unlikely that our overhaul would ever be incorporated into that apparently dormant or abandoned project.
-* Alexey's UVCCamera fork has gained little traction since its creation in late 2024, is largely unchanged from Saki's original project excecpt the addition of a flutter plugin, and has not seen a new release in over a year (and just a few months after the fork was created). It appears to be headed towards dormancy.
+* Alexey's UVCCamera fork has gained little traction since its creation in late 2024, is largely unchanged from Saki's original project except for the addition of a flutter plugin, and has not seen a new release in over a year (and just a few months after the fork was created). It appears to be headed towards dormancy.
 
 ## Contributor Disclosure
 
