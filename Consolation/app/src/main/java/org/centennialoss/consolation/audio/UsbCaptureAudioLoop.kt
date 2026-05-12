@@ -110,7 +110,7 @@ class UsbCaptureAudioLoop(
         val inputCapture: AudioRecord? = try {
             AudioRecord.Builder()
                 .setContext(appContext)
-                .setAudioSource(MediaRecorder.AudioSource.DEFAULT)
+                .setAudioSource(MediaRecorder.AudioSource.UNPROCESSED)
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
