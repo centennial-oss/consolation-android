@@ -102,6 +102,7 @@ class MainActivity : ComponentActivity() {
     private var resolutionProbeJob: Job? = null
     private var probingResolutionDeviceId: String? = null
     private var isResolutionProbeInProgress = false
+    private var isPlayActionInProgress = false
     private var autoStartPlaybackJob: Job? = null
 
     // Settings
@@ -140,21 +141,33 @@ class MainActivity : ComponentActivity() {
     private val requestCameraRecordForWatch = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
-        val pending = selectedDevice ?: return@registerForActivityResult
-        if (!hasRuntimeCameraPermission() && results[Manifest.permission.CAMERA] != true) {
-            pendingRuntimePermissionAction = null
+        val action = pendingRuntimePermissionAction
+        pendingRuntimePermissionAction = null
+        val pending = selectedDevice
+        if (pending == null) {
             startWatchAfterUsbPermission = false
+            setPlayActionInProgress(false)
+            return@registerForActivityResult
+        }
+        if (!hasRuntimeCameraPermission() && results[Manifest.permission.CAMERA] != true) {
+            startWatchAfterUsbPermission = false
+            setPlayActionInProgress(false)
             showMessage(getString(R.string.message_camera_permission_required_for_usb))
             return@registerForActivityResult
         }
-        when (pendingRuntimePermissionAction) {
+        if (!hasRuntimeRecordAudioPermission() && results[Manifest.permission.RECORD_AUDIO] != true) {
+            startWatchAfterUsbPermission = false
+            setPlayActionInProgress(false)
+            showMessage(getString(R.string.message_runtime_perms_for_watch))
+            return@registerForActivityResult
+        }
+        when (action) {
             RuntimePermissionAction.REQUEST_USB_PERMISSION -> requestUsbPermissionForSelection(autoStartAfterGrant = false)
             RuntimePermissionAction.START_WATCH -> lifecycleScope.launch {
                 startWatchSession(pending)
             }
             null -> Unit
         }
-        pendingRuntimePermissionAction = null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -404,12 +417,14 @@ class MainActivity : ComponentActivity() {
 
         if (!hasRuntimeCameraPermission() || !hasRuntimeRecordAudioPermission()) {
             pendingRuntimePermissionAction = RuntimePermissionAction.START_WATCH
+            setPlayActionInProgress(true)
             requestCameraRecordForWatch.launch(
                 arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
             )
             return
         }
 
+        setPlayActionInProgress(true)
         lifecycleScope.launch {
             startWatchSession(device)
         }
@@ -490,6 +505,7 @@ class MainActivity : ComponentActivity() {
                             cancelPermissionTimeout()
                             startWatchAfterUsbPermission = false
                             captureEngine.setFailed(getString(R.string.message_permission_denied))
+                            setPlayActionInProgress(false)
                             showMessage(getString(R.string.message_permission_denied))
                             updateStartupActions()
                         }
@@ -501,6 +517,9 @@ class MainActivity : ComponentActivity() {
 
     private fun updateUiForState(devices: List<CaptureDevice>, state: CaptureState) {
         val isRunning = state is CaptureState.Running
+        if (isRunning || (isPlayActionInProgress && state is CaptureState.Failed)) {
+            setPlayActionInProgress(false)
+        }
         updateSystemUiForPlayback(isRunning)
         binding.startupScreen.root.isVisible = !isRunning
         binding.playbackControls.root.isVisible = isRunning
@@ -625,6 +644,20 @@ class MainActivity : ComponentActivity() {
             selectedDeviceCompatibilityIssue() != null
     }
 
+    private fun setPlayActionInProgress(inProgress: Boolean) {
+        if (isPlayActionInProgress == inProgress) {
+            return
+        }
+        isPlayActionInProgress = inProgress
+        updateStartupActions()
+    }
+
+    private fun failPlayActionStartup(message: String) {
+        setPlayActionInProgress(false)
+        captureEngine.setFailed(message)
+        showMessage(message)
+    }
+
     private fun updateStartupActions() {
         val device = selectedDevice
         val hasDevice = device != null
@@ -660,7 +693,8 @@ class MainActivity : ComponentActivity() {
         binding.startupScreen.resolutionInputLayout.isVisible = hasUsbPermission
         binding.startupScreen.requestUsbPermissionButton.isVisible = hasDevice && !hasUsbPermission
         binding.startupScreen.requestUsbPermissionButton.isEnabled = !isRequestingPermission
-        binding.startupScreen.playButton.isEnabled = hasDevice && hasUsbPermission && hasResolution
+        binding.startupScreen.playButton.isEnabled =
+            hasDevice && hasUsbPermission && hasResolution && !isPlayActionInProgress
         binding.startupScreen.playButton.alpha =
             if (binding.startupScreen.playButton.isEnabled) 1.0f else 0.4f
     }
@@ -1685,93 +1719,109 @@ class MainActivity : ComponentActivity() {
     }
 
     private suspend fun startWatchSession(device: CaptureDevice) {
-        if (!deviceRepository.hasPermission(device)) {
-            startUsbPermissionRequest(device, autoStartAfterGrant = true)
-            return
-        }
-        waitForRecentUsbPermissionSettle()
-
-        val snapshotFormat = selectedFormat
-        val snapshotProbedEmpty = probedFormatSizes.isEmpty()
-
-        val prep = withContext(Dispatchers.IO) {
-            previewBackend.configureSession(device)
-
-            var format = snapshotFormat
-            var newProbed: List<Size>? = null
-            var pixelPreference = selectedPixelFormatPreference
-            if (format == null || snapshotProbedEmpty) {
-                newProbed = previewBackend.probeSupportedSizes(device)
-                val remembered = loadRememberedFormat(device, newProbed, newProbed)
-                val seed =
-                    remembered?.first
-                        ?: pickDefaultFormat(newProbed, DeviceCompatibilityIssues.issueFor(device), newProbed)
-                        ?: newProbed.firstOrNull()?.let { Size(it) }
-                pixelPreference = remembered?.second ?: PixelFormatPreference.AUTO
-                format = seed?.let {
-                    resolveFormatChoiceForPreference(
-                        newProbed,
-                        it.width,
-                        it.height,
-                        pixelPreference,
-                        requestedFps = try {
-                            it.getCurrentFrameRate()
-                        } catch (_: Exception) {
-                            null
-                        },
-                        reportedProbeSizes = newProbed,
-                    )
-                } ?: seed
+        try {
+            if (!deviceRepository.hasPermission(device)) {
+                startUsbPermissionRequest(device, autoStartAfterGrant = true)
+                return
             }
-            if (format == null) {
-                return@withContext WatchSessionPrep(null, newProbed ?: emptyList(), pixelPreference)
+            waitForRecentUsbPermissionSettle()
+
+            val snapshotFormat = selectedFormat
+            val snapshotProbedEmpty = probedFormatSizes.isEmpty()
+
+            val prep = withContext(Dispatchers.IO) {
+                previewBackend.configureSession(device)
+
+                var format = snapshotFormat
+                var newProbed: List<Size>? = null
+                var pixelPreference = selectedPixelFormatPreference
+                if (format == null || snapshotProbedEmpty) {
+                    newProbed = previewBackend.probeSupportedSizes(device)
+                    val remembered = loadRememberedFormat(device, newProbed, newProbed)
+                    val seed =
+                        remembered?.first
+                            ?: pickDefaultFormat(newProbed, DeviceCompatibilityIssues.issueFor(device), newProbed)
+                            ?: newProbed.firstOrNull()?.let { Size(it) }
+                    pixelPreference = remembered?.second ?: PixelFormatPreference.AUTO
+                    format = seed?.let {
+                        resolveFormatChoiceForPreference(
+                            newProbed,
+                            it.width,
+                            it.height,
+                            pixelPreference,
+                            requestedFps = try {
+                                it.getCurrentFrameRate()
+                            } catch (_: Exception) {
+                                null
+                            },
+                            reportedProbeSizes = newProbed,
+                        )
+                    } ?: seed
+                }
+                if (format == null) {
+                    return@withContext WatchSessionPrep(null, newProbed ?: emptyList(), pixelPreference)
+                }
+
+                val fps = try {
+                    format.getCurrentFrameRate().roundToInt().coerceAtLeast(1)
+                } catch (_: Exception) {
+                    30
+                }
+                // Keep runtime request aligned with the already-resolved concrete Size so AUTO
+                // never asks backend for a format unavailable at the selected resolution/fps.
+                val runtimeFrameFormat = when (pixelPreference) {
+                    PixelFormatPreference.AUTO -> format.frame_type
+                    else -> pixelPreference.frameFormat ?: format.frame_type
+                }
+                previewBackend.setPreferredPixelFormat(runtimeFrameFormat)
+                previewBackend.setPreviewSize(format.width, format.height, fps)
+
+                WatchSessionPrep(format, newProbed, pixelPreference)
             }
 
-            val fps = try {
-                format.getCurrentFrameRate().roundToInt().coerceAtLeast(1)
-            } catch (_: Exception) {
-                30
+            if (prep.format == null) {
+                prep.probedUpdate?.let {
+                    probedFormatSizesReported = it
+                    probedFormatSizes = applyDebugUnsafeFormatSynthesis(it)
+                }
+                selectedFormat = null
+                setPlayActionInProgress(false)
+                showMessage(getString(R.string.state_no_formats))
+                return
             }
-            // Keep runtime request aligned with the already-resolved concrete Size so AUTO
-            // never asks backend for a format unavailable at the selected resolution/fps.
-            val runtimeFrameFormat = when (pixelPreference) {
-                PixelFormatPreference.AUTO -> format.frame_type
-                else -> pixelPreference.frameFormat ?: format.frame_type
-            }
-            previewBackend.setPreferredPixelFormat(runtimeFrameFormat)
-            previewBackend.setPreviewSize(format.width, format.height, fps)
 
-            WatchSessionPrep(format, newProbed, pixelPreference)
-        }
-
-        if (prep.format == null) {
             prep.probedUpdate?.let {
                 probedFormatSizesReported = it
                 probedFormatSizes = applyDebugUnsafeFormatSynthesis(it)
             }
-            selectedFormat = null
-            showMessage(getString(R.string.state_no_formats))
-            return
-        }
+            selectedFormat = prep.format
+            selectedPixelFormatPreference = prep.pixelPreference
+            persistFormatForDevice(device, prep.format, selectedPixelFormatPreference)
 
-        prep.probedUpdate?.let {
-            probedFormatSizesReported = it
-            probedFormatSizes = applyDebugUnsafeFormatSynthesis(it)
+            updateAspectRatio(prep.format.width, prep.format.height)
+            hasRetriedConnectingSession = false
+            captureEngine.startWatching(device)
+            binding.startupScreen.root.isVisible = false
+            binding.playbackControls.root.isVisible = true
+            previewTexture.isVisible = true
+            previewTexture.doOnLayout {
+                try {
+                    previewBackend.bindPreviewSurface(previewTexture)
+                } catch (e: Exception) {
+                    Log.e(PLAYBACK_DIAG_TAG, "bindPreviewSurface failed", e)
+                    failConnectingSession(getString(R.string.message_uvc_open_failed))
+                }
+            }
+            startConnectingWatchdog(device, prep.format)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            if (captureEngine.state.value !is CaptureState.Running) {
+                setPlayActionInProgress(false)
+            }
+            throw e
+        } catch (e: Exception) {
+            Log.e(PLAYBACK_DIAG_TAG, "startWatchSession failed", e)
+            failPlayActionStartup(getString(R.string.message_uvc_open_failed))
         }
-        selectedFormat = prep.format
-        selectedPixelFormatPreference = prep.pixelPreference
-        persistFormatForDevice(device, prep.format, selectedPixelFormatPreference)
-
-        updateAspectRatio(prep.format.width, prep.format.height)
-        hasRetriedConnectingSession = false
-        captureEngine.startWatching(device)
-        binding.startupScreen.root.isVisible = false
-        binding.playbackControls.root.isVisible = true
-        previewTexture.isVisible = true
-        previewTexture.doOnLayout {
-            previewBackend.bindPreviewSurface(previewTexture)
-        }
-        startConnectingWatchdog(device, prep.format)
     }
 
     private fun startConnectingWatchdog(device: CaptureDevice, format: Size) {
@@ -1796,6 +1846,7 @@ class MainActivity : ComponentActivity() {
     private fun failConnectingSession(message: String) {
         cancelConnectingWatchdog()
         hasRetriedConnectingSession = false
+        setPlayActionInProgress(false)
         lifecycleScope.launch(Dispatchers.IO) {
             // Force a hard native reset before returning to startup so the next Play attempt
             // does not block in stopUvcStreamingBlocking waiting for a wedged teardown.
@@ -1824,6 +1875,7 @@ class MainActivity : ComponentActivity() {
         if (!didStartRequest) {
             startWatchAfterUsbPermission = false
             captureEngine.setFailed(getString(R.string.message_permission_request_start_failed))
+            setPlayActionInProgress(false)
             showMessage(getString(R.string.message_permission_request_start_failed))
             return
         }
@@ -1838,6 +1890,7 @@ class MainActivity : ComponentActivity() {
             delay(10000)
             if (captureEngine.state.value is CaptureState.RequestingPermission) {
                 captureEngine.setFailed(getString(R.string.message_permission_request_timeout))
+                setPlayActionInProgress(false)
                 showMessage(getString(R.string.message_permission_request_timeout))
             }
         }
