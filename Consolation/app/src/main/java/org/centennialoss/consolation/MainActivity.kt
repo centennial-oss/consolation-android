@@ -292,7 +292,7 @@ class MainActivity : ComponentActivity() {
                     "stop stopWatching done ms=${android.os.SystemClock.elapsedRealtime() - t0}",
                 )
                 withContext(Dispatchers.IO) {
-                    previewBackend.unbindPreviewSurface()
+                    previewBackend.unbindPreviewSurfaceBlocking()
                 }
                 Log.i(
                     PLAYBACK_DIAG_TAG,

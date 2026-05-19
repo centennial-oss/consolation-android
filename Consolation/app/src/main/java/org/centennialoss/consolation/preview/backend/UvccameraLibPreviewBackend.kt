@@ -300,6 +300,12 @@ class UvccameraLibPreviewBackend(
         stopUvcStreamingAsync()
     }
 
+    override fun unbindPreviewSurfaceBlocking() {
+        textureView?.surfaceTextureListener = null
+        textureView = null
+        stopUvcStreamingBlocking()
+    }
+
     /**
      * [surface] must be the active TextureView surface (typically obtained on the main thread).
      */
@@ -1072,12 +1078,7 @@ class UvccameraLibPreviewBackend(
         if (dev != null) {
             runCatching {
                 ensureUsbMonitor().releaseCachedDevice(dev)
-                Thread.sleep(POST_USB_RELEASE_SETTLE_MS)
-                val resetRc = kernelUsbResetIfPossible(dev)
-                if (resetRc != 0) {
-                    Log.w(logTag, "playback: USBFS_RESET on stop rc=$resetRc")
-                }
-            }.onFailure { Log.e(logTag, "playback: USB reset on stop failed", it) }
+            }.onFailure { Log.e(logTag, "playback: release cached USB device on stop failed", it) }
         }
         
         Log.i(

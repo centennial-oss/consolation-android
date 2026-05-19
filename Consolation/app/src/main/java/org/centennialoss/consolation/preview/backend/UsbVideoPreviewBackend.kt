@@ -62,6 +62,14 @@ interface UsbVideoPreviewBackend : PreviewRenderer {
     fun dispose()
 
     /**
+     * Detach the preview surface and wait until native preview teardown has drained.
+     * Use from a background thread for explicit user Stop actions.
+     */
+    fun unbindPreviewSurfaceBlocking() {
+        unbindPreviewSurface()
+    }
+
+    /**
      * Call when the USB capture device was removed during an active session so cached connections
      * can be abandoned immediately (before async preview teardown).
      */
