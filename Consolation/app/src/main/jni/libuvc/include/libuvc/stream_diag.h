@@ -11,11 +11,7 @@
 #include <libusb/libusb.h>
 
 #ifndef UVC_RUNTIME_DIAG_ENABLED
-#if defined(NDEBUG)
 #define UVC_RUNTIME_DIAG_ENABLED 0
-#else
-#define UVC_RUNTIME_DIAG_ENABLED 1
-#endif
 #endif
 
 #if UVC_RUNTIME_DIAG_ENABLED

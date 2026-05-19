@@ -37,6 +37,15 @@ val appVersionName: String =
 val nativeReleaseInDebug: Boolean =
     findProperty("consolation.uvccamera.nativeReleaseInDebug")?.toString()?.toBoolean() == true
 
+val debugNativeUvcRuntimeDiag: Boolean =
+    Regex("""ENABLE_UVC_RUNTIME_DIAG\s*=\s*1""")
+        .containsMatchIn(
+            project.file("src/debug/java/org/centennialoss/consolation/DebugAutoStartPlayback.kt")
+                .takeIf { it.exists() }
+                ?.readText()
+                .orEmpty()
+        )
+
 /** Optional isoch transfer ring depth for bundled libuvc (default 24 when unset). Range 3…128. */
 val libuvcNumTransferBufs: Int? =
     findProperty("consolation.libuvc.numTransferBuffers")?.toString()?.trim()?.toIntOrNull()
@@ -89,6 +98,13 @@ android {
 
     buildTypes {
         debug {
+            if (debugNativeUvcRuntimeDiag) {
+                externalNativeBuild {
+                    ndkBuild {
+                        arguments += listOf("APP_CFLAGS+=-DUVC_RUNTIME_DIAG_ENABLED=1")
+                    }
+                }
+            }
             if (nativeReleaseInDebug) {
                 isJniDebuggable = false
                 externalNativeBuild {

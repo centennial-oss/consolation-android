@@ -50,11 +50,7 @@
 #endif
 
 #ifndef UVC_RUNTIME_DIAG_ENABLED
-#if defined(NDEBUG)
 #define UVC_RUNTIME_DIAG_ENABLED 0
-#else
-#define UVC_RUNTIME_DIAG_ENABLED 1
-#endif
 #endif
 
 #if UVC_RUNTIME_DIAG_ENABLED
@@ -391,16 +387,21 @@ void UVCPreview::recordSurfaceCopyTiming(uint64_t duration_ns) {
 	pthread_mutex_unlock(&processing_stats_mutex);
 }
 
-void UVCPreview::recordEndToEndLatencyTiming(uint64_t start_ns, uint64_t end_ns) {
-	if (!start_ns || end_ns <= start_ns)
+void UVCPreview::recordEndToEndLatencyDuration(uint64_t duration_ns) {
+	if (!duration_ns)
 		return;
-	const uint64_t duration_ns = end_ns - start_ns;
 	pthread_mutex_lock(&processing_stats_mutex);
 	processingEndToEndLatencyCount++;
 	processingEndToEndLatencyTotalNs += duration_ns;
 	if (duration_ns > processingEndToEndLatencyMaxNs)
 		processingEndToEndLatencyMaxNs = duration_ns;
 	pthread_mutex_unlock(&processing_stats_mutex);
+}
+
+void UVCPreview::recordEndToEndLatencyTiming(uint64_t start_ns, uint64_t end_ns) {
+	if (!start_ns || end_ns <= start_ns)
+		return;
+	recordEndToEndLatencyDuration(end_ns - start_ns);
 }
 
 void UVCPreview::recordPayloadBytes(size_t bytes) {
@@ -895,7 +896,8 @@ int UVCPreview::stopPreview() {
 //**********************************************************************
 //
 //**********************************************************************
-int copyToSurface(uvc_frame_t *frame, ANativeWindow **window, uint64_t *after_post_ns);
+int copyToSurface(uvc_frame_t *frame, ANativeWindow **window,
+	uint64_t *frame_ready_ns = NULL, uint64_t *surface_wait_ns = NULL);
 
 void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args) {
 	UVCPreview *preview = reinterpret_cast<UVCPreview *>(vptr_args);
@@ -968,7 +970,8 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 		if (preview->frameMode != REQUEST_MODE_H264) {
 			const bool has_preview_callback = preview->hasPreviewFrameCallback();
 			const bool has_capture_consumers = preview->hasCaptureConsumers();
-			uint64_t preview_post_ns = 0;
+			uint64_t preview_ready_ns = 0;
+			uint64_t surface_wait_ns = 0;
 			bool preview_rendered = false;
 
 			if (UNLIKELY(preview->capture_thread_joinable)) {
@@ -976,10 +979,13 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 				if (LIKELY(rgbx)) {
 					pthread_mutex_lock(&preview->preview_mutex);
 					const uint64_t t_copy = processing_now_ns();
-					if (copyToSurface(rgbx, &preview->mPreviewWindow, &preview_post_ns) == 0) {
-						const uint64_t t_end = preview_post_ns ? preview_post_ns : processing_now_ns();
+					if (copyToSurface(rgbx, &preview->mPreviewWindow,
+							&preview_ready_ns, &surface_wait_ns) == 0) {
+						const uint64_t t_end = preview_ready_ns ? preview_ready_ns : processing_now_ns();
 						preview->recordSurfaceCopyTiming(t_end - t_copy);
-						preview->recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, t_end);
+						if (frame->arrival_monotonic_ns && t_end > frame->arrival_monotonic_ns + surface_wait_ns)
+							preview->recordEndToEndLatencyDuration(
+								t_end - frame->arrival_monotonic_ns - surface_wait_ns);
 					}
 					pthread_mutex_unlock(&preview->preview_mutex);
 
@@ -993,9 +999,13 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 			}
 
 			preview_rendered = preview->renderFrameDirectToSurface(frame,
-				&preview->mPreviewWindow, &preview->preview_mutex, &preview_post_ns);
-			if (preview_rendered && preview_post_ns)
-				preview->recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, preview_post_ns);
+				&preview->mPreviewWindow, &preview->preview_mutex,
+				&preview_ready_ns, &surface_wait_ns);
+			if (preview_rendered && preview_ready_ns
+					&& frame->arrival_monotonic_ns
+					&& preview_ready_ns > frame->arrival_monotonic_ns + surface_wait_ns)
+				preview->recordEndToEndLatencyDuration(
+					preview_ready_ns - frame->arrival_monotonic_ns - surface_wait_ns);
 
 			if (preview_rendered) {
 				if (!has_preview_callback && !has_capture_consumers)
@@ -1051,14 +1061,17 @@ uvc_frame_t *UVCPreview::createFrameNotification(uvc_frame_t *frame) {
 
 bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
 	ANativeWindow **window, pthread_mutex_t *window_mutex,
-	uint64_t *after_post_ns) {
+	uint64_t *frame_ready_ns, uint64_t *surface_wait_ns) {
 	bool rendered = false;
 
 	pthread_mutex_lock(window_mutex);
 	ANativeWindow *target = *window;
 	if (LIKELY(target)) {
 		ANativeWindow_Buffer buffer;
+		const uint64_t lock_start_ns = processing_now_ns();
 		if (LIKELY(ANativeWindow_lock(target, &buffer, NULL) == 0)) {
+			if (surface_wait_ns)
+				*surface_wait_ns += processing_now_ns() - lock_start_ns;
 			if (LIKELY(buffer.bits && buffer.width >= (int32_t) frame->width &&
 					buffer.height >= (int32_t) frame->height)) {
 				uvc_frame_t surface = {};
@@ -1094,10 +1107,10 @@ bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
 						frame->width,
 						frame->height);
 				}
+				if (rendered && frame_ready_ns)
+					*frame_ready_ns = processing_now_ns();
 			}
 			ANativeWindow_unlockAndPost(target);
-			if (rendered && after_post_ns)
-				*after_post_ns = processing_now_ns();
 		}
 	}
 	pthread_mutex_unlock(window_mutex);
@@ -1393,12 +1406,15 @@ static void copyFrame(const uint8_t *src, uint8_t *dest, const int row_bytes,
 
 // transfer specific frame data to the Surface(ANativeWindow)
 int copyToSurface(uvc_frame_t *frame, ANativeWindow **window,
-	uint64_t *after_post_ns = NULL) {
+	uint64_t *frame_ready_ns, uint64_t *surface_wait_ns) {
 	// ENTER();
 	int result = 0;
 	if (LIKELY(*window)) {
 		ANativeWindow_Buffer buffer;
+		const uint64_t lock_start_ns = processing_now_ns();
 		if (LIKELY(ANativeWindow_lock(*window, &buffer, NULL) == 0)) {
+			if (surface_wait_ns)
+				*surface_wait_ns += processing_now_ns() - lock_start_ns;
 			// source = frame data
 			const uint8_t *src = (uint8_t *)frame->data;
 			const uint32_t expected_step = frame->width * PREVIEW_PIXEL_BYTES;
@@ -1416,9 +1432,9 @@ int copyToSurface(uvc_frame_t *frame, ANativeWindow **window,
 			const int transfer_h =
 				std::min((int) frame->height, buffer.height);
 			copyFrame(src, dest, w, transfer_h, src_step, dest_step);
+			if (frame_ready_ns)
+				*frame_ready_ns = processing_now_ns();
 			ANativeWindow_unlockAndPost(*window);
-			if (after_post_ns)
-				*after_post_ns = processing_now_ns();
 		} else {
 			result = -1;
 		}
@@ -1449,11 +1465,15 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 				if (!b) {
 					pthread_mutex_lock(&preview_mutex);
 					const uint64_t t_copy = processing_now_ns();
-					uint64_t after_post_ns = 0;
-					if (copyToSurface(converted, window, &after_post_ns) == 0) {
-						const uint64_t t_end = after_post_ns ? after_post_ns : processing_now_ns();
+					uint64_t frame_ready_ns = 0;
+					uint64_t surface_wait_ns = 0;
+					if (copyToSurface(converted, window, &frame_ready_ns, &surface_wait_ns) == 0) {
+						const uint64_t t_end = frame_ready_ns ? frame_ready_ns : processing_now_ns();
 						recordSurfaceCopyTiming(t_end - t_copy);
-						recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, t_end);
+						if (frame->arrival_monotonic_ns
+								&& t_end > frame->arrival_monotonic_ns + surface_wait_ns)
+							recordEndToEndLatencyDuration(
+								t_end - frame->arrival_monotonic_ns - surface_wait_ns);
 					}
 					pthread_mutex_unlock(&preview_mutex);
 				} else {
@@ -1464,11 +1484,15 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 		} else {
 			pthread_mutex_lock(&preview_mutex);
 			const uint64_t t_copy = processing_now_ns();
-			uint64_t after_post_ns = 0;
-			if (copyToSurface(frame, window, &after_post_ns) == 0) {
-				const uint64_t t_end = after_post_ns ? after_post_ns : processing_now_ns();
+			uint64_t frame_ready_ns = 0;
+			uint64_t surface_wait_ns = 0;
+			if (copyToSurface(frame, window, &frame_ready_ns, &surface_wait_ns) == 0) {
+				const uint64_t t_end = frame_ready_ns ? frame_ready_ns : processing_now_ns();
 				recordSurfaceCopyTiming(t_end - t_copy);
-				recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, t_end);
+				if (frame->arrival_monotonic_ns
+						&& t_end > frame->arrival_monotonic_ns + surface_wait_ns)
+					recordEndToEndLatencyDuration(
+						t_end - frame->arrival_monotonic_ns - surface_wait_ns);
 			}
 			pthread_mutex_unlock(&preview_mutex);
 		}

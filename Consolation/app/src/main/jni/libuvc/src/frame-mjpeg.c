@@ -51,11 +51,7 @@
 extern uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes);
 
 #ifndef UVC_RUNTIME_DIAG_ENABLED
-#if defined(NDEBUG)
 #define UVC_RUNTIME_DIAG_ENABLED 0
-#else
-#define UVC_RUNTIME_DIAG_ENABLED 1
-#endif
 #endif
 
 #if UVC_RUNTIME_DIAG_ENABLED
@@ -254,7 +250,9 @@ static inline void insert_huff_tables(j_decompress_ptr dinfo) {
 #define MAX_READLINE 1
 #endif
 
-#define MJPEG_RGBX_READLINE 16
+#ifndef MJPEG_RGBX_READLINE
+#define MJPEG_RGBX_READLINE 64
+#endif
 
 /* Diagnostic/compat path: avoid carrying libjpeg decompressor state across
  * MJPEG frames.  If this fixes one card's flicker, make it device-scoped. */
@@ -613,6 +611,7 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 
 	dinfo->out_color_space = JCS_EXT_RGBX;
 	dinfo->dct_method = JDCT_IFAST;
+	dinfo->do_fancy_upsampling = FALSE;
 
 	jpeg_start_decompress(dinfo);
 

@@ -577,7 +577,13 @@ class UvccameraLibPreviewBackend(
             droppedFrames += processingStats.getOrElse(12) { 0L }.toInt()
             val perFrameLatencyMs = nsToMs(processingStats.getOrElse(1) { 0L })
             val avgQueuedFrames = processingStats.getOrElse(13) { 0L } / 1000.0
-            lastNativeEndToEndLatencyAvgMs = perFrameLatencyMs * (1.0 + avgQueuedFrames)
+            val frameInterval100ns = processingStats.getOrElse(25) { 0L }
+            val frameIntervalMs = when {
+                frameInterval100ns > 0L -> frameInterval100ns / 10_000.0
+                currentFpsConfigured > 0 -> 1000.0 / currentFpsConfigured.toDouble()
+                else -> 0.0
+            }
+            lastNativeEndToEndLatencyAvgMs = perFrameLatencyMs + (avgQueuedFrames * frameIntervalMs)
             lastNativeQueuedAvgFrames = avgQueuedFrames
             lastNativePayloadAvgKb = bytesToKb(processingStats.getOrElse(10) { 0L })
             lastNativePreviewConvAvgMs = nsToMs(processingStats.getOrElse(14) { 0L })

@@ -147,7 +147,8 @@ private:
 	static void uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args);
 	uvc_frame_t *convertPreviewFrameToRgbx(uvc_frame_t *frame);
 	bool renderFrameDirectToSurface(uvc_frame_t *frame, ANativeWindow **window,
-		pthread_mutex_t *window_mutex, uint64_t *before_post_ns = NULL);
+		pthread_mutex_t *window_mutex, uint64_t *frame_ready_ns = NULL,
+		uint64_t *surface_wait_ns = NULL);
 	uvc_frame_t *createFrameNotification(uvc_frame_t *frame);
 	void addPreviewFrame(uvc_frame_t *frame);
 	uvc_frame_t *waitPreviewFrame();
@@ -173,6 +174,7 @@ private:
 	void recordPreviewConversionTiming(uint64_t duration_ns);
 	void recordCallbackConversionTiming(uint64_t duration_ns);
 	void recordSurfaceCopyTiming(uint64_t duration_ns);
+	void recordEndToEndLatencyDuration(uint64_t duration_ns);
 	void recordEndToEndLatencyTiming(uint64_t start_ns, uint64_t end_ns);
 	void recordPayloadBytes(size_t bytes);
 	void recordPreviewQueueDepthSample(uint64_t depth_frames);
