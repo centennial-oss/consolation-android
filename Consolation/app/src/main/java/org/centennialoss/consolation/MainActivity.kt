@@ -2527,12 +2527,7 @@ class MainActivity : ComponentActivity() {
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         if (isPipEnabled && captureEngine.state.value is CaptureState.Running) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                enterPictureInPictureMode(PictureInPictureParams.Builder().build())
-            } else {
-                @Suppress("DEPRECATION")
-                enterPictureInPictureMode()
-            }
+            enterPictureInPictureMode(PictureInPictureParams.Builder().build())
         }
     }
 

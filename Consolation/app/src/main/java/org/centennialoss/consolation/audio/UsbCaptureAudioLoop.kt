@@ -133,11 +133,11 @@ class UsbCaptureAudioLoop(
             Log.w(routeLogTag, "$routeLogPrefix audio_loop_start failed_audiorecord_not_initialized")
             return false
         }
-        @Suppress("DEPRECATION")
-        val routed = inputCapture.setPreferredDevice(inputDevice)
+        inputCapture.preferredDevice = inputDevice
+        val routed = inputCapture.preferredDevice?.id == inputDevice.id
         Log.i(
             routeLogTag,
-            "$routeLogPrefix setPreferredDevice result=$routed preferred=${inputDevice.describeForRouteLog()}",
+            "$routeLogPrefix preferredDevice routed=$routed preferred=${inputDevice.describeForRouteLog()}",
         )
         if (!routed) {
             Log.w(logTag, "Could not route AudioRecord to USB input; capture may use wrong microphone.")

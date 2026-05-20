@@ -33,7 +33,6 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-import android.annotation.SuppressLint;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -49,7 +48,6 @@ import android.text.TextUtils;
 import android.util.Log;
 import android.util.SparseArray;
 
-import org.centennialoss.consolation.uvc.util.BuildCheck;
 import org.centennialoss.consolation.uvc.util.HandlerThreadHandler;
 
 public final class USBMonitor {
@@ -518,7 +516,7 @@ public final class USBMonitor {
 			if (ACTION_USB_PERMISSION.equals(action)) {
 				// when received the result of requesting USB permission
 				synchronized (USBMonitor.this) {
-					final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+					final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class);
 					if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
 						if (device != null) {
 							// get permission, call onConnect
@@ -530,12 +528,12 @@ public final class USBMonitor {
 					}
 				}
 			} else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
-				final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+				final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class);
 				updatePermission(device, hasPermission(device));
 				processAttach(device);
 			} else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
 				// when device removed
-				final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+				final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class);
 				if (device != null) {
 					UsbControlBlock ctrlBlock = mCtrlBlocks.remove(device);
 					if (ctrlBlock != null) {
@@ -688,7 +686,6 @@ public final class USBMonitor {
 	 * @param useNewAPI when true, also uses APIs available only on API 21+ or 23+ (some devices return null; behavior varies by hardware)
 	 * @return
 	 */
-	@SuppressLint("NewApi")
 	public static final String getDeviceKeyName(final UsbDevice device, final String serial, final boolean useNewAPI) {
 		if (device == null) return "";
 		final StringBuilder sb = new StringBuilder();
@@ -700,20 +697,17 @@ public final class USBMonitor {
 		if (!TextUtils.isEmpty(serial)) {
 			sb.append("#");	sb.append(serial);
 		}
-		if (useNewAPI && BuildCheck.isAndroid5()) {
+		if (useNewAPI) {
 			sb.append("#");
 			if (TextUtils.isEmpty(serial)) {
 				try {
 					sb.append(device.getSerialNumber());
 					sb.append("#");
-				} // API >= 21 & targetSdkVersion has to be <= 28
-				catch(SecurityException ignore) {}
+				} catch (SecurityException ignore) {}
 			}
-			sb.append(device.getManufacturerName());	sb.append("#");	// API >= 21
-			sb.append(device.getConfigurationCount());	sb.append("#");	// API >= 21
-			if (BuildCheck.isMarshmallow()) {
-				sb.append(device.getVersion());			sb.append("#");	// API >= 23
-			}
+			sb.append(device.getManufacturerName());	sb.append("#");
+			sb.append(device.getConfigurationCount());	sb.append("#");
+			sb.append(device.getVersion());			sb.append("#");
 		}
 //		if (DEBUG) Log.v(TAG, "getDeviceKeyName:" + sb.toString());
 		return sb.toString();
@@ -931,14 +925,10 @@ public final class USBMonitor {
 		info.clear();
 
 		if (device != null) {
-			if (BuildCheck.isLollipop()) {
-				info.manufacturer = device.getManufacturerName();
-				info.product = device.getProductName();
-				info.serial = device.getSerialNumber();
-			}
-			if (BuildCheck.isMarshmallow()) {
-				info.usb_version = device.getVersion();
-			}
+			info.manufacturer = device.getManufacturerName();
+			info.product = device.getProductName();
+			info.serial = device.getSerialNumber();
+			info.usb_version = device.getVersion();
 			if ((manager != null) && manager.hasPermission(device)) {
 				UsbDeviceConnection connection = null;
 				try {
