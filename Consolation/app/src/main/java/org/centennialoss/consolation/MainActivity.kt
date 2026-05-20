@@ -1,16 +1,13 @@
 package org.centennialoss.consolation
 
 import android.Manifest
-import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
-import android.graphics.Color
-import android.graphics.Outline
-import android.graphics.drawable.ColorDrawable
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -18,25 +15,79 @@ import android.app.PictureInPictureParams
 import android.content.res.Configuration
 import android.text.SpannableString
 import android.text.style.ForegroundColorSpan
-import android.util.TypedValue
 import android.view.ContextThemeWrapper
 import android.view.Menu
-import android.view.MotionEvent
 import android.view.TextureView
 import android.view.View
-import android.view.ViewOutlineProvider
 import android.view.WindowManager
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
-import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.PopupMenu as AppCompatPopupMenu
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.view.doOnLayout
 import androidx.core.view.isVisible
@@ -53,8 +104,6 @@ import org.centennialoss.consolation.capture.DeviceCompatibilityIssues
 import org.centennialoss.consolation.capture.NoopCaptureEngine
 import org.centennialoss.consolation.core.capture.CaptureDevice
 import org.centennialoss.consolation.core.capture.CaptureState
-import org.centennialoss.consolation.databinding.ActivityMainBinding
-import org.centennialoss.consolation.databinding.PlaybackControlsBinding
 import org.centennialoss.consolation.preview.backend.UsbVideoPreviewBackend
 import org.centennialoss.consolation.preview.backend.UsbVideoPreviewBackendFactory
 import org.centennialoss.consolation.usb.UsbCaptureDeviceRepository
@@ -67,19 +116,24 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
-import kotlin.math.roundToInt
 import java.util.Locale
+import kotlin.math.roundToInt
+
+private val ConsolationColorScheme = darkColorScheme(
+    primary = Color(0xFFCC11BB),
+    secondary = Color(0xFFCC11BB),
+)
 
 class MainActivity : ComponentActivity() {
-    private lateinit var binding: ActivityMainBinding
     private lateinit var previewTexture: TextureView
+    private lateinit var rootView: View
     private lateinit var deviceRepository: UsbCaptureDeviceRepository
     private lateinit var previewBackend: UsbVideoPreviewBackend
     private val captureEngine = NoopCaptureEngine()
 
     private lateinit var prefs: SharedPreferences
 
-    private var selectedDevice: CaptureDevice? = null
+    private var selectedDevice: CaptureDevice? by mutableStateOf(null)
 
     /** Raw formats from the last successful probe for the current device (independent of open camera). */
     private var probedFormatSizes: List<Size> = emptyList()
@@ -87,8 +141,8 @@ class MainActivity : ComponentActivity() {
     private var probedFormatSizesReported: List<Size> = emptyList()
 
     /** User choice: width, height, and frame interval index into [Size.fps]. */
-    private var selectedFormat: Size? = null
-    private var selectedPixelFormatPreference: PixelFormatPreference = PixelFormatPreference.AUTO
+    private var selectedFormat: Size? by mutableStateOf(null)
+    private var selectedPixelFormatPreference: PixelFormatPreference by mutableStateOf(PixelFormatPreference.AUTO)
 
     private var permissionTimeoutJob: Job? = null
     private var telemetryJob: Job? = null
@@ -101,27 +155,45 @@ class MainActivity : ComponentActivity() {
     private var lastResolutionRefreshHadUsbPermission: Boolean = false
     private var resolutionProbeJob: Job? = null
     private var probingResolutionDeviceId: String? = null
-    private var isResolutionProbeInProgress = false
-    private var isPlayActionInProgress = false
+    private var isResolutionProbeInProgress by mutableStateOf(false)
+    private var isPlayActionInProgress by mutableStateOf(false)
     private var autoStartPlaybackJob: Job? = null
 
     // Settings
-    private var isStatsVisible = false
-    private var statsPosition = StatsPosition.OFF
-    private var isLowFpsWarningEnabled = true
-    private var isDebugStatsEnabled = false
-    private var isPipEnabled = true
-    private var currentRotation = 0
-    private var isFlippedHorizontal = false
-    private var isFlippedVertical = false
-    private var currentZoom = 0
+    private var isStatsVisible by mutableStateOf(false)
+    private var statsPosition by mutableStateOf(StatsPosition.OFF)
+    private var isLowFpsWarningEnabled by mutableStateOf(true)
+    private var isDebugStatsEnabled by mutableStateOf(false)
+    private var isPipEnabled by mutableStateOf(true)
+    private var currentRotation by mutableIntStateOf(0)
+    private var isFlippedHorizontal by mutableStateOf(false)
+    private var isFlippedVertical by mutableStateOf(false)
+    private var currentZoom by mutableIntStateOf(0)
 
-    private var audioVolumePercent = 100
-    private var audioMuted = false
+    private var audioVolumePercent by mutableIntStateOf(100)
+    private var audioMuted by mutableStateOf(false)
     private var volumeBeforeMute = 100
 
     private var lowFpsBelowThresholdSinceMs: Long = 0L
     private var lastTelemetryLogAtMs: Long = 0L
+
+    private var devicesUi: List<CaptureDevice> by mutableStateOf(emptyList())
+    private var isPlaybackRunningUi by mutableStateOf(false)
+    private var areControlsVisible by mutableStateOf(false)
+    private var isConnectingVisible by mutableStateOf(false)
+    private var isLowFpsWarningVisible by mutableStateOf(false)
+    private var statsOverlayText by mutableStateOf("")
+    private var resolutionDropdownText by mutableStateOf("")
+    private var permissionNoticeText by mutableStateOf("")
+    private var showPermissionNotice by mutableStateOf(false)
+    private var showUsbPermissionButton by mutableStateOf(false)
+    private var canPlaySelection by mutableStateOf(false)
+    private var showResolutionPicker by mutableStateOf(false)
+    private var activeSheet: ActiveSheet? by mutableStateOf(null)
+    private var blockingErrorMessage: String? by mutableStateOf(null)
+    private var previewAspectRatio by mutableFloatStateOf(16f / 9f)
+
+    private enum class ActiveSheet { HELP, ABOUT, SETTINGS, COMPATIBILITY, LOW_FPS, AUDIO_FAILURE }
 
     enum class StatsPosition { OFF, BOTTOM_LEFT, BOTTOM_RIGHT }
     private enum class PixelFormatPreference(val prefValue: String, val frameFormat: Int?) {
@@ -146,18 +218,18 @@ class MainActivity : ComponentActivity() {
         val pending = selectedDevice
         if (pending == null) {
             startWatchAfterUsbPermission = false
-            setPlayActionInProgress(false)
+            updatePlayActionInProgress(false)
             return@registerForActivityResult
         }
         if (!hasRuntimeCameraPermission() && results[Manifest.permission.CAMERA] != true) {
             startWatchAfterUsbPermission = false
-            setPlayActionInProgress(false)
+            updatePlayActionInProgress(false)
             showMessage(getString(R.string.message_camera_permission_required_for_usb))
             return@registerForActivityResult
         }
         if (!hasRuntimeRecordAudioPermission() && results[Manifest.permission.RECORD_AUDIO] != true) {
             startWatchAfterUsbPermission = false
-            setPlayActionInProgress(false)
+            updatePlayActionInProgress(false)
             showMessage(getString(R.string.message_runtime_perms_for_watch))
             return@registerForActivityResult
         }
@@ -172,11 +244,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        previewTexture = binding.previewTexture
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         loadSettingsFromPrefs()
-        setContentView(binding.root)
 
         deviceRepository = UsbCaptureDeviceRepository(this)
         previewBackend = UsbVideoPreviewBackendFactory.create(this, deviceRepository)
@@ -184,13 +253,15 @@ class MainActivity : ComponentActivity() {
             showCaptureAudioFailureDialog()
         }
 
-        setupStartupScreen()
-        setupPlaybackControls()
-        setupMainTouchListener()
+        setContent {
+            MaterialTheme(colorScheme = ConsolationColorScheme) {
+                MainScreen()
+            }
+        }
+        rootView = window.decorView.findViewById(android.R.id.content)
         observeState()
 
         deviceRepository.refreshAfterUsbIntent(intent)
-        updatePreviewScale()
         updateSystemUiForPlayback(isPlaybackActive = false)
     }
 
@@ -209,7 +280,9 @@ class MainActivity : ComponentActivity() {
                 PLAYBACK_DIAG_TAG,
                 "activity onStart while running -> rebind preview surface",
             )
-            previewBackend.bindPreviewSurface(previewTexture)
+            if (::previewTexture.isInitialized) {
+                previewBackend.bindPreviewSurface(previewTexture)
+            }
             applyAudioVolumeFromUi()
         }
     }
@@ -232,176 +305,63 @@ class MainActivity : ComponentActivity() {
         deviceRepository.refreshAfterUsbIntent(intent)
     }
 
-    private fun setupStartupScreen() {
-        val startup = binding.startupScreen
-        val cornerPx =
-            TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 16f, resources.displayMetrics)
-        applyRoundedIconClip(startup.startupAppIcon, cornerPx)
-        startup.appVersionText.text = "v${AppBuildInfo.version}"
-
-        // ExposedDropdownMenu wires the end icon to AutoCompleteTextView.showDropDown(). Resolution
-        // uses a PopupMenu instead, so the default chevron toggled without opening anything; device
-        // benefits from an explicit showDropDown() when the field is not focusable.
-        startup.deviceInputLayout.setEndIconOnClickListener {
-            startup.deviceDropdown.showDropDown()
+    private fun selectDevice(device: CaptureDevice?) {
+        if (device?.id != selectedDevice?.id) {
+            selectedFormat = null
+            selectedPixelFormatPreference = PixelFormatPreference.AUTO
+            probedFormatSizes = emptyList()
+            probedFormatSizesReported = emptyList()
+            resolutionDropdownText = ""
         }
-        startup.resolutionInputLayout.setEndIconOnClickListener {
-            showResolutionFormatMenu(startup.resolutionDropdown)
-        }
-
-        startup.deviceDropdown.setOnItemClickListener { _, _, position, _ ->
-            val devices = deviceRepository.devices.value
-            val device = devices.getOrNull(position)
-            if (device?.id != selectedDevice?.id) {
-                selectedFormat = null
-                selectedPixelFormatPreference = PixelFormatPreference.AUTO
-                probedFormatSizes = emptyList()
-                probedFormatSizesReported = emptyList()
-                startup.resolutionDropdown.setText("", false)
-            }
-            selectedDevice = device
-            lastResolutionRefreshDeviceId = null
-            updateCompatibilityWarning()
-            refreshResolutions()
-        }
-
-        startup.compatibilityWarningButton.setOnClickListener {
-            selectedDeviceCompatibilityIssue()?.let { issue ->
-                showCompatibilityIssueDialog(issue)
-            }
-        }
-
-        startup.requestUsbPermissionButton.setOnClickListener {
-            requestUsbPermissionForSelection(autoStartAfterGrant = false)
-        }
-
-        startup.resolutionDropdown.setOnClickListener {
-            showResolutionFormatMenu(startup.resolutionDropdown)
-        }
-
-        startup.playButton.setOnClickListener {
-            handlePlayAction()
-        }
-
-        startup.helpButton.setOnClickListener { showHelpDialog() }
-        startup.aboutButton.setOnClickListener { showAboutDialog() }
+        selectedDevice = device
+        lastResolutionRefreshDeviceId = null
+        refreshResolutions()
+        updateStartupActions()
     }
 
-    private fun setupPlaybackControls() {
-        val controls = binding.playbackControls
-
-        controls.stopButton.setOnClickListener {
-            lifecycleScope.launch {
-                val t0 = android.os.SystemClock.elapsedRealtime()
-                cancelConnectingWatchdog()
-                hasRetriedConnectingSession = false
-                Log.i(
-                    PLAYBACK_DIAG_TAG,
-                    "stop tap → stopWatching first (UI) thread=${Thread.currentThread().name}",
-                )
-                captureEngine.stopWatching()
-                Log.i(
-                    PLAYBACK_DIAG_TAG,
-                    "stop stopWatching done ms=${android.os.SystemClock.elapsedRealtime() - t0}",
-                )
-                withContext(Dispatchers.IO) {
-                    previewBackend.unbindPreviewSurfaceBlocking()
-                }
-                Log.i(
-                    PLAYBACK_DIAG_TAG,
-                    "stop unbind+complete totalMs=${android.os.SystemClock.elapsedRealtime() - t0}",
-                )
+    private fun stopPlaybackFromControls() {
+        lifecycleScope.launch {
+            val t0 = android.os.SystemClock.elapsedRealtime()
+            cancelConnectingWatchdog()
+            hasRetriedConnectingSession = false
+            Log.i(
+                PLAYBACK_DIAG_TAG,
+                "stop tap → stopWatching first (UI) thread=${Thread.currentThread().name}",
+            )
+            captureEngine.stopWatching()
+            Log.i(
+                PLAYBACK_DIAG_TAG,
+                "stop stopWatching done ms=${android.os.SystemClock.elapsedRealtime() - t0}",
+            )
+            withContext(Dispatchers.IO) {
+                previewBackend.unbindPreviewSurfaceBlocking()
             }
+            Log.i(
+                PLAYBACK_DIAG_TAG,
+                "stop unbind+complete totalMs=${android.os.SystemClock.elapsedRealtime() - t0}",
+            )
         }
+    }
 
-        controls.muteButton.setOnClickListener {
-            audioMuted = !audioMuted
-            if (audioMuted) {
-                volumeBeforeMute = controls.volumeSeekBar.progress.coerceAtLeast(1)
-                controls.volumeSeekBar.progress = 0
-                applyAudioVolumeFromUi()
-            } else {
-                controls.volumeSeekBar.progress = volumeBeforeMute
-                applyAudioVolumeFromUi()
-            }
-            updateMuteButtonIcon(controls)
-            resetControlsTimer()
-            persistSettings()
+    private fun toggleMute() {
+        audioMuted = !audioMuted
+        if (audioMuted) {
+            volumeBeforeMute = audioVolumePercent.coerceAtLeast(1)
+        } else {
+            audioVolumePercent = volumeBeforeMute
         }
-
-        controls.volumeSeekBar.progress = if (audioMuted) 0 else audioVolumePercent
-        controls.volumeSeekBar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser && progress > 0) {
-                    audioMuted = false
-                }
-                if (!audioMuted) {
-                    audioVolumePercent = progress
-                }
-                applyAudioVolumeFromUi()
-                updateMuteButtonIcon(controls)
-            }
-
-            override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) {
-                resetControlsTimer()
-            }
-
-            override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) {
-                persistSettings()
-                resetControlsTimer()
-            }
-        })
-
-        controls.zoomSeekBar.progress = currentZoom
-        controls.zoomSeekBar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
-                currentZoom = progress
-                updatePreviewScale()
-            }
-
-            override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) {
-                resetControlsTimer()
-            }
-
-            override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) {
-                persistSettings()
-                resetControlsTimer()
-            }
-        })
-
-        updateMuteButtonIcon(controls)
-        controls.settingsButton.setOnClickListener { showSettingsMenu(it) }
+        applyAudioVolumeFromUi()
+        resetControlsTimer()
+        persistSettings()
     }
 
     private fun applyAudioVolumeFromUi() {
-        val controls = binding.playbackControls
         val linear = if (audioMuted) {
             0f
         } else {
-            (controls.volumeSeekBar.progress / 100f).coerceIn(0f, 1f)
+            (audioVolumePercent / 100f).coerceIn(0f, 1f)
         }
         previewBackend.setCaptureAudioVolume(linear)
-    }
-
-    private fun updateMuteButtonIcon(controls: PlaybackControlsBinding) {
-        controls.muteButton.setImageResource(
-            if (audioMuted || controls.volumeSeekBar.progress == 0) {
-                R.drawable.ic_volume_off
-            } else {
-                R.drawable.ic_volume_up
-            },
-        )
-    }
-
-    private fun setupMainTouchListener() {
-        binding.mainContainer.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN) {
-                if (captureEngine.state.value is CaptureState.Running) {
-                    showControls()
-                }
-            }
-            false
-        }
     }
 
     private fun handlePlayAction() {
@@ -417,14 +377,14 @@ class MainActivity : ComponentActivity() {
 
         if (!hasRuntimeCameraPermission() || !hasRuntimeRecordAudioPermission()) {
             pendingRuntimePermissionAction = RuntimePermissionAction.START_WATCH
-            setPlayActionInProgress(true)
+            updatePlayActionInProgress(true)
             requestCameraRecordForWatch.launch(
                 arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
             )
             return
         }
 
-        setPlayActionInProgress(true)
+        updatePlayActionInProgress(true)
         lifecycleScope.launch {
             startWatchSession(device)
         }
@@ -505,7 +465,7 @@ class MainActivity : ComponentActivity() {
                             cancelPermissionTimeout()
                             startWatchAfterUsbPermission = false
                             captureEngine.setFailed(getString(R.string.message_permission_denied))
-                            setPlayActionInProgress(false)
+                            updatePlayActionInProgress(false)
                             showMessage(getString(R.string.message_permission_denied))
                             updateStartupActions()
                         }
@@ -516,14 +476,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateUiForState(devices: List<CaptureDevice>, state: CaptureState) {
+        devicesUi = devices
         val isRunning = state is CaptureState.Running
+        isPlaybackRunningUi = isRunning
         if (isRunning || (isPlayActionInProgress && state is CaptureState.Failed)) {
-            setPlayActionInProgress(false)
+            updatePlayActionInProgress(false)
         }
         updateSystemUiForPlayback(isRunning)
-        binding.startupScreen.root.isVisible = !isRunning
-        binding.playbackControls.root.isVisible = isRunning
-        previewTexture.isVisible = isRunning
+        if (::previewTexture.isInitialized) {
+            previewTexture.isVisible = isRunning
+        }
         if (isRunning) {
             cancelAutoStartPlayback()
         }
@@ -534,12 +496,8 @@ class MainActivity : ComponentActivity() {
             hasRetriedConnectingSession = false
             lowFpsBelowThresholdSinceMs = 0L
             lastTelemetryLogAtMs = 0L
-            binding.lowFpsWarning.isVisible = false
-            binding.videoStatsOverlay.isVisible = false
-
-            val names = devices.map { it.displayName }
-            val adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, names)
-            binding.startupScreen.deviceDropdown.setAdapter(adapter)
+            isLowFpsWarningVisible = false
+            statsOverlayText = ""
 
             if (devices.isEmpty()) {
                 cancelAutoStartPlayback()
@@ -548,9 +506,7 @@ class MainActivity : ComponentActivity() {
                 selectedPixelFormatPreference = PixelFormatPreference.AUTO
                 probedFormatSizes = emptyList()
                 probedFormatSizesReported = emptyList()
-                binding.startupScreen.deviceDropdown.setText(getString(R.string.hint_no_capture_devices), false)
-                binding.startupScreen.resolutionDropdown.setText("", false)
-                updateCompatibilityWarning()
+                resolutionDropdownText = ""
                 updateStartupActions()
             } else {
                 if (selectedDevice == null || devices.none { it.id == selectedDevice!!.id }) {
@@ -560,8 +516,7 @@ class MainActivity : ComponentActivity() {
                     selectedPixelFormatPreference = PixelFormatPreference.AUTO
                     probedFormatSizes = emptyList()
                     probedFormatSizesReported = emptyList()
-                    binding.startupScreen.deviceDropdown.setText(selectedDevice?.name, false)
-                    binding.startupScreen.resolutionDropdown.setText("", false)
+                    resolutionDropdownText = ""
                     lastResolutionRefreshDeviceId = null
                 }
                 // Refresh selected device snapshot so updated display labels
@@ -569,8 +524,6 @@ class MainActivity : ComponentActivity() {
                 selectedDevice = selectedDevice?.let { current ->
                     devices.firstOrNull { it.id == current.id } ?: current
                 }
-                binding.startupScreen.deviceDropdown.setText(selectedDevice?.name, false)
-                updateCompatibilityWarning()
                 maybeRefreshResolutionsAfterDeviceOrPermissionChange()
                 updateStartupActions()
             }
@@ -585,9 +538,7 @@ class MainActivity : ComponentActivity() {
                     startConnectingWatchdog(dev, fmt)
                 }
             }
-            binding.playbackControls.volumeSeekBar.progress = if (audioMuted) 0 else audioVolumePercent
             applyAudioVolumeFromUi()
-            updateMuteButtonIcon(binding.playbackControls)
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
 
@@ -600,25 +551,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun replacePreviewTextureAfterUsbRemoval() {
-        val oldView = previewTexture
-        oldView.surfaceTextureListener = null
-        oldView.isVisible = false
-        val parent = oldView.parent as? ConstraintLayout ?: return
-        val index = parent.indexOfChild(oldView)
-        val params = oldView.layoutParams as ConstraintLayout.LayoutParams
-        parent.removeView(oldView)
-        previewTexture = TextureView(this).apply {
-            id = R.id.previewTexture
-            layoutParams = ConstraintLayout.LayoutParams(params)
-            isVisible = false
+        if (::previewTexture.isInitialized) {
+            previewTexture.surfaceTextureListener = null
+            previewTexture.isVisible = false
         }
-        parent.addView(previewTexture, index)
         updatePreviewScale()
     }
 
     private fun updateConnectingOverlay(isRunning: Boolean) {
-        binding.connectingCaptureCardLabel.isVisible =
-            isRunning && !previewBackend.hasReceivedFirstVideoFrame()
+        isConnectingVisible = isRunning && !previewBackend.hasReceivedFirstVideoFrame()
     }
 
     private fun cancelConnectingWatchdog() {
@@ -640,11 +581,10 @@ class MainActivity : ComponentActivity() {
         DeviceCompatibilityIssues.issueFor(selectedDevice)
 
     private fun updateCompatibilityWarning() {
-        binding.startupScreen.compatibilityWarningButton.isVisible =
-            selectedDeviceCompatibilityIssue() != null
+        // Compose reads selectedDeviceCompatibilityIssue() directly.
     }
 
-    private fun setPlayActionInProgress(inProgress: Boolean) {
+    private fun updatePlayActionInProgress(inProgress: Boolean) {
         if (isPlayActionInProgress == inProgress) {
             return
         }
@@ -653,7 +593,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun failPlayActionStartup(message: String) {
-        setPlayActionInProgress(false)
+        updatePlayActionInProgress(false)
         captureEngine.setFailed(message)
         showMessage(message)
     }
@@ -671,32 +611,20 @@ class MainActivity : ComponentActivity() {
         val showUsb2BandwidthWarning = hasDevice && !needsAccess && device?.usbCapabilityLabel == "USB 2"
         val isRequestingPermission = captureEngine.state.value is CaptureState.RequestingPermission
 
-        binding.startupScreen.permissionNoticeText.isVisible = needsAccess || showUsb2BandwidthWarning
-        binding.startupScreen.permissionNoticeDivider.isVisible = needsAccess || showUsb2BandwidthWarning
-        binding.startupScreen.permissionNoticeText.text = getString(
+        showPermissionNotice = needsAccess || showUsb2BandwidthWarning
+        permissionNoticeText = getString(
             if (showUsb2BandwidthWarning) {
                 R.string.startup_usb2_warning
             } else {
                 R.string.startup_permission_notice
             },
         )
-        binding.startupScreen.permissionNoticeText.setTextColor(
-            Color.parseColor(
-                if (showUsb2BandwidthWarning) {
-                    "#FFE082"
-                } else {
-                    "#CCFFFFFF"
-                },
-            ),
-        )
-        binding.startupScreen.resolutionLabel.isVisible = hasUsbPermission
-        binding.startupScreen.resolutionInputLayout.isVisible = hasUsbPermission
-        binding.startupScreen.requestUsbPermissionButton.isVisible = hasDevice && !hasUsbPermission
-        binding.startupScreen.requestUsbPermissionButton.isEnabled = !isRequestingPermission
-        binding.startupScreen.playButton.isEnabled =
+        showUsbPermissionButton = hasDevice && !hasUsbPermission
+        canPlaySelection =
             hasDevice && hasUsbPermission && hasResolution && !isPlayActionInProgress
-        binding.startupScreen.playButton.alpha =
-            if (binding.startupScreen.playButton.isEnabled) 1.0f else 0.4f
+        if (isRequestingPermission) {
+            showUsbPermissionButton = false
+        }
     }
 
     private fun refreshResolutions() {
@@ -720,8 +648,7 @@ class MainActivity : ComponentActivity() {
             resolutionProbeJob = null
             probingResolutionDeviceId = null
             isResolutionProbeInProgress = false
-            binding.startupScreen.resolutionDropdown.setAdapter(null)
-            binding.startupScreen.resolutionDropdown.setText("", false)
+            resolutionDropdownText = ""
             probedFormatSizes = emptyList()
             probedFormatSizesReported = emptyList()
             selectedFormat = null
@@ -746,11 +673,7 @@ class MainActivity : ComponentActivity() {
         probedFormatSizes = emptyList()
         probedFormatSizesReported = emptyList()
         updateStartupActions()
-        binding.startupScreen.resolutionDropdown.setAdapter(null)
-        binding.startupScreen.resolutionDropdown.setText(
-            getString(R.string.state_checking_formats),
-            false,
-        )
+        resolutionDropdownText = getString(R.string.state_checking_formats)
 
         Log.i(
             RESOLUTION_PROBE_TAG,
@@ -806,7 +729,7 @@ class MainActivity : ComponentActivity() {
                 }
                 selectedFormat = defaultFormat
                 val label = formatResolutionLabel(defaultFormat, selectedPixelFormatPreference)
-                binding.startupScreen.resolutionDropdown.setText(label, false)
+                resolutionDropdownText = label
                 updateStartupActions()
                 Log.i(
                     RESOLUTION_PROBE_TAG,
@@ -817,15 +740,12 @@ class MainActivity : ComponentActivity() {
                 val probeOpenFailed = previewBackend.consumeLastProbeOpenFailed()
                 selectedFormat = null
                 probedFormatSizesReported = emptyList()
-                binding.startupScreen.resolutionDropdown.setText(
-                    getString(
-                        if (probeOpenFailed) {
-                            R.string.state_probe_unavailable
-                        } else {
-                            R.string.state_no_formats
-                        },
-                    ),
-                    false,
+                resolutionDropdownText = getString(
+                    if (probeOpenFailed) {
+                        R.string.state_probe_unavailable
+                    } else {
+                        R.string.state_no_formats
+                    },
                 )
                 if (probeOpenFailed) {
                     showMessage(getString(R.string.message_uvc_open_failed))
@@ -894,6 +814,91 @@ class MainActivity : ComponentActivity() {
         autoStartPlaybackJob = null
     }
 
+    private data class ResolutionChoice(
+        val width: Int,
+        val height: Int,
+        val fps: Float,
+        val pixelPreference: PixelFormatPreference,
+        val unsafeDebug: Boolean,
+    )
+
+    private fun resolutionChoices(): List<ResolutionChoice> {
+        if (probedFormatSizes.isEmpty()) {
+            return emptyList()
+        }
+        val choices = mutableListOf<ResolutionChoice>()
+        val resolutionGroups = groupSizesByResolution(probedFormatSizes)
+        for (group in resolutionGroups) {
+            for (fps in group.fpsOptions) {
+                val formatOptions = supportedFormatPreferencesForResolutionAndFps(
+                    probedFormatSizes,
+                    group.width,
+                    group.height,
+                    fps,
+                )
+                if (formatOptions.isEmpty()) {
+                    continue
+                }
+                for (formatPreference in formatOptions) {
+                    val unsafeChoice = isDebugUnsafeFormatChoice(
+                        probedFormatSizesReported,
+                        group.width,
+                        group.height,
+                        fps,
+                        formatPreference,
+                    )
+                    choices += ResolutionChoice(
+                        group.width,
+                        group.height,
+                        fps,
+                        formatPreference,
+                        unsafeChoice,
+                    )
+                }
+            }
+        }
+        return choices
+    }
+
+    private fun selectResolutionChoice(choice: ResolutionChoice) {
+        val resolved = resolveFormatChoiceForPreference(
+            probedFormatSizes,
+            choice.width,
+            choice.height,
+            choice.pixelPreference,
+            requestedFps = choice.fps,
+            reportedProbeSizes = probedFormatSizesReported.takeIf {
+                choice.pixelPreference == PixelFormatPreference.AUTO
+            },
+        ) ?: return
+        selectedPixelFormatPreference = choice.pixelPreference
+        selectedFormat = resolved
+        selectedDevice?.let { device ->
+            persistFormatForDevice(device, selectedFormat!!, choice.pixelPreference)
+        }
+        resolutionDropdownText = formatResolutionLabel(selectedFormat!!, choice.pixelPreference)
+        updateStartupActions()
+    }
+
+    private fun showDeviceMenu(anchor: View) {
+        val popup = AppCompatPopupMenu(popupMenuContext(), anchor)
+        val menu = popup.menu
+        if (devicesUi.isEmpty()) {
+            menu.add(Menu.NONE, Menu.NONE, Menu.NONE, getString(R.string.hint_no_capture_devices))
+                .isEnabled = false
+        } else {
+            devicesUi.forEachIndexed { index, device ->
+                menu.add(Menu.NONE, index, Menu.NONE, device.displayName)
+            }
+        }
+        popup.setOnMenuItemClickListener { item ->
+            val device = devicesUi.getOrNull(item.itemId) ?: return@setOnMenuItemClickListener false
+            selectDevice(device)
+            true
+        }
+        popup.show()
+    }
+
     private fun showResolutionFormatMenu(anchor: View) {
         if (probedFormatSizes.isEmpty()) {
             refreshResolutions()
@@ -901,18 +906,11 @@ class MainActivity : ComponentActivity() {
         }
         val popup = AppCompatPopupMenu(popupMenuContext(), anchor)
         val menu = popup.menu
-        addMenuHeaderWithDivider(menu, "Resolution")
-        data class MenuChoice(
-            val width: Int,
-            val height: Int,
-            val fps: Float,
-            val pixelPreference: PixelFormatPreference,
-        )
-        val choiceIds = mutableMapOf<Int, MenuChoice>()
+        addMenuHeaderWithDivider(menu, getString(R.string.resolution_menu_resolution_header))
+        val choiceIds = mutableMapOf<Int, ResolutionChoice>()
         var nextId = MENU_ID_RESOLUTION_BASE
-        val resolutionGroups = groupSizesByResolution(probedFormatSizes)
         var addedOtherResolutionsHeader = false
-        for (group in resolutionGroups) {
+        for (group in groupSizesByResolution(probedFormatSizes)) {
             val isStandard = isStandardResolution(group.width, group.height)
             if (!isStandard && !addedOtherResolutionsHeader) {
                 addMenuHeaderWithDivider(menu, getString(R.string.menu_other_resolutions_header))
@@ -920,7 +918,7 @@ class MainActivity : ComponentActivity() {
             }
             val resolutionSub: Menu =
                 menu.addSubMenu(Menu.NONE, Menu.NONE, Menu.NONE, "${group.width}x${group.height}")
-            addMenuHeaderWithDivider(resolutionSub, "Frame Rate")
+            addMenuHeaderWithDivider(resolutionSub, getString(R.string.resolution_menu_frame_rate_header))
             for (fps in group.fpsOptions) {
                 val formatOptions = supportedFormatPreferencesForResolutionAndFps(
                     probedFormatSizes,
@@ -935,9 +933,9 @@ class MainActivity : ComponentActivity() {
                     Menu.NONE,
                     Menu.NONE,
                     Menu.NONE,
-                    "${fps.roundToInt()} fps",
+                    getString(R.string.resolution_menu_fps_item, fps.roundToInt()),
                 )
-                addMenuHeaderWithDivider(fpsSub, "Pixel Format")
+                addMenuHeaderWithDivider(fpsSub, getString(R.string.resolution_menu_pixel_format_header))
                 for (formatPreference in formatOptions) {
                     val unsafeChoice = isDebugUnsafeFormatChoice(
                         probedFormatSizesReported,
@@ -947,43 +945,32 @@ class MainActivity : ComponentActivity() {
                         formatPreference,
                     )
                     val id = nextId++
-                    choiceIds[id] = MenuChoice(group.width, group.height, fps, formatPreference)
+                    choiceIds[id] = ResolutionChoice(
+                        group.width,
+                        group.height,
+                        fps,
+                        formatPreference,
+                        unsafeChoice,
+                    )
                     fpsSub.add(Menu.NONE, id, Menu.NONE, formatMenuLabel(formatPreference, unsafeChoice))
                 }
             }
         }
         popup.setOnMenuItemClickListener { item ->
             val choice = choiceIds[item.itemId] ?: return@setOnMenuItemClickListener false
-            val resolved = resolveFormatChoiceForPreference(
-                probedFormatSizes,
-                choice.width,
-                choice.height,
-                choice.pixelPreference,
-                requestedFps = choice.fps,
-                reportedProbeSizes = probedFormatSizesReported.takeIf {
-                    choice.pixelPreference == PixelFormatPreference.AUTO
-                },
-            )
-                ?: return@setOnMenuItemClickListener false
-            selectedPixelFormatPreference = choice.pixelPreference
-            selectedFormat = resolved
-            selectedDevice?.let { device ->
-                persistFormatForDevice(device, selectedFormat!!, choice.pixelPreference)
-            }
-            binding.startupScreen.resolutionDropdown.setText(
-                formatResolutionLabel(selectedFormat!!, choice.pixelPreference),
-                false,
-            )
-            updateStartupActions()
+            selectResolutionChoice(choice)
             true
         }
         popup.show()
     }
 
+    private fun popupMenuContext(): Context =
+        ContextThemeWrapper(this, R.style.ThemeOverlay_Consolation_PopupMenu)
+
     private fun updateAspectRatio(width: Int, height: Int) {
-        val params = previewTexture.layoutParams as ConstraintLayout.LayoutParams
-        params.dimensionRatio = "$width:$height"
-        previewTexture.layoutParams = params
+        if (width > 0 && height > 0) {
+            previewAspectRatio = width.toFloat() / height.toFloat()
+        }
     }
 
     private fun startTelemetryLoop() {
@@ -1012,15 +999,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateStatsOverlay(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot) {
-        binding.videoStatsOverlay.isVisible = isStatsVisible && statsPosition != StatsPosition.OFF
-        if (binding.videoStatsOverlay.isVisible) {
-            binding.videoStatsOverlay.text = buildTelemetryOverlayCompactText(stats)
-            val params = binding.videoStatsOverlay.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-            params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-            params.horizontalBias = if (statsPosition == StatsPosition.BOTTOM_LEFT) 0f else 1f
-            binding.videoStatsOverlay.layoutParams = params
-        }
+        statsOverlayText =
+            if (isStatsVisible && statsPosition != StatsPosition.OFF && isPlaybackRunningUi) {
+                buildTelemetryOverlayCompactText(stats)
+            } else {
+                ""
+            }
     }
 
     private fun buildTelemetryOverlayCompactText(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot): String {
@@ -1107,7 +1091,7 @@ class MainActivity : ComponentActivity() {
     private fun updateLowFpsWarning(stats: org.centennialoss.consolation.core.telemetry.TelemetrySnapshot) {
         if (!previewBackend.hasReceivedFirstVideoFrame()) {
             lowFpsBelowThresholdSinceMs = 0L
-            binding.lowFpsWarning.isVisible = false
+            isLowFpsWarningVisible = false
             return
         }
         val configured = stats.configuredFps
@@ -1119,7 +1103,7 @@ class MainActivity : ComponentActivity() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (!isLowFpsWarningEnabled || !deltaOk) {
             lowFpsBelowThresholdSinceMs = 0L
-            binding.lowFpsWarning.isVisible = false
+            isLowFpsWarningVisible = false
             return
         }
         if (lowFpsBelowThresholdSinceMs == 0L) {
@@ -1127,27 +1111,14 @@ class MainActivity : ComponentActivity() {
         }
         val sustained = now - lowFpsBelowThresholdSinceMs >= LOW_FPS_SUSTAIN_MS
         val showWarning = sustained
-        binding.lowFpsWarning.isVisible = showWarning
-        if (showWarning) {
-            val params = binding.lowFpsWarning.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-            val statsBottomLeft = isStatsVisible && statsPosition == StatsPosition.BOTTOM_LEFT
-            if (statsBottomLeft) {
-                params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
-                params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-            } else {
-                params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
-            }
-            binding.lowFpsWarning.layoutParams = params
-            binding.lowFpsWarning.setOnClickListener { showLowFpsInfo() }
-        }
+        isLowFpsWarningVisible = showWarning
     }
 
     private fun showControls() {
         if (captureEngine.state.value is CaptureState.Running) {
             updateSystemUiForPlayback(isPlaybackActive = true)
         }
-        binding.playbackControls.root.isVisible = true
+        areControlsVisible = true
         resetControlsTimer()
     }
 
@@ -1155,515 +1126,43 @@ class MainActivity : ComponentActivity() {
         controlsAutoHideJob?.cancel()
         controlsAutoHideJob = lifecycleScope.launch {
             delay(3000)
-            binding.playbackControls.root.isVisible = false
+            areControlsVisible = false
         }
     }
 
     private fun updatePreviewScale() {
-        val maxScale = 1.175f * 1.5f
-        val baseScale = 1.0f + (currentZoom / 100.0f) * (maxScale - 1.0f)
-        previewTexture.scaleX = baseScale * (if (isFlippedHorizontal) -1f else 1f)
-        previewTexture.scaleY = baseScale * (if (isFlippedVertical) -1f else 1f)
-        previewTexture.rotation = currentRotation.toFloat()
+        // Compose applies scale/rotation from state.
     }
 
-    private fun showSettingsMenu(view: View) {
-        val popup = AppCompatPopupMenu(popupMenuContext(), view)
-        popup.menuInflater.inflate(R.menu.playback_settings, popup.menu)
-
-        val statsSubMenu = popup.menu.findItem(R.id.menu_show_stats)?.subMenu
-        statsSubMenu?.findItem(R.id.menu_show_stats_off)?.isChecked = statsPosition == StatsPosition.OFF
-        statsSubMenu?.findItem(R.id.menu_show_stats_left)?.isChecked = statsPosition == StatsPosition.BOTTOM_LEFT
-        statsSubMenu?.findItem(R.id.menu_show_stats_right)?.isChecked = statsPosition == StatsPosition.BOTTOM_RIGHT
-        statsSubMenu?.findItem(R.id.menu_low_fps_warning)?.isChecked = isLowFpsWarningEnabled
-        statsSubMenu?.findItem(R.id.menu_show_debug_stats)?.isChecked = isDebugStatsEnabled
-        popup.menu.findItem(R.id.menu_picture_in_picture)?.isChecked = isPipEnabled
-
-        popup.menu.findItem(R.id.menu_rotate_0)?.isChecked = currentRotation == 0
-        popup.menu.findItem(R.id.menu_rotate_90)?.isChecked = currentRotation == 90
-        popup.menu.findItem(R.id.menu_rotate_180)?.isChecked = currentRotation == 180
-        popup.menu.findItem(R.id.menu_rotate_270)?.isChecked = currentRotation == 270
-
-        popup.menu.findItem(R.id.menu_flip_h)?.isChecked = isFlippedHorizontal
-        popup.menu.findItem(R.id.menu_flip_v)?.isChecked = isFlippedVertical
-
-        popup.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                R.id.menu_show_stats_off -> {
-                    statsPosition = StatsPosition.OFF
-                    isStatsVisible = false
-                }
-                R.id.menu_show_stats_left -> {
-                    statsPosition = StatsPosition.BOTTOM_LEFT
-                    isStatsVisible = true
-                }
-                R.id.menu_show_stats_right -> {
-                    statsPosition = StatsPosition.BOTTOM_RIGHT
-                    isStatsVisible = true
-                }
-                R.id.menu_low_fps_warning -> {
-                    isLowFpsWarningEnabled = !isLowFpsWarningEnabled
-                    item.isChecked = isLowFpsWarningEnabled
-                    if (!isLowFpsWarningEnabled) {
-                        lowFpsBelowThresholdSinceMs = 0L
-                        binding.lowFpsWarning.isVisible = false
-                    }
-                }
-                R.id.menu_show_debug_stats -> {
-                    isDebugStatsEnabled = !isDebugStatsEnabled
-                    item.isChecked = isDebugStatsEnabled
-                }
-                R.id.menu_picture_in_picture -> {
-                    isPipEnabled = !isPipEnabled
-                    item.isChecked = isPipEnabled
-                    updatePipParams()
-                }
-                R.id.menu_rotate_0 -> {
-                    currentRotation = 0
-                    updatePreviewScale()
-                }
-                R.id.menu_rotate_90 -> {
-                    currentRotation = 90
-                    updatePreviewScale()
-                }
-                R.id.menu_rotate_180 -> {
-                    currentRotation = 180
-                    updatePreviewScale()
-                }
-                R.id.menu_rotate_270 -> {
-                    currentRotation = 270
-                    updatePreviewScale()
-                }
-                R.id.menu_flip_h -> {
-                    isFlippedHorizontal = item.isChecked
-                    updatePreviewScale()
-                }
-                R.id.menu_flip_v -> {
-                    isFlippedVertical = item.isChecked
-                    updatePreviewScale()
-                }
-                R.id.menu_help -> showHelpDialog()
-                R.id.menu_about -> showAboutDialog()
-                else -> return@setOnMenuItemClickListener false
-            }
-            if (
-                item.itemId == R.id.menu_show_stats_off ||
-                item.itemId == R.id.menu_show_stats_left ||
-                item.itemId == R.id.menu_show_stats_right ||
-                item.itemId == R.id.menu_show_debug_stats
-            ) {
-                updateStatsOverlay(previewBackend.getTelemetry())
-            }
-            persistSettings()
-            true
-        }
-        popup.show()
+    private fun showSettingsDialog() {
+        activeSheet = ActiveSheet.SETTINGS
     }
 
     private fun showHelpDialog() {
-        val content = modalPanel()
-        content.addView(modalHeader(getString(R.string.help_title), iconSizeDp = 48))
-        content.addView(modalDivider())
-
-        content.addView(helpSection("play.circle", R.string.help_getting_started_title, R.string.help_getting_started_body))
-        content.addView(helpSection("figure.run", R.string.help_frame_rate_title, R.string.help_frame_rate_body))
-        content.addView(helpSection("view", R.string.help_video_controls_title, R.string.help_video_controls_body))
-        content.addView(helpSection("volume", R.string.help_audio_controls_title, R.string.help_audio_controls_body))
-        content.addView(helpSection("usb", R.string.help_device_support_title, R.string.help_device_support_body))
-
-        content.addView(modalDivider())
-        showModal(content, widthDp = 640)
+        activeSheet = ActiveSheet.HELP
     }
 
     private fun showAboutDialog() {
-        val content = modalPanel()
-        content.addView(modalHeader(getString(R.string.about_title), subtitle = getString(R.string.about_copyright), iconSizeDp = 64))
-        content.addView(modalBody(getString(R.string.about_trademark_body), topMarginDp = 18))
-        content.addView(modalDivider())
-        content.addView(aboutRow("play", getString(R.string.about_utility_body)))
-        content.addView(aboutRow("warning", getString(R.string.about_uvc_required_body)))
-        content.addView(aboutRow("shield", getString(R.string.about_privacy_body)))
-        content.addView(aboutRow("heart", getString(R.string.about_open_source_body)))
-        content.addView(buildInfoSection())
-        content.addView(modalDivider())
-        showModal(
-            content,
-            widthDp = 635,
-            leadingActions = listOf(
-                modalExternalLinkButton(getString(R.string.about_github_button)) {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GITHUB_URL)))
-                },
-                modalExternalLinkButton(getString(R.string.about_privacy_policy_button)) {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL)))
-                },
-            ),
-        )
+        activeSheet = ActiveSheet.ABOUT
     }
 
     private fun showLowFpsInfo() {
-        showMessageDialog(
-            title = getString(R.string.low_fps_info_title),
-            message = getString(R.string.low_fps_info_message),
-        )
+        activeSheet = ActiveSheet.LOW_FPS
     }
 
     private fun showCompatibilityIssueDialog(issue: DeviceCompatibilityIssue) {
-        val content = modalPanel()
-        content.addView(modalWarningHeader(getString(R.string.compatibility_issue_title)))
-        content.addView(modalDivider())
-        content.addView(modalBody(getString(R.string.compatibility_issue_intro), topMarginDp = 2))
-        content.addView(
-            modalSectionTitle(
-                getString(R.string.compatibility_issue_about_title),
-                topMarginDp = 28,
-            ),
-        )
-        content.addView(modalBody(issue.summary, topMarginDp = 10))
-        showModal(content, widthDp = 640)
+        activeSheet = ActiveSheet.COMPATIBILITY
     }
 
     private fun showCaptureAudioFailureDialog() {
         if (isFinishing || isDestroyed) {
             return
         }
-        showMessageDialog(
-            title = getString(R.string.audio_playback_failed_title),
-            message = getString(R.string.audio_playback_failed_message),
-        )
+        activeSheet = ActiveSheet.AUDIO_FAILURE
     }
 
     private fun showMessageDialog(title: String, message: String) {
-        val content = modalPanel()
-        content.addView(modalHeader(title, iconSizeDp = 48))
-        content.addView(modalDivider())
-        content.addView(modalBody(message, topMarginDp = 18))
-        showModal(content, widthDp = 520)
-    }
-
-    private fun showModal(content: LinearLayout, widthDp: Int, leadingActions: List<View> = emptyList()) {
-        val dialog = Dialog(this)
-        val scroll = ScrollView(this).apply {
-            isFillViewport = false
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            addView(content)
-        }
-        val close = modalCloseButton {
-            dialog.dismiss()
-        }
-        content.addView(
-            LinearLayout(this).apply {
-                gravity = android.view.Gravity.CENTER_VERTICAL
-                setPadding(0, dp(4), 0, 0)
-                leadingActions.forEach { action ->
-                    addView(
-                        action.apply {
-                            layoutParams = LinearLayout.LayoutParams(
-                                LinearLayout.LayoutParams.WRAP_CONTENT,
-                                LinearLayout.LayoutParams.WRAP_CONTENT,
-                            ).apply {
-                                rightMargin = dp(8)
-                            }
-                        },
-                    )
-                }
-                addView(
-                    View(this@MainActivity).apply {
-                        layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-                    },
-                )
-                addView(close)
-            },
-        )
-        dialog.setContentView(scroll)
-        dialog.show()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        dialog.window?.setLayout(
-            minOf(resources.displayMetrics.widthPixels - dp(32), dp(widthDp)),
-            WindowManager.LayoutParams.WRAP_CONTENT,
-        )
-    }
-
-    private fun modalPanel(): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(24), dp(24), dp(24))
-            background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_modal_panel)
-        }
-
-    private fun modalHeader(title: String, subtitle: String? = null, iconSizeDp: Int): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            val icon = ImageView(this@MainActivity).apply {
-                setImageResource(R.drawable.app_icon_large)
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                layoutParams = LinearLayout.LayoutParams(dp(iconSizeDp), dp(iconSizeDp))
-            }
-            applyRoundedIconClip(icon, dp(if (iconSizeDp >= 64) 14 else 10).toFloat())
-            addView(icon)
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(14), 0, 0, 0)
-                    addView(
-                        TextView(this@MainActivity).apply {
-                            text = if (title == getString(R.string.about_title)) {
-                                getString(R.string.about_header_title, AppBuildInfo.version)
-                            } else {
-                                title
-                            }
-                            setTextColor(Color.WHITE)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 30f)
-                            setTypeface(typeface, android.graphics.Typeface.BOLD)
-                        },
-                    )
-                    subtitle?.let {
-                        addView(modalBody(it, topMarginDp = 4))
-                    }
-                },
-            )
-        }
-
-    private fun modalWarningHeader(title: String): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            addView(
-                ImageView(this@MainActivity).apply {
-                    setImageResource(R.drawable.ic_warning)
-                    layoutParams = LinearLayout.LayoutParams(dp(42), dp(42))
-                },
-            )
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = title
-                    setTextColor(Color.WHITE)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
-                    setTypeface(typeface, android.graphics.Typeface.BOLD)
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                    ).apply {
-                        leftMargin = dp(14)
-                    }
-                },
-            )
-        }
-
-    private fun modalSectionTitle(textValue: String, topMarginDp: Int): TextView =
-        TextView(this).apply {
-            text = textValue
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                topMargin = dp(topMarginDp)
-            }
-        }
-
-    private fun modalDivider(): View =
-        View(this).apply {
-            setBackgroundColor(Color.parseColor("#33FFFFFF"))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(1),
-            ).apply {
-                topMargin = dp(20)
-                bottomMargin = dp(18)
-            }
-        }
-
-    private fun modalBody(textValue: String, topMarginDp: Int = 0): TextView =
-        TextView(this).apply {
-            text = textValue
-            setTextColor(Color.parseColor("#B8FFFFFF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setLineSpacing(dp(2).toFloat(), 1.0f)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                topMargin = dp(topMarginDp)
-            }
-        }
-
-    private fun helpSection(iconText: String, titleRes: Int, bodyRes: Int): LinearLayout =
-        aboutRow(iconText, getString(bodyRes), title = getString(titleRes))
-
-    private fun aboutRow(
-        iconText: String,
-        body: String,
-        title: String? = null,
-        iconColor: Int = Color.parseColor("#B8FFFFFF"),
-        bodyColor: Int = Color.parseColor("#B8FFFFFF"),
-    ): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(4), 0, dp(14))
-            addView(rowIcon(iconText, iconColor))
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    title?.let {
-                        addView(
-                            TextView(this@MainActivity).apply {
-                                text = it
-                                setTextColor(Color.WHITE)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
-                                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                            },
-                        )
-                    }
-                    addView(
-                        modalBody(body, topMarginDp = if (title == null) 0 else 4).apply {
-                            setTextColor(bodyColor)
-                        },
-                    )
-                },
-            )
-        }
-
-    private fun linkRow(iconText: String, label: String, onClick: () -> Unit): LinearLayout =
-        aboutRow(
-            iconText,
-            label,
-            iconColor = Color.parseColor("#FF3399FF"),
-            bodyColor = Color.parseColor("#FF3399FF"),
-        ).apply {
-            setOnClickListener { onClick() }
-            isClickable = true
-        }
-
-    private fun rowIcon(iconText: String, iconColor: Int): ImageView =
-        ImageView(this).apply {
-            setImageResource(
-                when (iconText) {
-                    "play", "play.circle" -> R.drawable.ic_about_play_circle
-                    "warning" -> R.drawable.ic_about_warning
-                    "shield" -> R.drawable.ic_about_shield
-                    "heart" -> R.drawable.ic_about_heart
-                    "open" -> R.drawable.ic_about_external_link
-                    "document" -> R.drawable.ic_about_document
-                    "volume" -> R.drawable.ic_volume_up
-                    "figure.run" -> R.drawable.ic_help_running
-                    "view" -> R.drawable.ic_help_video_controls
-                    "usb" -> R.drawable.ic_help_device_support
-                    else -> R.drawable.ic_info
-                },
-            )
-            setColorFilter(iconColor)
-            scaleType = ImageView.ScaleType.CENTER
-            layoutParams = LinearLayout.LayoutParams(dp(24), dp(24)).apply {
-                rightMargin = dp(14)
-                topMargin = dp(1)
-            }
-        }
-
-    private fun buildInfoSection(): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(6), 0, dp(10))
-            addView(aboutRow("document", getString(R.string.about_build_info_label)))
-            addView(
-	                FrameLayout(this@MainActivity).apply {
-	                    setPadding(dp(14), dp(12), dp(14), dp(12))
-	                    background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_modal_build_info)
-	                    addView(
-	                        LinearLayout(this@MainActivity).apply {
-	                            orientation = LinearLayout.VERTICAL
-	                            layoutParams = FrameLayout.LayoutParams(
-	                                FrameLayout.LayoutParams.MATCH_PARENT,
-	                                FrameLayout.LayoutParams.WRAP_CONTENT,
-	                                android.view.Gravity.START or android.view.Gravity.TOP,
-	                            )
-	                            addView(
-	                                TextView(this@MainActivity).apply {
-	                                    text = """
-                                                Version: ${AppBuildInfo.version} (Android)
-                                                Build Type: ${AppBuildInfo.buildType}
-                                                Date: ${AppBuildInfo.buildDate}
-                                            """.trimIndent()
-	                                    setTextColor(Color.WHITE)
-	                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-	                                    typeface = android.graphics.Typeface.MONOSPACE
-	                                    setPadding(0, 0, dp(190), 0)
-	                                },
-	                            )
-	                            addView(
-	                                TextView(this@MainActivity).apply {
-	                                    text = "Commit: ${AppBuildInfo.commit}"
-	                                    setTextColor(Color.WHITE)
-	                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-	                                    typeface = android.graphics.Typeface.MONOSPACE
-	                                },
-	                            )
-	                        },
-	                    )
-	                    addView(
-	                        modalPillButton(getString(R.string.action_copy_to_clipboard)) {
-	                            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-	                            clipboard.setPrimaryClip(ClipData.newPlainText("Consolation build info", AppBuildInfo.copyableBlob))
-	                            showMessage(getString(R.string.message_build_info_copied))
-	                        }.apply {
-	                            layoutParams = FrameLayout.LayoutParams(
-	                                FrameLayout.LayoutParams.WRAP_CONTENT,
-	                                FrameLayout.LayoutParams.WRAP_CONTENT,
-	                                android.view.Gravity.END or android.view.Gravity.TOP,
-	                            ).apply {
-	                                leftMargin = dp(16)
-	                            }
-	                        },
-	                    )
-	                },
-	            )
-	        }
-
-    private fun modalCloseButton(onClick: () -> Unit): Button =
-        modalPillButton(getString(R.string.action_close), onClick)
-
-    private fun modalExternalLinkButton(textValue: String, onClick: () -> Unit): Button =
-        modalPillButton(textValue, onClick).apply {
-            val icon = ContextCompat.getDrawable(this@MainActivity, R.drawable.ic_about_external_link)?.mutate()
-            icon?.setTint(Color.WHITE)
-            setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null)
-            compoundDrawablePadding = dp(8)
-        }
-
-    private fun modalPillButton(textValue: String, onClick: () -> Unit): Button =
-        Button(this).apply {
-            text = textValue
-            isAllCaps = false
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_modal_pill_button)
-            minHeight = 0
-            minimumHeight = 0
-            minWidth = 0
-            minimumWidth = 0
-            setPadding(dp(18), dp(7), dp(18), dp(7))
-            setOnClickListener { onClick() }
-        }
-
-    private fun dp(value: Int): Int =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics).roundToInt()
-
-    private fun popupMenuContext(): Context =
-        ContextThemeWrapper(this, R.style.ThemeOverlay_Consolation_PopupMenu)
-
-    private fun applyRoundedIconClip(view: View, cornerPx: Float) {
-        view.doOnLayout { host ->
-            host.outlineProvider =
-                object : ViewOutlineProvider() {
-                    override fun getOutline(view: View, outline: Outline) {
-                        outline.setRoundRect(0, 0, view.width, view.height, cornerPx)
-                    }
-                }
-            host.clipToOutline = true
-        }
+        showMessage("$title: $message")
     }
 
     private fun persistFormatForDevice(
@@ -1785,7 +1284,7 @@ class MainActivity : ComponentActivity() {
                     probedFormatSizes = applyDebugUnsafeFormatSynthesis(it)
                 }
                 selectedFormat = null
-                setPlayActionInProgress(false)
+                updatePlayActionInProgress(false)
                 showMessage(getString(R.string.state_no_formats))
                 return
             }
@@ -1801,21 +1300,23 @@ class MainActivity : ComponentActivity() {
             updateAspectRatio(prep.format.width, prep.format.height)
             hasRetriedConnectingSession = false
             captureEngine.startWatching(device)
-            binding.startupScreen.root.isVisible = false
-            binding.playbackControls.root.isVisible = true
-            previewTexture.isVisible = true
-            previewTexture.doOnLayout {
-                try {
-                    previewBackend.bindPreviewSurface(previewTexture)
-                } catch (e: Exception) {
-                    Log.e(PLAYBACK_DIAG_TAG, "bindPreviewSurface failed", e)
-                    failConnectingSession(getString(R.string.message_uvc_open_failed))
+            isPlaybackRunningUi = true
+            areControlsVisible = true
+            if (::previewTexture.isInitialized) {
+                previewTexture.isVisible = true
+                previewTexture.doOnLayout {
+                    try {
+                        previewBackend.bindPreviewSurface(previewTexture)
+                    } catch (e: Exception) {
+                        Log.e(PLAYBACK_DIAG_TAG, "bindPreviewSurface failed", e)
+                        failConnectingSession(getString(R.string.message_uvc_open_failed))
+                    }
                 }
             }
             startConnectingWatchdog(device, prep.format)
         } catch (e: kotlinx.coroutines.CancellationException) {
             if (captureEngine.state.value !is CaptureState.Running) {
-                setPlayActionInProgress(false)
+                updatePlayActionInProgress(false)
             }
             throw e
         } catch (e: Exception) {
@@ -1846,7 +1347,7 @@ class MainActivity : ComponentActivity() {
     private fun failConnectingSession(message: String) {
         cancelConnectingWatchdog()
         hasRetriedConnectingSession = false
-        setPlayActionInProgress(false)
+        updatePlayActionInProgress(false)
         lifecycleScope.launch(Dispatchers.IO) {
             // Force a hard native reset before returning to startup so the next Play attempt
             // does not block in stopUvcStreamingBlocking waiting for a wedged teardown.
@@ -1875,7 +1376,7 @@ class MainActivity : ComponentActivity() {
         if (!didStartRequest) {
             startWatchAfterUsbPermission = false
             captureEngine.setFailed(getString(R.string.message_permission_request_start_failed))
-            setPlayActionInProgress(false)
+            updatePlayActionInProgress(false)
             showMessage(getString(R.string.message_permission_request_start_failed))
             return
         }
@@ -1890,7 +1391,7 @@ class MainActivity : ComponentActivity() {
             delay(10000)
             if (captureEngine.state.value is CaptureState.RequestingPermission) {
                 captureEngine.setFailed(getString(R.string.message_permission_request_timeout))
-                setPlayActionInProgress(false)
+                updatePlayActionInProgress(false)
                 showMessage(getString(R.string.message_permission_request_timeout))
             }
         }
@@ -1908,42 +1409,12 @@ class MainActivity : ComponentActivity() {
         ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     private fun showMessage(message: String) {
-        Snackbar.make(binding.root, message, Snackbar.LENGTH_SHORT).show()
+        Snackbar.make(rootView, message, Snackbar.LENGTH_SHORT).show()
     }
 
     private fun showBlockingErrorDialog(message: String) {
         if (isFinishing || isDestroyed) return
-        val content = modalPanel()
-        content.addView(modalWarningHeader(getString(R.string.error_dialog_title)))
-        content.addView(modalDivider())
-        content.addView(modalBody(message, topMarginDp = 2))
-
-        val dialog = Dialog(this)
-        dialog.setCancelable(false)
-        dialog.setCanceledOnTouchOutside(false)
-
-        val scroll = ScrollView(this).apply {
-            isFillViewport = false
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            addView(content)
-        }
-        val okButton = modalPillButton(getString(android.R.string.ok)) {
-            dialog.dismiss()
-        }
-        content.addView(
-            LinearLayout(this).apply {
-                gravity = android.view.Gravity.END
-                setPadding(0, dp(10), 0, 0)
-                addView(okButton)
-            },
-        )
-        dialog.setContentView(scroll)
-        dialog.show()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        dialog.window?.setLayout(
-            minOf(resources.displayMetrics.widthPixels - dp(32), dp(640)),
-            WindowManager.LayoutParams.WRAP_CONTENT,
-        )
+        blockingErrorMessage = message
     }
 
     private fun loadSettingsFromPrefs() {
@@ -1983,6 +1454,1050 @@ class MainActivity : ComponentActivity() {
             .apply()
     }
 
+    @Composable
+    private fun MainScreen() {
+        val maxScale = 1.175f * 1.5f
+        val baseScale = 1.0f + (currentZoom / 100.0f) * (maxScale - 1.0f)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) {
+                    if (captureEngine.state.value is CaptureState.Running) {
+                        showControls()
+                    }
+                },
+        ) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                AndroidView(
+                    factory = { context ->
+                        TextureView(context).also {
+                            previewTexture = it
+                            it.isVisible = isPlaybackRunningUi
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .aspectRatio(previewAspectRatio)
+                        .graphicsLayer {
+                            scaleX = baseScale * if (isFlippedHorizontal) -1f else 1f
+                            scaleY = baseScale * if (isFlippedVertical) -1f else 1f
+                            rotationZ = currentRotation.toFloat()
+                        },
+                    update = {
+                        it.isVisible = isPlaybackRunningUi
+                    },
+                )
+            }
+
+            if (!isPlaybackRunningUi) {
+                StartupScreen()
+            }
+
+            if (isConnectingVisible) {
+                Text(
+                    text = getString(R.string.connecting_capture_card),
+                    color = Color(0xFF808080),
+                    fontSize = 32.sp,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+
+            if (statsOverlayText.isNotEmpty()) {
+                Text(
+                    text = statsOverlayText,
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(
+                            if (statsPosition == StatsPosition.BOTTOM_RIGHT) {
+                                Alignment.BottomEnd
+                            } else {
+                                Alignment.BottomStart
+                            },
+                        )
+                        .padding(16.dp)
+                        .background(Color(0x99000000), RoundedCornerShape(4.dp))
+                        .padding(6.dp),
+                )
+            }
+
+            if (isLowFpsWarningVisible) {
+                val alignRight = isStatsVisible && statsPosition == StatsPosition.BOTTOM_LEFT
+                Text(
+                    text = getString(R.string.low_fps_warning),
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .align(if (alignRight) Alignment.BottomEnd else Alignment.BottomStart)
+                        .padding(16.dp)
+                        .background(Color(0x80FF0000), RoundedCornerShape(2.dp))
+                        .clickable { showLowFpsInfo() }
+                        .padding(8.dp),
+                )
+            }
+
+            if (isPlaybackRunningUi && areControlsVisible) {
+                PlaybackControlsBar(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 32.dp),
+                )
+            }
+
+            activeSheet?.let { sheet ->
+                ModalBackdrop {
+                    when (sheet) {
+                        ActiveSheet.HELP -> HelpSheet()
+                        ActiveSheet.ABOUT -> AboutSheet()
+                        ActiveSheet.SETTINGS -> SettingsSheet()
+                        ActiveSheet.COMPATIBILITY -> CompatibilitySheet()
+                        ActiveSheet.LOW_FPS -> MessageSheet(
+                            title = getString(R.string.low_fps_info_title),
+                            message = getString(R.string.low_fps_info_message),
+                        )
+                        ActiveSheet.AUDIO_FAILURE -> MessageSheet(
+                            title = getString(R.string.audio_playback_failed_title),
+                            message = getString(R.string.audio_playback_failed_message),
+                        )
+                    }
+                }
+            }
+
+            blockingErrorMessage?.let { message ->
+                ModalBackdrop {
+                    MessageSheet(
+                        title = getString(R.string.error_dialog_title),
+                        message = message,
+                        closeText = getString(android.R.string.ok),
+                        onClose = { blockingErrorMessage = null },
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun StartupScreen() {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0xFF8C0573), Color(0xFF470330), Color.Black),
+                    ),
+                ),
+        ) {
+            val phone = maxHeight < 420.dp || maxWidth < 720.dp
+            val panelPadding = if (phone) 16.dp else 28.dp
+            val iconSize = if (phone) 44.dp else 64.dp
+            val titleSize = if (phone) 24.sp else 28.sp
+            val labelSize = if (phone) 15.sp else 16.sp
+            val sectionGap = 12.dp
+            val playSize = if (phone) 56.dp else 72.dp
+            val hasUsbPermission = selectedDevice?.let { deviceRepository.hasPermission(it) } == true
+
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .widthIn(max = if (phone) 480.dp else 660.dp)
+                    .fillMaxWidth(if (phone) 0.86f else 1f)
+                    .background(Color(0x40100018), RoundedCornerShape(18.dp))
+                    .border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(18.dp))
+                    .padding(panelPadding),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(R.drawable.app_icon_large),
+                        contentDescription = getString(R.string.app_name),
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(iconSize)
+                            .clip(RoundedCornerShape(if (phone) 10.dp else 16.dp)),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = getString(R.string.label_title),
+                        color = Color.White,
+                        fontSize = titleSize,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = getString(R.string.label_app_version, AppBuildInfo.version),
+                        color = Color(0xB3FFFFFF),
+                        fontSize = if (phone) 13.sp else 16.sp,
+                    )
+                }
+                DividerLine(Modifier.padding(top = if (phone) 10.dp else 16.dp, bottom = 0.dp))
+
+                if (showPermissionNotice) {
+                    Text(
+                        text = permissionNoticeText,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        color = if (selectedDevice?.usbCapabilityLabel == "USB 2") {
+                            Color(0xFFFFE082)
+                        } else {
+                            Color(0xCCFFFFFF)
+                        },
+                        fontSize = if (phone) 13.sp else 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        lineHeight = if (phone) 17.sp else 21.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = sectionGap),
+                    )
+                }
+
+                StartupSelectorRow(
+                    label = getString(R.string.label_device),
+                    labelSize = labelSize,
+                    modifier = Modifier.padding(top = sectionGap),
+                ) {
+                    DeviceDropdown()
+                }
+
+                if (hasUsbPermission) {
+                    StartupSelectorRow(
+                        label = getString(R.string.label_resolution),
+                        labelSize = labelSize,
+                        modifier = Modifier.padding(top = if (phone) 12.dp else 32.dp),
+                    ) {
+                        ResolutionDropdown()
+                    }
+                }
+
+                if (showUsbPermissionButton) {
+                    OutlinePillButton(
+                        text = getString(R.string.action_request_permission),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                    ) {
+                        requestUsbPermissionForSelection(autoStartAfterGrant = false)
+                    }
+                }
+
+                Button(
+                    onClick = { handlePlayAction() },
+                    enabled = canPlaySelection,
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0x55FFFFFF),
+                        disabledContainerColor = Color(0x22FFFFFF),
+                    ),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .padding(top = if (phone) 14.dp else 36.dp)
+                        .size(playSize),
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_play_arrow),
+                        contentDescription = getString(R.string.action_start_video),
+                        tint = Color.White.copy(alpha = if (canPlaySelection) 1f else 0.4f),
+                        modifier = Modifier.size(if (phone) 30.dp else 42.dp),
+                    )
+                }
+            }
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+            ) {
+                TextIconButton(getString(R.string.action_settings), R.drawable.ic_settings) { showSettingsDialog() }
+                TextIconButton(getString(R.string.action_help), R.drawable.ic_help) { showHelpDialog() }
+                TextIconButton(getString(R.string.action_about), R.drawable.ic_info) { showAboutDialog() }
+            }
+        }
+    }
+
+    @Composable
+    private fun FieldLabel(text: String, fontSize: androidx.compose.ui.unit.TextUnit, modifier: Modifier = Modifier) {
+        Text(
+            text = text,
+            color = Color.White,
+            fontSize = fontSize,
+            fontWeight = FontWeight.Bold,
+            textAlign = androidx.compose.ui.text.style.TextAlign.End,
+            modifier = modifier,
+        )
+    }
+
+    @Composable
+    private fun StartupSelectorRow(
+        label: String,
+        labelSize: androidx.compose.ui.unit.TextUnit,
+        modifier: Modifier = Modifier,
+        content: @Composable RowScope.() -> Unit,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = modifier.fillMaxWidth(),
+        ) {
+            FieldLabel(
+                text = label,
+                fontSize = labelSize,
+                modifier = Modifier
+                    .width(250.dp)
+                    .padding(end = 18.dp),
+            )
+            Row(modifier = Modifier.weight(1f), content = content)
+        }
+    }
+
+    @Composable
+    private fun DeviceDropdown() {
+        val fallbackAnchor = LocalView.current
+        var menuAnchor by remember { mutableStateOf<View?>(null) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.weight(1f)) {
+                AndroidView(
+                    factory = { context ->
+                        View(context).also { menuAnchor = it }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .size(1.dp),
+                )
+                DropdownValue(
+                    text = selectedDevice?.name ?: getString(R.string.hint_no_capture_devices),
+                    hint = getString(R.string.hint_select_device),
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { showDeviceMenu(menuAnchor ?: fallbackAnchor) },
+                )
+            }
+            if (selectedDeviceCompatibilityIssue() != null) {
+                IconButton(onClick = {
+                    selectedDeviceCompatibilityIssue()?.let { showCompatibilityIssueDialog(it) }
+                }) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_warning),
+                        contentDescription = getString(R.string.action_capture_card_compatibility_warning),
+                        tint = Color(0xFFFFE082),
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ResolutionDropdown() {
+        val fallbackAnchor = LocalView.current
+        var menuAnchor by remember { mutableStateOf<View?>(null) }
+        Box {
+            AndroidView(
+                factory = { context ->
+                    View(context).also { menuAnchor = it }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .size(1.dp),
+            )
+            DropdownValue(
+                text = resolutionDropdownText,
+                hint = getString(R.string.hint_select_resolution),
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    if (probedFormatSizes.isEmpty()) {
+                        refreshResolutions()
+                    } else {
+                        showResolutionFormatMenu(menuAnchor ?: fallbackAnchor)
+                    }
+                },
+            )
+        }
+    }
+
+    @Composable
+    private fun DropdownValue(
+        text: String,
+        hint: String,
+        modifier: Modifier = Modifier,
+        onClick: () -> Unit,
+        menu: @Composable () -> Unit = {},
+    ) {
+        Box(modifier = modifier) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onClick() }
+                    .border(0.dp, Color.Transparent)
+                    .padding(top = 8.dp, bottom = 7.dp),
+            ) {
+                Text(
+                    text = text.ifBlank { hint },
+                    color = if (text.isBlank()) Color(0xB3FFFFFF) else Color.White,
+                    fontSize = 16.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text("▾", color = Color.White, fontSize = 18.sp)
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(Color.White),
+            )
+            menu()
+        }
+    }
+
+    @Composable
+    private fun PlaybackControlsBar(modifier: Modifier = Modifier) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = modifier
+                .background(Color(0xDD222222), RoundedCornerShape(42.dp))
+                .border(1.dp, Color(0xEE444444), RoundedCornerShape(42.dp))
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            IconButton(onClick = { stopPlaybackFromControls() }, modifier = Modifier.size(42.dp)) {
+                Icon(
+                    painterResource(R.drawable.ic_power),
+                    getString(R.string.action_stop_video),
+                    tint = Color(0xFFFF453A),
+                )
+            }
+            BarDivider()
+            IconButton(onClick = { toggleMute() }, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    painterResource(if (audioMuted || audioVolumePercent == 0) R.drawable.ic_volume_off else R.drawable.ic_volume_up),
+                    null,
+                    tint = Color.White,
+                )
+            }
+            WhiteSlider(
+                value = if (audioMuted) 0f else audioVolumePercent.toFloat(),
+                onValueChange = {
+                    if (it > 0f) audioMuted = false
+                    audioVolumePercent = it.roundToInt().coerceIn(0, 100)
+                    applyAudioVolumeFromUi()
+                    resetControlsTimer()
+                },
+                onValueChangeFinished = {
+                    persistSettings()
+                    resetControlsTimer()
+                },
+            )
+            BarDivider()
+            Icon(painterResource(R.drawable.ic_zoom_out), null, tint = Color.White, modifier = Modifier.size(24.dp))
+            WhiteSlider(
+                value = currentZoom.toFloat(),
+                onValueChange = {
+                    currentZoom = it.roundToInt().coerceIn(0, 100)
+                    resetControlsTimer()
+                },
+                onValueChangeFinished = {
+                    persistSettings()
+                    resetControlsTimer()
+                },
+            )
+            Icon(painterResource(R.drawable.ic_zoom_in), null, tint = Color.White, modifier = Modifier.size(24.dp))
+            BarDivider()
+            IconButton(
+                onClick = {
+                    showSettingsDialog()
+                    resetControlsTimer()
+                },
+                modifier = Modifier.size(42.dp),
+            ) {
+                Icon(painterResource(R.drawable.ic_settings), null, tint = Color.White)
+            }
+        }
+    }
+
+    @Composable
+    private fun WhiteSlider(
+        value: Float,
+        onValueChange: (Float) -> Unit,
+        onValueChangeFinished: () -> Unit,
+    ) {
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
+            valueRange = 0f..100f,
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color.White,
+                inactiveTrackColor = Color(0x66FFFFFF),
+            ),
+            modifier = Modifier.width(120.dp),
+        )
+    }
+
+    @Composable
+    private fun BarDivider() {
+        Spacer(
+            modifier = Modifier
+                .padding(horizontal = 12.dp)
+                .width(1.dp)
+                .height(32.dp)
+                .background(Color(0x33FFFFFF)),
+        )
+    }
+
+    @Composable
+    private fun ModalBackdrop(content: @Composable () -> Unit) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0x99000000))
+                .padding(16.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            content()
+        }
+    }
+
+    @Composable
+    private fun ModalPanel(
+        width: Dp,
+        content: @Composable ColumnScope.() -> Unit,
+    ) {
+        BoxWithConstraints(contentAlignment = Alignment.Center) {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = width)
+                    .fillMaxWidth()
+                    .heightIn(max = maxHeight - 32.dp)
+                    .background(Color(0xFF191919), RoundedCornerShape(28.dp))
+                    .border(1.dp, Color(0x44FFFFFF), RoundedCornerShape(28.dp))
+                    .padding(24.dp)
+                    .verticalScroll(rememberScrollState()),
+                content = content,
+            )
+        }
+    }
+
+    @Composable
+    private fun HelpSheet() {
+        ModalPanel(width = 700.dp) {
+            ModalHeader(getString(R.string.help_title), iconSize = 48.dp)
+            DividerLine()
+            InfoRow(R.drawable.ic_about_play_circle, getString(R.string.help_getting_started_title), getString(R.string.help_getting_started_body))
+            InfoRow(R.drawable.ic_help_running, getString(R.string.help_frame_rate_title), getString(R.string.help_frame_rate_body))
+            InfoRow(R.drawable.ic_help_video_controls, getString(R.string.help_video_controls_title), getString(R.string.help_video_controls_body))
+            InfoRow(R.drawable.ic_volume_up, getString(R.string.help_audio_controls_title), getString(R.string.help_audio_controls_body))
+            InfoRow(R.drawable.ic_help_device_support, getString(R.string.help_device_support_title), getString(R.string.help_device_support_body))
+            DividerLine()
+            ModalActions {
+                Spacer(Modifier.weight(1f))
+                CloseButton()
+            }
+        }
+    }
+
+    @Composable
+    private fun AboutSheet() {
+        val context = LocalContext.current
+        ModalPanel(width = 635.dp) {
+            ModalHeader(
+                getString(R.string.about_header_title, AppBuildInfo.version),
+                subtitle = getString(R.string.about_copyright),
+                iconSize = 64.dp,
+            )
+            BodyText(getString(R.string.about_trademark_body), Modifier.padding(top = 18.dp))
+            DividerLine()
+            InfoRow(R.drawable.ic_about_play_circle, null, getString(R.string.about_utility_body))
+            InfoRow(R.drawable.ic_about_warning, null, getString(R.string.about_uvc_required_body))
+            InfoRow(R.drawable.ic_about_shield, null, getString(R.string.about_privacy_body))
+            InfoRow(R.drawable.ic_about_heart, null, getString(R.string.about_open_source_body))
+            InfoRow(R.drawable.ic_about_document, null, getString(R.string.about_build_info_label))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0x1AFFFFFF), RoundedCornerShape(8.dp))
+                    .padding(14.dp),
+            ) {
+                Text(
+                    text = getString(
+                        R.string.about_build_info_display,
+                        AppBuildInfo.version,
+                        AppBuildInfo.buildType,
+                        AppBuildInfo.buildDate,
+                        AppBuildInfo.commit,
+                    ),
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(end = 180.dp),
+                )
+                SmallPillButton(
+                    text = getString(R.string.action_copy_to_clipboard),
+                    modifier = Modifier.align(Alignment.TopEnd),
+                ) {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(
+                        ClipData.newPlainText(
+                            getString(R.string.about_build_info_clip_label),
+                            AppBuildInfo.copyableBlob,
+                        ),
+                    )
+                    showMessage(getString(R.string.message_build_info_copied))
+                }
+            }
+            DividerLine()
+            ModalActions {
+                SmallPillButton(getString(R.string.about_github_button)) {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GITHUB_URL)))
+                }
+                Spacer(Modifier.width(8.dp))
+                SmallPillButton(getString(R.string.about_privacy_policy_button)) {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL)))
+                }
+                Spacer(Modifier.weight(1f))
+                CloseButton()
+            }
+        }
+    }
+
+    @Composable
+    private fun SettingsSheet() {
+        ModalPanel(width = 620.dp) {
+            ModalHeader(getString(R.string.settings_title), iconSize = 48.dp)
+            DividerLine()
+            SectionTitle(getString(R.string.settings_section_performance_telemetry))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = getString(R.string.settings_show_stats),
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(end = 18.dp),
+                )
+                InlineRadioOption(
+                    getString(R.string.settings_stats_off),
+                    statsPosition == StatsPosition.OFF,
+                    Modifier.padding(end = 28.dp),
+                ) {
+                    statsPosition = StatsPosition.OFF
+                    isStatsVisible = false
+                    updateStatsOverlay(previewBackend.getTelemetry())
+                    persistSettings()
+                }
+                InlineRadioOption(
+                    getString(R.string.settings_stats_bottom_left),
+                    statsPosition == StatsPosition.BOTTOM_LEFT,
+                    Modifier.padding(end = 28.dp),
+                ) {
+                    statsPosition = StatsPosition.BOTTOM_LEFT
+                    isStatsVisible = true
+                    updateStatsOverlay(previewBackend.getTelemetry())
+                    persistSettings()
+                }
+                InlineRadioOption(
+                    getString(R.string.settings_stats_bottom_right),
+                    statsPosition == StatsPosition.BOTTOM_RIGHT,
+                    Modifier.padding(end = 28.dp),
+                ) {
+                    statsPosition = StatsPosition.BOTTOM_RIGHT
+                    isStatsVisible = true
+                    updateStatsOverlay(previewBackend.getTelemetry())
+                    persistSettings()
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                SwitchSetting(
+                    getString(R.string.settings_low_fps_warnings),
+                    isLowFpsWarningEnabled,
+                    Modifier.padding(end = 36.dp),
+                ) {
+                    isLowFpsWarningEnabled = it
+                    if (!it) {
+                        lowFpsBelowThresholdSinceMs = 0L
+                        isLowFpsWarningVisible = false
+                    }
+                    persistSettings()
+                }
+                SwitchSetting(
+                    getString(R.string.settings_show_debug_stats),
+                    isDebugStatsEnabled,
+                    Modifier.padding(end = 36.dp),
+                    enabled = statsPosition != StatsPosition.OFF,
+                ) {
+                    isDebugStatsEnabled = it
+                    updateStatsOverlay(previewBackend.getTelemetry())
+                    persistSettings()
+                }
+            }
+            SectionTitle(getString(R.string.settings_section_video_transformation))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = getString(R.string.settings_rotate_label),
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(end = 18.dp),
+                )
+                listOf(0, 90, 180, 270).forEach { rotation ->
+                    InlineRadioOption(
+                        getString(R.string.settings_rotation_degrees, rotation),
+                        currentRotation == rotation,
+                        Modifier.padding(end = 28.dp),
+                    ) {
+                        currentRotation = rotation
+                        persistSettings()
+                    }
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = getString(R.string.settings_flip_label),
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(end = 18.dp),
+                )
+                SwitchSetting(
+                    getString(R.string.settings_flip_horizontal_short),
+                    isFlippedHorizontal,
+                    Modifier.padding(end = 36.dp),
+                ) {
+                    isFlippedHorizontal = it
+                    persistSettings()
+                }
+                SwitchSetting(
+                    getString(R.string.settings_flip_vertical_short),
+                    isFlippedVertical,
+                    Modifier.padding(end = 36.dp),
+                ) {
+                    isFlippedVertical = it
+                    persistSettings()
+                }
+            }
+            SwitchSetting(getString(R.string.settings_picture_in_picture), isPipEnabled) {
+                isPipEnabled = it
+                updatePipParams()
+                persistSettings()
+            }
+            DividerLine()
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallPillButton(getString(R.string.action_help)) { activeSheet = ActiveSheet.HELP }
+                SmallPillButton(getString(R.string.action_about)) { activeSheet = ActiveSheet.ABOUT }
+                Spacer(Modifier.weight(1f))
+                CloseButton()
+            }
+        }
+    }
+
+    @Composable
+    private fun ResolutionPickerSheet() {
+        ModalPanel(width = 640.dp) {
+            ModalHeader(getString(R.string.label_resolution), iconSize = 48.dp)
+            DividerLine()
+            resolutionChoices().forEach { choice ->
+                RadioSetting(
+                    text = getString(
+                        R.string.resolution_choice_format,
+                        choice.width,
+                        choice.height,
+                        choice.fps.roundToInt(),
+                        formatMenuLabel(choice.pixelPreference, choice.unsafeDebug),
+                    ),
+                    selected = selectedFormat?.let {
+                        it.width == choice.width &&
+                            it.height == choice.height &&
+                            abs(it.getCurrentFrameRate() - choice.fps) <= DEFAULT_TARGET_FPS_TOLERANCE &&
+                            selectedPixelFormatPreference == choice.pixelPreference
+                    } == true,
+                ) {
+                    selectResolutionChoice(choice)
+                    showResolutionPicker = false
+                }
+            }
+            DividerLine()
+            ModalActions {
+                SmallPillButton(getString(R.string.action_refresh)) {
+                    showResolutionPicker = false
+                    refreshResolutions()
+                }
+                Spacer(Modifier.weight(1f))
+                CloseButton { showResolutionPicker = false }
+            }
+        }
+    }
+
+    @Composable
+    private fun CompatibilitySheet() {
+        val issue = selectedDeviceCompatibilityIssue()
+        ModalPanel(width = 640.dp) {
+            WarningHeader(getString(R.string.compatibility_issue_title))
+            DividerLine()
+            BodyText(getString(R.string.compatibility_issue_intro))
+            SectionTitle(getString(R.string.compatibility_issue_about_title))
+            BodyText(issue?.summary.orEmpty(), Modifier.padding(top = 10.dp))
+            DividerLine()
+            ModalActions { CloseButton() }
+        }
+    }
+
+    @Composable
+    private fun MessageSheet(
+        title: String,
+        message: String,
+        closeText: String = getString(R.string.action_close),
+        onClose: () -> Unit = { activeSheet = null },
+    ) {
+        ModalPanel(width = 520.dp) {
+            ModalHeader(title, iconSize = 48.dp)
+            DividerLine()
+            BodyText(message, Modifier.padding(top = 18.dp))
+            DividerLine()
+            ModalActions {
+                Spacer(Modifier.weight(1f))
+                SmallPillButton(closeText, onClick = onClose)
+            }
+        }
+    }
+
+    @Composable
+    private fun ModalHeader(title: String, subtitle: String? = null, iconSize: Dp) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Image(
+                painter = painterResource(R.drawable.app_icon_large),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(iconSize)
+                    .clip(RoundedCornerShape(if (iconSize >= 64.dp) 14.dp else 10.dp)),
+            )
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text(title, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                subtitle?.let { BodyText(it, Modifier.padding(top = 4.dp)) }
+            }
+        }
+    }
+
+    @Composable
+    private fun WarningHeader(title: String) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(painterResource(R.drawable.ic_warning), null, tint = Color(0xFFFFE082), modifier = Modifier.size(42.dp))
+            Spacer(Modifier.width(14.dp))
+            Text(title, color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+
+    @Composable
+    private fun InfoRow(iconRes: Int, title: String?, body: String) {
+        Row(modifier = Modifier.padding(top = 4.dp, bottom = 14.dp)) {
+            Icon(
+                painter = painterResource(iconRes),
+                contentDescription = null,
+                tint = Color(0xB8FFFFFF),
+                modifier = Modifier
+                    .padding(top = 1.dp, end = 14.dp)
+                    .size(24.dp),
+            )
+            Column {
+                title?.let {
+                    Text(it, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                }
+                BodyText(body, Modifier.padding(top = if (title == null) 0.dp else 4.dp))
+            }
+        }
+    }
+
+    @Composable
+    private fun SectionTitle(text: String) {
+        Text(
+            text = text,
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 8.dp, bottom = 8.dp),
+        )
+    }
+
+    @Composable
+    private fun BodyText(text: String, modifier: Modifier = Modifier) {
+        Text(
+            text = text,
+            color = Color(0xB8FFFFFF),
+            fontSize = 15.sp,
+            lineHeight = 19.sp,
+            modifier = modifier,
+        )
+    }
+
+    @Composable
+    private fun DividerLine(modifier: Modifier = Modifier) {
+        Spacer(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = 8.dp)
+                .height(1.dp)
+                .background(Color(0x33FFFFFF)),
+        )
+    }
+
+    @Composable
+    private fun ModalActions(content: @Composable RowScope.() -> Unit) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+            content = content,
+        )
+    }
+
+    @Composable
+    private fun CloseButton(onClick: () -> Unit = { activeSheet = null }) {
+        SmallPillButton(getString(R.string.action_close), onClick = onClick)
+    }
+
+    @Composable
+    private fun SmallPillButton(
+        text: String,
+        modifier: Modifier = Modifier,
+        onClick: () -> Unit,
+    ) {
+        Button(
+            onClick = onClick,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0x33FFFFFF)),
+            shape = RoundedCornerShape(18.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 7.dp),
+            modifier = modifier.heightIn(min = 0.dp),
+        ) {
+            Text(text, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+
+    @Composable
+    private fun OutlinePillButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+        Button(
+            onClick = onClick,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0x22FFFFFF)),
+            shape = RoundedCornerShape(24.dp),
+            modifier = modifier.height(48.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x55FFFFFF)),
+        ) {
+            Text(text, color = Color.White)
+        }
+    }
+
+    @Composable
+    private fun TextIconButton(text: String, iconRes: Int, onClick: () -> Unit) {
+        Button(
+            onClick = onClick,
+            colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
+            shape = RoundedCornerShape(50),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.6f)),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+        ) {
+            Icon(painterResource(iconRes), null, tint = Color.White, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(text, color = Color.White)
+        }
+    }
+
+    @Composable
+    private fun RadioSetting(text: String, selected: Boolean, onClick: () -> Unit) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onClick() }
+                .padding(vertical = 5.dp),
+        ) {
+            RadioButton(
+                selected = selected,
+                onClick = onClick,
+                colors = RadioButtonDefaults.colors(
+                    selectedColor = MaterialTheme.colorScheme.primary,
+                    unselectedColor = Color(0x99FFFFFF),
+                ),
+            )
+            Text(text, color = Color.White, fontSize = 15.sp)
+        }
+    }
+
+    @Composable
+    private fun InlineRadioOption(
+        text: String,
+        selected: Boolean,
+        modifier: Modifier = Modifier,
+        onClick: () -> Unit,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = modifier
+                .clickable { onClick() }
+                .padding(vertical = 3.dp),
+        ) {
+            RadioButton(
+                selected = selected,
+                onClick = onClick,
+                colors = RadioButtonDefaults.colors(
+                    selectedColor = MaterialTheme.colorScheme.primary,
+                    unselectedColor = Color(0x99FFFFFF),
+                ),
+            )
+            Text(text, color = Color.White, fontSize = 14.sp, maxLines = 1)
+        }
+    }
+
+    @Composable
+    private fun SwitchSetting(
+        text: String,
+        checked: Boolean,
+        modifier: Modifier = Modifier,
+        enabled: Boolean = true,
+        onCheckedChange: (Boolean) -> Unit,
+    ) {
+        val contentColor = if (enabled) Color.White else Color(0x66FFFFFF)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = modifier
+                .clickable(enabled = enabled) { onCheckedChange(!checked) }
+                .padding(vertical = 7.dp),
+        ) {
+            Text(text, color = contentColor, fontSize = 15.sp)
+            Spacer(Modifier.width(10.dp))
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                enabled = enabled,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = MaterialTheme.colorScheme.primary,
+                    uncheckedThumbColor = Color(0xCCFFFFFF),
+                    uncheckedTrackColor = Color(0x33222222),
+                    disabledCheckedThumbColor = Color(0x66FFFFFF),
+                    disabledCheckedTrackColor = Color(0x33CC1199),
+                    disabledUncheckedThumbColor = Color(0x66FFFFFF),
+                    disabledUncheckedTrackColor = Color(0x22222222),
+                ),
+            )
+        }
+    }
+
     private fun updatePipParams() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val params = PictureInPictureParams.Builder()
@@ -2019,7 +2534,7 @@ class MainActivity : ComponentActivity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         if (isInPictureInPictureMode) {
-            binding.playbackControls.root.isVisible = false
+            areControlsVisible = false
         } else {
             if (captureEngine.state.value is CaptureState.Running) {
                 showControls()
@@ -2062,7 +2577,6 @@ class MainActivity : ComponentActivity() {
         private const val KEY_VOLUME = "volume"
         private const val KEY_MUTED = "muted"
         private const val KEY_DEVICE_FORMAT_PREFIX = "device_format:"
-
         private const val MENU_ID_RESOLUTION_BASE = 10_000
 
         /**
@@ -2260,7 +2774,7 @@ class MainActivity : ComponentActivity() {
 
         private fun addMenuHeaderWithDivider(menu: Menu, title: String) {
             val styled = SpannableString(title).apply {
-                setSpan(ForegroundColorSpan(Color.parseColor("#80FFFFFF")), 0, length, 0)
+                setSpan(ForegroundColorSpan(AndroidColor.parseColor("#80FFFFFF")), 0, length, 0)
             }
             menu.add(Menu.NONE, Menu.NONE, Menu.NONE, styled).isEnabled = false
         }
