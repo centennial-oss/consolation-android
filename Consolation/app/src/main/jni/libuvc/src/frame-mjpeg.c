@@ -556,7 +556,9 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	out->actual_bytes = 0;	// XXX
 	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_MJPEG))
 		return UVC_ERROR_INVALID_PARAM;
+#if UVC_RUNTIME_DIAG_ENABLED
 	pthread_once(&uvc_mjpeg_rgbx_diag_once, uvc_mjpeg_rgbx_diag_enabled_once);
+#endif
 
 	if (uvc_ensure_frame_size(out, in->width * in->height * 4) < 0)
 		return UVC_ERROR_NO_MEM;
