@@ -821,6 +821,10 @@ class UvccameraLibPreviewBackend(
             Log.d(logTag, "playback: abort no textureView")
             return
         }
+        if (textureView?.surfaceTexture !== surfaceTexture) {
+            Log.i(logTag, "playback: abort stale SurfaceTexture before UVC open")
+            return
+        }
 
         try {
             val genAtPreviewStart = playbackGeneration
@@ -901,6 +905,12 @@ class UvccameraLibPreviewBackend(
             currentHeight = height
             currentFpsConfigured = fps
             currentPixelFormat = frameFormatName(selectedFrameFormat)
+
+            if (textureView?.surfaceTexture !== surfaceTexture) {
+                Log.i(logTag, "playback: abort stale SurfaceTexture after UVC negotiation")
+                stopUvcStreamingBody()
+                return
+            }
 
             surfaceTexture.setDefaultBufferSize(width, height)
             if (selectedFrameFormat == UVCCamera.FRAME_FORMAT_H264) {

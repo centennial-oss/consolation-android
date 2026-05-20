@@ -66,6 +66,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -192,6 +193,7 @@ class MainActivity : ComponentActivity() {
     private var activeSheet: ActiveSheet? by mutableStateOf(null)
     private var blockingErrorMessage: String? by mutableStateOf(null)
     private var previewAspectRatio by mutableFloatStateOf(16f / 9f)
+    private var previewTextureGeneration by mutableIntStateOf(0)
 
     private enum class ActiveSheet { HELP, ABOUT, SETTINGS, COMPATIBILITY, LOW_FPS, AUDIO_FAILURE }
 
@@ -555,6 +557,7 @@ class MainActivity : ComponentActivity() {
             previewTexture.surfaceTextureListener = null
             previewTexture.isVisible = false
         }
+        previewTextureGeneration++
         updatePreviewScale()
     }
 
@@ -1472,25 +1475,27 @@ class MainActivity : ComponentActivity() {
                 },
         ) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                AndroidView(
-                    factory = { context ->
-                        TextureView(context).also {
-                            previewTexture = it
-                            it.isVisible = isPlaybackRunningUi
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .aspectRatio(previewAspectRatio)
-                        .graphicsLayer {
-                            scaleX = baseScale * if (isFlippedHorizontal) -1f else 1f
-                            scaleY = baseScale * if (isFlippedVertical) -1f else 1f
-                            rotationZ = currentRotation.toFloat()
+                key(previewTextureGeneration) {
+                    AndroidView(
+                        factory = { context ->
+                            TextureView(context).also {
+                                previewTexture = it
+                                it.isVisible = isPlaybackRunningUi
+                            }
                         },
-                    update = {
-                        it.isVisible = isPlaybackRunningUi
-                    },
-                )
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .aspectRatio(previewAspectRatio)
+                            .graphicsLayer {
+                                scaleX = baseScale * if (isFlippedHorizontal) -1f else 1f
+                                scaleY = baseScale * if (isFlippedVertical) -1f else 1f
+                                rotationZ = currentRotation.toFloat()
+                            },
+                        update = {
+                            it.isVisible = isPlaybackRunningUi
+                        },
+                    )
+                }
             }
 
             if (!isPlaybackRunningUi) {
