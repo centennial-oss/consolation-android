@@ -3,8 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <supports-screens
-        android:smallScreens="true"
-        android:normalScreens="true"
+        android:smallScreens="false"
+        android:normalScreens="false"
         android:largeScreens="true"
         android:xlargeScreens="true" />
 
