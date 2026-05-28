@@ -781,6 +781,76 @@ static void nv12_to_rgbx_neon(const uint8_t *y_plane, const uint8_t *uv_plane,
 	}
 }
 
+static void yu12_to_rgbx_neon_two_rows(const uint8_t *y0, const uint8_t *y1,
+		const uint8_t *u, const uint8_t *v, uint8_t *dst0, uint8_t *dst1,
+		int width) {
+	int x = 0;
+	for (; x + 16 <= width; x += 16) {
+		const uint8x8x2_t y0_pairs = vld2_u8(y0);
+		const uint8x8x2_t y1_pairs = vld2_u8(y1);
+		const uint8x8_t u8 = vld1_u8(u);
+		const uint8x8_t v8 = vld1_u8(v);
+
+		yuv422_to_rgbx_neon_8pairs(dst0, y0_pairs.val[0], u8,
+			y0_pairs.val[1], v8);
+		yuv422_to_rgbx_neon_8pairs(dst1, y1_pairs.val[0], u8,
+			y1_pairs.val[1], v8);
+
+		y0 += 16;
+		y1 += 16;
+		u += 8;
+		v += 8;
+		dst0 += 64;
+		dst1 += 64;
+	}
+	for (; x + 2 <= width; x += 2) {
+		const int u0 = u[0] - 128;
+		const int v0 = v[0] - 128;
+		const int r = (22987 * v0) >> 14;
+		const int g = (-5636 * u0 - 11698 * v0) >> 14;
+		const int b = (29049 * u0) >> 14;
+
+		dst0[0] = sat(y0[0] + r);
+		dst0[1] = sat(y0[0] + g);
+		dst0[2] = sat(y0[0] + b);
+		dst0[3] = 0xff;
+		dst0[4] = sat(y0[1] + r);
+		dst0[5] = sat(y0[1] + g);
+		dst0[6] = sat(y0[1] + b);
+		dst0[7] = 0xff;
+
+		dst1[0] = sat(y1[0] + r);
+		dst1[1] = sat(y1[0] + g);
+		dst1[2] = sat(y1[0] + b);
+		dst1[3] = 0xff;
+		dst1[4] = sat(y1[1] + r);
+		dst1[5] = sat(y1[1] + g);
+		dst1[6] = sat(y1[1] + b);
+		dst1[7] = 0xff;
+
+		y0 += 2;
+		y1 += 2;
+		u += 1;
+		v += 1;
+		dst0 += 8;
+		dst1 += 8;
+	}
+}
+
+static void yu12_to_rgbx_neon(const uint8_t *y_plane, const uint8_t *u_plane,
+		const uint8_t *v_plane, uint8_t *rgba, size_t width, size_t height,
+		size_t chroma_width, size_t out_step) {
+	for (size_t y = 0; y + 1 < height; y += 2) {
+		const uint8_t *y0 = y_plane + y * width;
+		const uint8_t *y1 = y0 + width;
+		const uint8_t *u = u_plane + (y / 2) * chroma_width;
+		const uint8_t *v = v_plane + (y / 2) * chroma_width;
+		uint8_t *dst0 = rgba + y * out_step;
+		uint8_t *dst1 = dst0 + out_step;
+		yu12_to_rgbx_neon_two_rows(y0, y1, u, v, dst0, dst1, (int) width);
+	}
+}
+
 #endif
 
 static uvc_error_t internal_yuyv2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
@@ -1005,6 +1075,14 @@ static uvc_error_t internal_yu122rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	const uint8_t * restrict v_plane = u_plane + chroma_width * chroma_height;
 	uint8_t * restrict rgba = out->data;
 	const size_t out_step = out->step;
+
+#if LIBUVC_HAS_ARM_NEON
+	if (LIKELY(width >= 16 && !(width & 1) && !(height & 1))) {
+		yu12_to_rgbx_neon(y_plane, u_plane, v_plane, rgba, width, height,
+			chroma_width, out_step);
+		return UVC_SUCCESS;
+	}
+#endif
 
 	for (size_t y = 0; y < height; ++y) {
 		const uint8_t *y_row = y_plane + y * width;
