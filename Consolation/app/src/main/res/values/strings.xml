@@ -10,6 +10,7 @@
     <string name="resolution_menu_resolution_header">Resolution</string>
     <string name="resolution_menu_frame_rate_header">Frame Rate</string>
     <string name="resolution_menu_pixel_format_header">Pixel Format</string>
+    <string name="pixel_format_default_suffix">(default)</string>
     <string name="resolution_menu_fps_item">%1$d fps</string>
     <string name="hint_select_device">Choose a connected USB capture device</string>
     <string name="hint_no_capture_devices">No device found. Connect a Capture Card.</string>
