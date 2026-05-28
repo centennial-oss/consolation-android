@@ -5,6 +5,8 @@ A 100% free, no-frills, incredibly performant video capture viewer for Android t
 
 Consolation can be [installed from the Play Store](https://play.google.com/store/apps/details?id=org.centennialoss.consolation), or can be downloaded directly from [this project's releases](https://github.com/centennial-oss/consolation-android/releases).
 
+Consolation is also availble for Apple devices ([GitHub](https://github.com/centennial-oss/consolation-apple) | [App Store](https://apps.apple.com/us/app/consolation/id1563856788)), Windows ([GitHub](https://github.com/centennial-oss/consolation-windows) | [Microsoft Store](https://apps.microsoft.com/detail/9N96T6XGBFTF?hl=en-us&gl=US)) and Linux ([GitHub](https://github.com/centennial-oss/consolation-linux)).
+
 ## About
 
 Consolation is a free app that enables your Android tablet to be used as a display for devices like gaming consoles, Raspberry Pis, and even a Mac mini or other PC, via a standard USB Video Class (UVC) video capture card.
