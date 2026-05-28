@@ -28,6 +28,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -65,6 +66,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
@@ -78,7 +80,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
@@ -118,7 +122,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import java.util.Locale
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 private val ConsolationColorScheme = darkColorScheme(
     primary = Color(0xFFCC11BB),
@@ -170,6 +176,10 @@ class MainActivity : ComponentActivity() {
     private var isFlippedHorizontal by mutableStateOf(false)
     private var isFlippedVertical by mutableStateOf(false)
     private var currentZoom by mutableIntStateOf(0)
+    private var zoomPanOffsetX by mutableFloatStateOf(0f)
+    private var zoomPanOffsetY by mutableFloatStateOf(0f)
+    private var previewLayoutWidthPx by mutableFloatStateOf(0f)
+    private var previewLayoutHeightPx by mutableFloatStateOf(0f)
 
     private var audioVolumePercent by mutableIntStateOf(100)
     private var audioMuted by mutableStateOf(false)
@@ -1175,6 +1185,51 @@ class MainActivity : ComponentActivity() {
         // Compose applies scale/rotation from state.
     }
 
+    private fun previewZoomScale(): Float {
+        return 1.0f + (currentZoom / 100.0f) * (PREVIEW_MAX_ZOOM_SCALE - 1.0f)
+    }
+
+    private fun effectivePreviewDimensionsForPan(widthPx: Float, heightPx: Float): Pair<Float, Float> {
+        return if (currentRotation % 180 == 90) {
+            heightPx to widthPx
+        } else {
+            widthPx to heightPx
+        }
+    }
+
+    private fun maxZoomPanOffsetX(widthPx: Float, heightPx: Float, scale: Float): Float {
+        val (effectiveWidth, _) = effectivePreviewDimensionsForPan(widthPx, heightPx)
+        return (effectiveWidth * (scale - 1f) / 2f).coerceAtLeast(0f)
+    }
+
+    private fun maxZoomPanOffsetY(widthPx: Float, heightPx: Float, scale: Float): Float {
+        val (_, effectiveHeight) = effectivePreviewDimensionsForPan(widthPx, heightPx)
+        return (effectiveHeight * (scale - 1f) / 2f).coerceAtLeast(0f)
+    }
+
+    private fun clampZoomPanOffsets(widthPx: Float, heightPx: Float, scale: Float) {
+        if (currentZoom <= 0 || widthPx <= 0f || heightPx <= 0f) {
+            zoomPanOffsetX = 0f
+            zoomPanOffsetY = 0f
+            return
+        }
+        val maxX = maxZoomPanOffsetX(widthPx, heightPx, scale)
+        val maxY = maxZoomPanOffsetY(widthPx, heightPx, scale)
+        zoomPanOffsetX = zoomPanOffsetX.coerceIn(-maxX, maxX)
+        zoomPanOffsetY = zoomPanOffsetY.coerceIn(-maxY, maxY)
+    }
+
+    private fun transformDragToPanDelta(dragX: Float, dragY: Float): Pair<Float, Float> {
+        var x = dragX
+        var y = dragY
+        if (isFlippedHorizontal) x = -x
+        if (isFlippedVertical) y = -y
+        val radians = Math.toRadians(-currentRotation.toDouble())
+        val c = cos(radians).toFloat()
+        val s = sin(radians).toFloat()
+        return (x * c - y * s) to (x * s + y * c)
+    }
+
     private fun showSettingsDialog() {
         activeSheet = ActiveSheet.SETTINGS
     }
@@ -1502,8 +1557,17 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun MainScreen() {
-        val maxScale = 1.175f * 1.5f
-        val baseScale = 1.0f + (currentZoom / 100.0f) * (maxScale - 1.0f)
+        val baseScale = previewZoomScale()
+        LaunchedEffect(
+            currentZoom,
+            currentRotation,
+            isFlippedHorizontal,
+            isFlippedVertical,
+            previewLayoutWidthPx,
+            previewLayoutHeightPx,
+        ) {
+            clampZoomPanOffsets(previewLayoutWidthPx, previewLayoutHeightPx, baseScale)
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -1529,10 +1593,47 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier
                             .fillMaxHeight()
                             .aspectRatio(previewAspectRatio)
+                            .onSizeChanged {
+                                previewLayoutWidthPx = it.width.toFloat()
+                                previewLayoutHeightPx = it.height.toFloat()
+                                clampZoomPanOffsets(
+                                    previewLayoutWidthPx,
+                                    previewLayoutHeightPx,
+                                    baseScale,
+                                )
+                            }
+                            .pointerInput(
+                                currentZoom,
+                                currentRotation,
+                                isFlippedHorizontal,
+                                isFlippedVertical,
+                                baseScale,
+                            ) {
+                                if (currentZoom <= 0) return@pointerInput
+                                detectDragGestures { change, dragAmount ->
+                                    change.consume()
+                                    val (dx, dy) = transformDragToPanDelta(dragAmount.x, dragAmount.y)
+                                    val maxX = maxZoomPanOffsetX(
+                                        previewLayoutWidthPx,
+                                        previewLayoutHeightPx,
+                                        baseScale,
+                                    )
+                                    val maxY = maxZoomPanOffsetY(
+                                        previewLayoutWidthPx,
+                                        previewLayoutHeightPx,
+                                        baseScale,
+                                    )
+                                    zoomPanOffsetX = (zoomPanOffsetX + dx).coerceIn(-maxX, maxX)
+                                    zoomPanOffsetY = (zoomPanOffsetY + dy).coerceIn(-maxY, maxY)
+                                    resetControlsTimer()
+                                }
+                            }
                             .graphicsLayer {
                                 scaleX = baseScale * if (isFlippedHorizontal) -1f else 1f
                                 scaleY = baseScale * if (isFlippedVertical) -1f else 1f
                                 rotationZ = currentRotation.toFloat()
+                                translationX = if (currentZoom > 0) zoomPanOffsetX else 0f
+                                translationY = if (currentZoom > 0) zoomPanOffsetY else 0f
                             },
                         update = {
                             it.isVisible = isPlaybackRunningUi
@@ -1945,6 +2046,16 @@ class MainActivity : ComponentActivity() {
                 value = currentZoom.toFloat(),
                 onValueChange = {
                     currentZoom = it.roundToInt().coerceIn(0, 100)
+                    if (currentZoom == 0) {
+                        zoomPanOffsetX = 0f
+                        zoomPanOffsetY = 0f
+                    } else {
+                        clampZoomPanOffsets(
+                            previewLayoutWidthPx,
+                            previewLayoutHeightPx,
+                            previewZoomScale(),
+                        )
+                    }
                     resetControlsTimer()
                 },
                 onValueChangeFinished = {
@@ -2621,6 +2732,7 @@ class MainActivity : ComponentActivity() {
         private const val KEY_FLIP_H = "flip_h"
         private const val KEY_FLIP_V = "flip_v"
         private const val KEY_ZOOM = "zoom"
+        private const val PREVIEW_MAX_ZOOM_SCALE = 1.7625f // 1.175 * 1.5
         private const val KEY_VOLUME = "volume"
         private const val KEY_MUTED = "muted"
         private const val KEY_DEVICE_FORMAT_PREFIX = "device_format:"
