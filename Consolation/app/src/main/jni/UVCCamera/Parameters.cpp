@@ -48,6 +48,10 @@ static const uint8_t UVC_GUID_NV12[16] =
 	{'N', 'V', '1', '2', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
 static const uint8_t UVC_GUID_P010[16] =
 	{'P', '0', '1', '0', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
+static const uint8_t UVC_GUID_YU12[16] =
+	{'Y', 'U', '1', '2', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
+static const uint8_t UVC_GUID_BGR3[16] =
+	{'B', 'G', 'R', '3', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
 
 static int previewModeForGuid(const uint8_t guid[16]) {
 	if (!memcmp(guid, UVC_GUID_YUY2, 4))
@@ -60,6 +64,10 @@ static int previewModeForGuid(const uint8_t guid[16]) {
 		return 3;
 	if (!memcmp(guid, UVC_GUID_P010, 4))
 		return 4;
+	if (!memcmp(guid, UVC_GUID_YU12, 4) || !memcmp(guid, "I420", 4) || !memcmp(guid, "IYUV", 4))
+		return 5;
+	if (!memcmp(guid, UVC_GUID_BGR3, 4) || !memcmp(guid, "RGB3", 4))
+		return 6;
 	return -1;
 }
 

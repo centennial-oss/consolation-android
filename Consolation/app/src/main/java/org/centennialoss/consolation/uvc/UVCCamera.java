@@ -57,6 +57,8 @@ public class UVCCamera {
 	public static final int FRAME_FORMAT_H264 = 2;
 	public static final int FRAME_FORMAT_NV12 = 3;
 	public static final int FRAME_FORMAT_P010 = 4;
+	public static final int FRAME_FORMAT_YU12 = 5;
+	public static final int FRAME_FORMAT_BGR3 = 6;
 
 	public static final int PIXEL_FORMAT_RAW = 0;
 	public static final int PIXEL_FORMAT_YUV = 1;

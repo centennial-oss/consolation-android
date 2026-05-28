@@ -67,13 +67,19 @@ static inline uvc_error_t libyuv_result_to_uvc_error(int result) {
 typedef uvc_error_t (*uvc_rgbx_converter_func_t)(uvc_frame_t *in, uvc_frame_t *out);
 static uvc_error_t internal_yuyv2rgbx(uvc_frame_t *in, uvc_frame_t *out);
 static uvc_error_t internal_nv122rgbx(uvc_frame_t *in, uvc_frame_t *out);
+static uvc_error_t internal_yu122rgbx(uvc_frame_t *in, uvc_frame_t *out);
+static uvc_error_t internal_bgr2rgbx(uvc_frame_t *in, uvc_frame_t *out);
 static uvc_error_t internal_p0102rgbx(uvc_frame_t *in, uvc_frame_t *out);
 static uvc_error_t libyuv_yuyv2rgbx(uvc_frame_t *in, uvc_frame_t *out);
 static uvc_error_t libyuv_nv122rgbx(uvc_frame_t *in, uvc_frame_t *out);
+static uvc_error_t libyuv_yu122rgbx(uvc_frame_t *in, uvc_frame_t *out);
+static uvc_error_t libyuv_bgr2rgbx(uvc_frame_t *in, uvc_frame_t *out);
 static uvc_error_t libyuv_p0102rgbx(uvc_frame_t *in, uvc_frame_t *out);
 
 static uvc_rgbx_converter_func_t s_yuyv2rgbx_func = internal_yuyv2rgbx;
 static uvc_rgbx_converter_func_t s_nv122rgbx_func = internal_nv122rgbx;
+static uvc_rgbx_converter_func_t s_yu122rgbx_func = internal_yu122rgbx;
+static uvc_rgbx_converter_func_t s_bgr2rgbx_func = internal_bgr2rgbx;
 static uvc_rgbx_converter_func_t s_p0102rgbx_func = internal_p0102rgbx;
 
 void uvc_set_rgbx_converter_backend(uvc_rgbx_converter_backend_t backend) {
@@ -81,12 +87,16 @@ void uvc_set_rgbx_converter_backend(uvc_rgbx_converter_backend_t backend) {
 	case UVC_RGBX_CONVERTER_BACKEND_LIBYUV:
 		s_yuyv2rgbx_func = libyuv_yuyv2rgbx;
 		s_nv122rgbx_func = libyuv_nv122rgbx;
+		s_yu122rgbx_func = libyuv_yu122rgbx;
+		s_bgr2rgbx_func = libyuv_bgr2rgbx;
 		s_p0102rgbx_func = libyuv_p0102rgbx;
 		break;
 	case UVC_RGBX_CONVERTER_BACKEND_INTERNAL:
 	default:
 		s_yuyv2rgbx_func = internal_yuyv2rgbx;
 		s_nv122rgbx_func = internal_nv122rgbx;
+		s_yu122rgbx_func = internal_yu122rgbx;
+		s_bgr2rgbx_func = internal_bgr2rgbx;
 		s_p0102rgbx_func = internal_p0102rgbx;
 		break;
 	}
@@ -966,6 +976,173 @@ static uvc_error_t libyuv_nv122rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	return libyuv_result_to_uvc_error(result);
 }
 
+static uvc_error_t internal_yu122rgbx(uvc_frame_t *in, uvc_frame_t *out) {
+	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_YU12))
+		return UVC_ERROR_INVALID_PARAM;
+
+	const size_t width = in->width;
+	const size_t height = in->height;
+	const size_t chroma_width = width / 2;
+	const size_t chroma_height = height / 2;
+	const size_t min_bytes = (width * height * 3) / 2;
+	if (UNLIKELY(in->actual_bytes < min_bytes && in->data_bytes < min_bytes))
+		return UVC_ERROR_INVALID_PARAM;
+
+	if (UNLIKELY(uvc_ensure_frame_size(out, width * height * PIXEL_RGBX) < 0))
+		return UVC_ERROR_NO_MEM;
+
+	out->width = in->width;
+	out->height = in->height;
+	out->frame_format = UVC_FRAME_FORMAT_RGBX;
+	if (out->library_owns_data || out->step < width * PIXEL_RGBX)
+		out->step = in->width * PIXEL_RGBX;
+	out->sequence = in->sequence;
+	out->capture_time = in->capture_time;
+	out->source = in->source;
+
+	const uint8_t * restrict y_plane = in->data;
+	const uint8_t * restrict u_plane = y_plane + width * height;
+	const uint8_t * restrict v_plane = u_plane + chroma_width * chroma_height;
+	uint8_t * restrict rgba = out->data;
+	const size_t out_step = out->step;
+
+	for (size_t y = 0; y < height; ++y) {
+		const uint8_t *y_row = y_plane + y * width;
+		const uint8_t *u_row = u_plane + (y / 2) * chroma_width;
+		const uint8_t *v_row = v_plane + (y / 2) * chroma_width;
+		uint8_t *out_row = rgba + y * out_step;
+		for (size_t x = 0; x < width; x += 2) {
+			const int u = u_row[x / 2] - 128;
+			const int v = v_row[x / 2] - 128;
+			const int r = (22987 * v) >> 14;
+			const int g = (-5636 * u - 11698 * v) >> 14;
+			const int b = (29049 * u) >> 14;
+
+			const int yy0 = y_row[x];
+			out_row[0] = sat(yy0 + r);
+			out_row[1] = sat(yy0 + g);
+			out_row[2] = sat(yy0 + b);
+			out_row[3] = 0xff;
+
+			const int yy1 = y_row[x + 1];
+			out_row[4] = sat(yy1 + r);
+			out_row[5] = sat(yy1 + g);
+			out_row[6] = sat(yy1 + b);
+			out_row[7] = 0xff;
+
+			out_row += 8;
+		}
+	}
+
+	return UVC_SUCCESS;
+}
+
+static uvc_error_t libyuv_yu122rgbx(uvc_frame_t *in, uvc_frame_t *out) {
+	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_YU12))
+		return UVC_ERROR_INVALID_PARAM;
+
+	const size_t width = in->width;
+	const size_t height = in->height;
+	const size_t chroma_width = width / 2;
+	const size_t chroma_height = height / 2;
+	const size_t min_bytes = (width * height * 3) / 2;
+	if (UNLIKELY(in->actual_bytes < min_bytes && in->data_bytes < min_bytes))
+		return UVC_ERROR_INVALID_PARAM;
+
+	if (UNLIKELY(uvc_ensure_frame_size(out, width * height * PIXEL_RGBX) < 0))
+		return UVC_ERROR_NO_MEM;
+
+	out->width = in->width;
+	out->height = in->height;
+	out->frame_format = UVC_FRAME_FORMAT_RGBX;
+	if (out->library_owns_data || out->step < width * PIXEL_RGBX)
+		out->step = in->width * PIXEL_RGBX;
+	out->sequence = in->sequence;
+	out->capture_time = in->capture_time;
+	out->source = in->source;
+
+	const uint8_t * restrict y_plane = in->data;
+	const uint8_t * restrict u_plane = y_plane + width * height;
+	const uint8_t * restrict v_plane = u_plane + chroma_width * chroma_height;
+	uint8_t * restrict rgba = out->data;
+	const size_t out_step = out->step;
+	const int result = I420ToABGR(y_plane, (int) width, u_plane, (int) chroma_width,
+		v_plane, (int) chroma_width, rgba, (int) out_step, (int) width, (int) height);
+	return libyuv_result_to_uvc_error(result);
+}
+
+static uvc_error_t internal_bgr2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
+	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_BGR))
+		return UVC_ERROR_INVALID_PARAM;
+
+	const size_t width = in->width;
+	const size_t height = in->height;
+	const size_t min_bytes = width * height * PIXEL_BGR;
+	if (UNLIKELY(in->actual_bytes < min_bytes && in->data_bytes < min_bytes))
+		return UVC_ERROR_INVALID_PARAM;
+
+	if (UNLIKELY(uvc_ensure_frame_size(out, width * height * PIXEL_RGBX) < 0))
+		return UVC_ERROR_NO_MEM;
+
+	out->width = in->width;
+	out->height = in->height;
+	out->frame_format = UVC_FRAME_FORMAT_RGBX;
+	if (out->library_owns_data || out->step < width * PIXEL_RGBX)
+		out->step = in->width * PIXEL_RGBX;
+	out->sequence = in->sequence;
+	out->capture_time = in->capture_time;
+	out->source = in->source;
+
+	const uint8_t * restrict src = in->data;
+	const size_t src_step = in->step ? in->step : width * PIXEL_BGR;
+	uint8_t * restrict dst = out->data;
+	const size_t dst_step = out->step;
+
+	for (size_t y = 0; y < height; ++y) {
+		const uint8_t *src_row = src + y * src_step;
+		uint8_t *dst_row = dst + y * dst_step;
+		for (size_t x = 0; x < width; ++x) {
+			dst_row[0] = src_row[2];
+			dst_row[1] = src_row[1];
+			dst_row[2] = src_row[0];
+			dst_row[3] = 0xff;
+			src_row += PIXEL_BGR;
+			dst_row += PIXEL_RGBX;
+		}
+	}
+
+	return UVC_SUCCESS;
+}
+
+static uvc_error_t libyuv_bgr2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
+	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_BGR))
+		return UVC_ERROR_INVALID_PARAM;
+
+	const size_t width = in->width;
+	const size_t height = in->height;
+	const size_t min_bytes = width * height * PIXEL_BGR;
+	if (UNLIKELY(in->actual_bytes < min_bytes && in->data_bytes < min_bytes))
+		return UVC_ERROR_INVALID_PARAM;
+
+	if (UNLIKELY(uvc_ensure_frame_size(out, width * height * PIXEL_RGBX) < 0))
+		return UVC_ERROR_NO_MEM;
+
+	out->width = in->width;
+	out->height = in->height;
+	out->frame_format = UVC_FRAME_FORMAT_RGBX;
+	if (out->library_owns_data || out->step < width * PIXEL_RGBX)
+		out->step = in->width * PIXEL_RGBX;
+	out->sequence = in->sequence;
+	out->capture_time = in->capture_time;
+	out->source = in->source;
+
+	const int src_stride = in->step ? (int) in->step : (int) width * PIXEL_BGR;
+	const int dst_stride = out->step ? (int) out->step : (int) width * PIXEL_RGBX;
+	const int result = RGB24ToARGB(in->data, src_stride, out->data, dst_stride,
+		(int) width, (int) height);
+	return libyuv_result_to_uvc_error(result);
+}
+
 static uvc_error_t internal_p0102rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_P010))
 		return UVC_ERROR_INVALID_PARAM;
@@ -1069,6 +1246,16 @@ uvc_error_t uvc_yuyv2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 /** @brief Convert a frame from NV12 to RGBX8888 */
 uvc_error_t uvc_nv122rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	return s_nv122rgbx_func(in, out);
+}
+
+/** @brief Convert a frame from YU12 (I420) to RGBX8888 */
+uvc_error_t uvc_yu122rgbx(uvc_frame_t *in, uvc_frame_t *out) {
+	return s_yu122rgbx_func(in, out);
+}
+
+/** @brief Convert a frame from BGR888 to RGBX8888 */
+uvc_error_t uvc_bgr2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
+	return s_bgr2rgbx_func(in, out);
 }
 
 /** @brief Convert a frame from P010 to RGBX8888 */
@@ -1841,6 +2028,10 @@ uvc_error_t uvc_any2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 		return uvc_rgb2rgbx(in, out);
 	case UVC_FRAME_FORMAT_NV12:
 		return uvc_nv122rgbx(in, out);
+	case UVC_FRAME_FORMAT_YU12:
+		return uvc_yu122rgbx(in, out);
+	case UVC_FRAME_FORMAT_BGR:
+		return uvc_bgr2rgbx(in, out);
 	case UVC_FRAME_FORMAT_P010:
 		return uvc_p0102rgbx(in, out);
 	default:

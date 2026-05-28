@@ -354,8 +354,9 @@ class UvccameraLibPreviewBackend(
                 Log.i(
                     probeLogTag,
                     "probeSupportedSizes: descriptor[$index] w=${size.width} h=${size.height} " +
-                        "type=${size.type} frame_type=${size.frame_type} index=${size.index} " +
-                        "frameIntervalType=${size.frameIntervalType}",
+                        "format=${frameFormatName(size.frame_type)} frame_type=${size.frame_type} " +
+                        "uvcType=${uvcFormatSubtypeName(size.type)} type=${size.type} " +
+                        "index=${size.index} frameIntervalType=${size.frameIntervalType}",
                 )
             }
             lastProbeOpenFailed = false
@@ -472,8 +473,10 @@ class UvccameraLibPreviewBackend(
                         Log.i(
                             probeLogTag,
                             "probeSupportedSizes: copy[$index] w=${size.width} h=${size.height} " +
-                                "type=${size.type} frame_type=${size.frame_type} index=${size.index} " +
-                                "frameIntervalType=${size.frameIntervalType} frameIntervalIndex=${size.frameIntervalIndex} " +
+                                "format=${frameFormatName(size.frame_type)} frame_type=${size.frame_type} " +
+                                "uvcType=${uvcFormatSubtypeName(size.type)} type=${size.type} " +
+                                "index=${size.index} frameIntervalType=${size.frameIntervalType} " +
+                                "frameIntervalIndex=${size.frameIntervalIndex} " +
                                 "currentFps=${fpsTry.getOrNull()} currentFpsErr=${fpsTry.exceptionOrNull()?.message}",
                         )
                     }
@@ -879,7 +882,9 @@ class UvccameraLibPreviewBackend(
             val nativeFrameFormat = matched?.frame_type?.takeIf {
                 it == UVCCamera.FRAME_FORMAT_H264 ||
                     it == UVCCamera.FRAME_FORMAT_NV12 ||
-                    it == UVCCamera.FRAME_FORMAT_P010
+                    it == UVCCamera.FRAME_FORMAT_YU12 ||
+                    it == UVCCamera.FRAME_FORMAT_P010 ||
+                    it == UVCCamera.FRAME_FORMAT_BGR3
             }
             val lowBandwidthHint = detectLowBandwidthHint(usbDevice)
             if (lowBandwidthHint != null) {
@@ -1187,8 +1192,18 @@ class UvccameraLibPreviewBackend(
         UVCCamera.FRAME_FORMAT_MJPEG -> "MJPEG"
         UVCCamera.FRAME_FORMAT_H264 -> "H264"
         UVCCamera.FRAME_FORMAT_NV12 -> "NV12"
+        UVCCamera.FRAME_FORMAT_YU12 -> "YU12"
         UVCCamera.FRAME_FORMAT_P010 -> "P010"
-        else -> "format-$frameFormat"
+        UVCCamera.FRAME_FORMAT_BGR3 -> "BGR3"
+        else -> "unknown($frameFormat)"
+    }
+
+    /** UVC VS format descriptor subtype (Size.type), not the pixel FourCC. */
+    private fun uvcFormatSubtypeName(subtype: Int): String = when (subtype) {
+        VS_FORMAT_UNCOMPRESSED -> "UNCOMPRESSED"
+        VS_FORMAT_MJPEG -> "MJPEG"
+        VS_FORMAT_FRAME_BASED -> "FRAME_BASED"
+        else -> "subtype-$subtype"
     }
 
     private fun trySetPreviewSize(
@@ -1234,12 +1249,16 @@ class UvccameraLibPreviewBackend(
         if (preferCompressed) {
             out.add(UVCCamera.FRAME_FORMAT_MJPEG)
             out.add(UVCCamera.FRAME_FORMAT_NV12)
+            out.add(UVCCamera.FRAME_FORMAT_YU12)
             out.add(UVCCamera.FRAME_FORMAT_YUYV)
             out.add(UVCCamera.FRAME_FORMAT_P010)
+            out.add(UVCCamera.FRAME_FORMAT_BGR3)
         } else {
             out.add(UVCCamera.FRAME_FORMAT_NV12)
+            out.add(UVCCamera.FRAME_FORMAT_YU12)
             out.add(UVCCamera.FRAME_FORMAT_YUYV)
             out.add(UVCCamera.FRAME_FORMAT_P010)
+            out.add(UVCCamera.FRAME_FORMAT_BGR3)
             out.add(UVCCamera.FRAME_FORMAT_MJPEG)
         }
         return out.distinct()
@@ -1343,7 +1362,9 @@ class UvccameraLibPreviewBackend(
         return when (fourcc) {
             "YUY2", "UYVY", "YVYU" -> UVCCamera.FRAME_FORMAT_YUYV
             "NV12" -> UVCCamera.FRAME_FORMAT_NV12
+            "YU12", "I420", "IYUV" -> UVCCamera.FRAME_FORMAT_YU12
             "P010" -> UVCCamera.FRAME_FORMAT_P010
+            "BGR3", "RGB3" -> UVCCamera.FRAME_FORMAT_BGR3
             "H264", "AVC1" -> UVCCamera.FRAME_FORMAT_H264
             else -> null
         }

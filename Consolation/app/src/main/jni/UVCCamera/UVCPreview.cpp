@@ -96,6 +96,8 @@ static uint64_t processing_now_ns()
 #define REQUEST_MODE_H264 2
 #define REQUEST_MODE_NV12 3
 #define REQUEST_MODE_P010 4
+#define REQUEST_MODE_YU12 5
+#define REQUEST_MODE_BGR3 6
 
 static inline enum uvc_frame_format request_mode_to_frame_format(const int requestMode) {
 	switch (requestMode) {
@@ -107,6 +109,10 @@ static inline enum uvc_frame_format request_mode_to_frame_format(const int reque
 		return UVC_FRAME_FORMAT_NV12;
 	case REQUEST_MODE_P010:
 		return UVC_FRAME_FORMAT_P010;
+	case REQUEST_MODE_YU12:
+		return UVC_FRAME_FORMAT_YU12;
+	case REQUEST_MODE_BGR3:
+		return UVC_FRAME_FORMAT_BGR;
 	case REQUEST_MODE_MJPEG:
 	default:
 		return UVC_FRAME_FORMAT_MJPEG;
@@ -123,6 +129,10 @@ static inline const char *request_mode_name(const int requestMode) {
 		return "NV12";
 	case REQUEST_MODE_P010:
 		return "P010";
+	case REQUEST_MODE_YU12:
+		return "YU12";
+	case REQUEST_MODE_BGR3:
+		return "BGR3";
 	case REQUEST_MODE_MJPEG:
 	default:
 		return "MJPEG";
@@ -1270,9 +1280,11 @@ int UVCPreview::prepare_preview(uvc_stream_ctrl_t *ctrl) {
 		{
 			const size_t wpx = static_cast<size_t>(frameWidth);
 			const size_t hpx = static_cast<size_t>(frameHeight);
-			if (requestMode == REQUEST_MODE_NV12)
+			if (requestMode == REQUEST_MODE_NV12 || requestMode == REQUEST_MODE_YU12)
 				frameBytes = (wpx * hpx * 3) / 2;
 			else if (requestMode == REQUEST_MODE_P010)
+				frameBytes = wpx * hpx * 3;
+			else if (requestMode == REQUEST_MODE_BGR3)
 				frameBytes = wpx * hpx * 3;
 			else
 				frameBytes = wpx * hpx * static_cast<size_t>(requestMode == REQUEST_MODE_YUYV ? 2 : 4);

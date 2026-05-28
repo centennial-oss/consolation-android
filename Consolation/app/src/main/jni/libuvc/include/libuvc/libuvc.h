@@ -107,6 +107,8 @@ enum uvc_frame_format {
 	UVC_FRAME_FORMAT_H264,
 	/** NV12 4:2:0 semi-planar YUV */
 	UVC_FRAME_FORMAT_NV12,
+	/** YU12 / I420 4:2:0 planar YUV */
+	UVC_FRAME_FORMAT_YU12,
 	/** P010 4:2:0 semi-planar 10-bit YUV in 16-bit containers */
 	UVC_FRAME_FORMAT_P010,
 	UVC_FRAME_FORMAT_GRAY8,
@@ -134,6 +136,7 @@ typedef enum uvc_rgbx_converter_backend {
 #define UVC_COLOR_FORMAT_MJPEG UVC_FRAME_FORMAT_MJPEG
 #define UVC_COLOR_FORMAT_H264 UVC_FRAME_FORMAT_H264
 #define UVC_COLOR_FORMAT_NV12 UVC_FRAME_FORMAT_NV12
+#define UVC_COLOR_FORMAT_YU12 UVC_FRAME_FORMAT_YU12
 #define UVC_COLOR_FORMAT_P010 UVC_FRAME_FORMAT_P010
 #define UVC_COLOR_FORMAT_GRAY8 UVC_FRAME_FORMAT_GRAY8
 
@@ -840,6 +843,8 @@ uvc_error_t uvc_yuyv2rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_uyvy2rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_rgb2rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_nv122rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
+uvc_error_t uvc_yu122rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
+uvc_error_t uvc_bgr2rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_p0102rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_any2rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 

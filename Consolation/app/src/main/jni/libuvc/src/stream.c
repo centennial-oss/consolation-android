@@ -160,7 +160,8 @@ struct format_table_entry *_get_format_entry(enum uvc_frame_format format) {
 		{UVC_FRAME_FORMAT_UNCOMPRESSED, UVC_FRAME_FORMAT_COMPRESSED})
 
 	ABS_FMT(UVC_FRAME_FORMAT_UNCOMPRESSED,
-		{UVC_FRAME_FORMAT_YUYV, UVC_FRAME_FORMAT_UYVY, UVC_FRAME_FORMAT_GRAY8})
+		{UVC_FRAME_FORMAT_YUYV, UVC_FRAME_FORMAT_UYVY, UVC_FRAME_FORMAT_GRAY8,
+		 UVC_FRAME_FORMAT_BGR, UVC_FRAME_FORMAT_YU12})
 	FMT(UVC_FRAME_FORMAT_YUYV,
 		{'Y', 'U', 'Y', '2', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
 	FMT(UVC_FRAME_FORMAT_UYVY,
@@ -171,6 +172,10 @@ struct format_table_entry *_get_format_entry(enum uvc_frame_format format) {
     	{'B', 'Y', '8', ' ', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
 	FMT(UVC_FRAME_FORMAT_NV12,
 		{'N', 'V', '1', '2', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
+	FMT(UVC_FRAME_FORMAT_YU12,
+		{'Y', 'U', '1', '2', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
+	FMT(UVC_FRAME_FORMAT_BGR,
+		{'B', 'G', 'R', '3', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
 	FMT(UVC_FRAME_FORMAT_P010,
 		{'P', '0', '1', '0', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
 
@@ -203,6 +208,12 @@ static uint8_t _uvc_frame_format_matches_guid(enum uvc_frame_format fmt,
 	if (!format->abstract_fmt && fmt == UVC_FRAME_FORMAT_H264
 			&& !memcmp(guid, format->guid, 4))
 		return 1;
+	if (!format->abstract_fmt && fmt == UVC_FRAME_FORMAT_YU12
+			&& (!memcmp(guid, "I420", 4) || !memcmp(guid, "IYUV", 4)))
+		return 1;
+	if (!format->abstract_fmt && fmt == UVC_FRAME_FORMAT_BGR
+			&& !memcmp(guid, "RGB3", 4))
+		return 1;
 
 	for (child_idx = 0; child_idx < format->children_count; child_idx++) {
 		if (_uvc_frame_format_matches_guid(format->children[child_idx], guid))
@@ -225,6 +236,12 @@ static enum uvc_frame_format uvc_frame_format_for_guid(uint8_t guid[16]) {
 		if (format->format == UVC_FRAME_FORMAT_H264 && !memcmp(format->guid, guid, 4))
 			return format->format;
 	}
+
+	/* Common aliases not always listed with full 16-byte GUIDs in descriptors */
+	if (!memcmp(guid, "I420", 4) || !memcmp(guid, "IYUV", 4))
+		return UVC_FRAME_FORMAT_YU12;
+	if (!memcmp(guid, "RGB3", 4))
+		return UVC_FRAME_FORMAT_BGR;
 
 	return UVC_FRAME_FORMAT_UNKNOWN;
 }

@@ -78,7 +78,7 @@ UVCCamera depends on <https://github.com/libuvc/libuvc>, which we have also vend
 
 We have significantly modified our vendored UVCCamera and libuvc libs for stability and performance. These mods are in the codebase at [Consolation/app/src/main/jni/UVCCamera](Consolation/app/src/main/jni/UVCCamera) and [Consolation/app/src/main/jni/libuvc](Consolation/app/src/main/jni/libuvc):
 * eliminated nearly all frame copies, resulting in significant lag reduction
-* added support for H.264, NV12, and P010 input pixel formats
+* added support for H.264, NV12, YU12 (I420), BGR3, and P010 input pixel formats
 * fixed defects in yuyv2iyuv and any2yuv frame handlers
 * added support for input pixel format probe
 * fixed protocol defects causing some capture cards to incur unnecessary startup delays

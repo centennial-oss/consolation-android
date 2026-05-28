@@ -204,6 +204,8 @@ class MainActivity : ComponentActivity() {
         NV12("nv12", UVCCamera.FRAME_FORMAT_NV12),
         YUYV("yuyv", UVCCamera.FRAME_FORMAT_YUYV),
         P010("p010", UVCCamera.FRAME_FORMAT_P010),
+        YU12("yu12", UVCCamera.FRAME_FORMAT_YU12),
+        BGR3("bgr3", UVCCamera.FRAME_FORMAT_BGR3),
         MJPEG("mjpeg", UVCCamera.FRAME_FORMAT_MJPEG),
     }
 
@@ -2660,8 +2662,10 @@ class MainActivity : ComponentActivity() {
             val ordered = listOf(
                 PixelFormatPreference.H264,
                 PixelFormatPreference.NV12,
+                PixelFormatPreference.YU12,
                 PixelFormatPreference.YUYV,
                 PixelFormatPreference.P010,
+                PixelFormatPreference.BGR3,
                 PixelFormatPreference.MJPEG,
             ).filter { it in supported }
             return listOf(PixelFormatPreference.AUTO) + ordered
@@ -2686,6 +2690,8 @@ class MainActivity : ComponentActivity() {
             UVCCamera.FRAME_FORMAT_NV12 -> PixelFormatPreference.NV12
             UVCCamera.FRAME_FORMAT_YUYV -> PixelFormatPreference.YUYV
             UVCCamera.FRAME_FORMAT_P010 -> PixelFormatPreference.P010
+            UVCCamera.FRAME_FORMAT_YU12 -> PixelFormatPreference.YU12
+            UVCCamera.FRAME_FORMAT_BGR3 -> PixelFormatPreference.BGR3
             UVCCamera.FRAME_FORMAT_MJPEG -> PixelFormatPreference.MJPEG
             else -> null
         }
@@ -2697,6 +2703,8 @@ class MainActivity : ComponentActivity() {
                 PixelFormatPreference.NV12 -> "NV12"
                 PixelFormatPreference.YUYV -> "YUYV"
                 PixelFormatPreference.P010 -> "P010"
+                PixelFormatPreference.YU12 -> "YU12"
+                PixelFormatPreference.BGR3 -> "BGR3"
                 PixelFormatPreference.MJPEG -> "MJPEG"
             }
             return if (unsafeDebug) "$base (DEBUG / UNSAFE)" else base
@@ -2725,7 +2733,10 @@ class MainActivity : ComponentActivity() {
         ): Boolean {
             if (!BuildConfig.DEBUG) return false
             val frameType = pref.frameFormat ?: return false
-            if (frameType != UVCCamera.FRAME_FORMAT_NV12 && frameType != UVCCamera.FRAME_FORMAT_YUYV) {
+            if (frameType != UVCCamera.FRAME_FORMAT_NV12 &&
+                frameType != UVCCamera.FRAME_FORMAT_YUYV &&
+                frameType != UVCCamera.FRAME_FORMAT_YU12
+            ) {
                 return false
             }
             return reportedSizes.none { size ->
@@ -2739,7 +2750,11 @@ class MainActivity : ComponentActivity() {
         private fun applyDebugUnsafeFormatSynthesis(reportedSizes: List<Size>): List<Size> {
             if (!BuildConfig.DEBUG || reportedSizes.isEmpty()) return reportedSizes
             val expanded = reportedSizes.map { Size(it) }.toMutableList()
-            val synthFormats = listOf(UVCCamera.FRAME_FORMAT_NV12, UVCCamera.FRAME_FORMAT_YUYV)
+            val synthFormats = listOf(
+                UVCCamera.FRAME_FORMAT_NV12,
+                UVCCamera.FRAME_FORMAT_YUYV,
+                UVCCamera.FRAME_FORMAT_YU12,
+            )
             val donors = synthFormats.associateWith { frameType ->
                 reportedSizes.firstOrNull { it.frame_type == frameType }
             }
@@ -2884,8 +2899,10 @@ class MainActivity : ComponentActivity() {
                 PixelFormatPreference.AUTO ->
                     listOf(
                         UVCCamera.FRAME_FORMAT_NV12,
+                        UVCCamera.FRAME_FORMAT_YU12,
                         UVCCamera.FRAME_FORMAT_YUYV,
                         UVCCamera.FRAME_FORMAT_P010,
+                        UVCCamera.FRAME_FORMAT_BGR3,
                         UVCCamera.FRAME_FORMAT_MJPEG,
                     )
                 else -> listOfNotNull(preference.frameFormat)

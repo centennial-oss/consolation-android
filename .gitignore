@@ -59,3 +59,5 @@ planningMode.xml
 Consolation/app/src/main/jni/libusb-1.0.29/.prealloc-applied
 Consolation/app/src/main/jni/libusb-1.0.29/libusb/os/libusb_prealloc_ext.c
 Consolation/app/src/main/jni/libusb-1.0.29/libusb/libusb_prealloc.h
+
+Consolation/.idea/InspectionProfiles/Project_Default.xml
