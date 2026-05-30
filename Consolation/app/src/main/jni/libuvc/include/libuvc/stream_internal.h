@@ -12,6 +12,7 @@ void _uvc_stream_try_acquire_outbuf(uvc_stream_handle_t *strmh);
 void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason);
 
 int _uvc_mjpeg_payload_has_markers(const uvc_stream_handle_t *strmh);
+void _uvc_mjpeg_note_payload_append(uvc_stream_handle_t *strmh);
 void _uvc_diag_mjpeg_drop(uvc_stream_handle_t *strmh, const char *reason);
 void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason);
 void _uvc_diag_mjpeg_log_stream_start(const uvc_stream_ctrl_t *ctrl,

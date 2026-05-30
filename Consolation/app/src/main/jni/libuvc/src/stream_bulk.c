@@ -113,6 +113,7 @@ void _uvc_process_payload_bulk(uvc_stream_handle_t *strmh, const uint8_t *payloa
 		if (LIKELY(strmh->got_bytes + data_len <= strmh->size_buf)) {
 			memcpy(strmh->outbuf + strmh->got_bytes, payload + header_len, data_len);
 			strmh->got_bytes += data_len;
+			_uvc_mjpeg_note_payload_append(strmh);
 		} else {
 			strmh->bfh_err |= UVC_STREAM_ERR;
 		}

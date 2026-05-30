@@ -207,6 +207,13 @@ uvc_error_t uvc_duplicate_frame(uvc_frame_t *in, uvc_frame_t *out) {
 	out->actual_bytes = copy_bytes;
 	out->library_frame_owner = NULL;
 	out->library_frame_slot = 0;
+	out->library_hardware_buffer = NULL;
+	out->library_hardware_buffer_stride = 0;
+	out->yuv_subsampling = 0;
+	memset(out->yuv_plane_offsets, 0, sizeof(out->yuv_plane_offsets));
+	memset(out->yuv_plane_strides, 0, sizeof(out->yuv_plane_strides));
+	memset(out->yuv_plane_widths, 0, sizeof(out->yuv_plane_widths));
+	memset(out->yuv_plane_heights, 0, sizeof(out->yuv_plane_heights));
 
 #if USE_STRIDE	 // XXX
 	if (in->step && out->step) {

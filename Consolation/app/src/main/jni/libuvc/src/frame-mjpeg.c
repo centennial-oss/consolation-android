@@ -42,6 +42,7 @@
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
 #include <jpeglib.h>
+#include <turbojpeg.h>
 #include <pthread.h>
 #include <setjmp.h>
 #ifdef __ANDROID__
@@ -106,6 +107,7 @@ static void _error_exit(j_common_ptr dinfo) {
 
 struct mjpeg_decoder_ctx {
 	struct jpeg_decompress_struct dinfo;
+	tjhandle tj;
 	int initialized;
 };
 
@@ -119,6 +121,8 @@ static void _mjpeg_decoder_destroy(void *ptr) {
 		return;
 	if (ctx->initialized)
 		jpeg_destroy_decompress(&ctx->dinfo);
+	if (ctx->tj)
+		tj3Destroy(ctx->tj);
 	free(ctx);
 }
 
@@ -155,6 +159,34 @@ static void _mjpeg_decoder_reset(struct mjpeg_decoder_ctx *ctx) {
 		jpeg_destroy_decompress(&ctx->dinfo);
 		memset(&ctx->dinfo, 0, sizeof(ctx->dinfo));
 		ctx->initialized = 0;
+	}
+}
+
+static tjhandle _mjpeg_tj_decoder_get(struct mjpeg_decoder_ctx *ctx) {
+	if (!ctx)
+		return NULL;
+	if (!ctx->tj) {
+		ctx->tj = tj3Init(TJINIT_DECOMPRESS);
+		if (ctx->tj) {
+			tj3Set(ctx->tj, TJPARAM_FASTDCT, 1);
+			tj3Set(ctx->tj, TJPARAM_FASTUPSAMPLE, 1);
+		}
+	}
+	return ctx->tj;
+}
+
+static inline int mjpeg_subsampling_supported_for_gpu(int subsamp) {
+	switch (subsamp) {
+	case TJSAMP_444:
+	case TJSAMP_422:
+	case TJSAMP_420:
+	case TJSAMP_GRAY:
+	case TJSAMP_440:
+	case TJSAMP_411:
+	case TJSAMP_441:
+		return 1;
+	default:
+		return 0;
 	}
 }
 
@@ -688,6 +720,99 @@ fail:
 	jpeg_destroy_decompress(dinfo);
 #endif
 	return UVC_ERROR_OTHER+1;
+}
+
+uvc_error_t uvc_mjpeg2yuv_planar(uvc_frame_t *in, uvc_frame_t *out) {
+	struct mjpeg_decoder_ctx *decoder;
+	tjhandle tj;
+	int subsamp;
+	int strides[3] = { 0, 0, 0 };
+	unsigned char *planes[3] = { NULL, NULL, NULL };
+	size_t offsets[3] = { 0, 0, 0 };
+	size_t total_bytes = 0;
+
+	out->actual_bytes = 0;
+	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_MJPEG))
+		return UVC_ERROR_INVALID_PARAM;
+	if (UNLIKELY(!in->data || !in->actual_bytes || !in->width || !in->height))
+		return UVC_ERROR_INVALID_PARAM;
+
+	decoder = _mjpeg_decoder_get();
+	if (UNLIKELY(!decoder))
+		return UVC_ERROR_NO_MEM;
+	tj = _mjpeg_tj_decoder_get(decoder);
+	if (UNLIKELY(!tj))
+		return UVC_ERROR_NO_MEM;
+
+	if (UNLIKELY(tj3DecompressHeader(tj, (const unsigned char *)in->data,
+			in->actual_bytes) != 0))
+		return UVC_ERROR_OTHER;
+
+	subsamp = tj3Get(tj, TJPARAM_SUBSAMP);
+	if (UNLIKELY(!mjpeg_subsampling_supported_for_gpu(subsamp)))
+		return UVC_ERROR_NOT_SUPPORTED;
+	if (UNLIKELY(tj3Get(tj, TJPARAM_JPEGWIDTH) != (int)in->width
+			|| tj3Get(tj, TJPARAM_JPEGHEIGHT) != (int)in->height))
+		return UVC_ERROR_INVALID_PARAM;
+
+	for (int i = 0; i < 3; i++) {
+		const int plane_width = tj3YUVPlaneWidth(i, (int)in->width, subsamp);
+		const int plane_height = tj3YUVPlaneHeight(i, (int)in->height, subsamp);
+		size_t plane_size;
+		if (i > 0 && subsamp == TJSAMP_GRAY) {
+			out->yuv_plane_widths[i] = 0;
+			out->yuv_plane_heights[i] = 0;
+			out->yuv_plane_offsets[i] = 0;
+			out->yuv_plane_strides[i] = 0;
+			continue;
+		}
+		if (UNLIKELY(plane_width <= 0 || plane_height <= 0))
+			return UVC_ERROR_INVALID_PARAM;
+		strides[i] = plane_width;
+		plane_size = tj3YUVPlaneSize(i, (int)in->width, strides[i],
+			(int)in->height, subsamp);
+		if (UNLIKELY(!plane_size || total_bytes > (size_t)-1 - plane_size))
+			return UVC_ERROR_INVALID_PARAM;
+		offsets[i] = total_bytes;
+		total_bytes += plane_size;
+		out->yuv_plane_widths[i] = (uint32_t)plane_width;
+		out->yuv_plane_heights[i] = (uint32_t)plane_height;
+		out->yuv_plane_offsets[i] = offsets[i];
+		out->yuv_plane_strides[i] = (size_t)strides[i];
+	}
+
+	if (UNLIKELY(uvc_ensure_frame_size(out, total_bytes) < 0))
+		return UVC_ERROR_NO_MEM;
+
+	for (int i = 0; i < 3; i++) {
+		if (i > 0 && subsamp == TJSAMP_GRAY) {
+			planes[i] = NULL;
+			continue;
+		}
+		planes[i] = (unsigned char *)out->data + offsets[i];
+	}
+
+	if (UNLIKELY(tj3DecompressToYUVPlanes8(tj,
+			(const unsigned char *)in->data, in->actual_bytes,
+			planes, strides) != 0)) {
+		UVC_DIAG_LOGI("mjpeg-diag:planar-decode-fail seq=%u bytes=%zu err=%s",
+			in->sequence,
+			in->actual_bytes,
+			tj3GetErrorStr(tj));
+		return UVC_ERROR_OTHER;
+	}
+
+	out->width = in->width;
+	out->height = in->height;
+	out->frame_format = UVC_FRAME_FORMAT_MJPEG_YUV_PLANAR;
+	out->step = out->yuv_plane_strides[0];
+	out->sequence = in->sequence;
+	out->capture_time = in->capture_time;
+	out->arrival_monotonic_ns = in->arrival_monotonic_ns;
+	out->source = in->source;
+	out->actual_bytes = total_bytes;
+	out->yuv_subsampling = subsamp;
+	return UVC_SUCCESS;
 }
 
 static inline unsigned char sat(int i) {

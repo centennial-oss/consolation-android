@@ -89,6 +89,7 @@ private:
 	pthread_cond_t capture_sync;
 	uvc_frame_t *captureQueu;			// keep latest frame
 	UVCGpuPreviewRenderer *mGpuPreviewRenderer;
+	uvc_frame_t *mMjpegPreviewYuvFrame;
 	jobject mFrameCallbackObj;
 	convFunc_t mFrameCallbackFunc;
 	Fields_iframecallback iframecallback_fields;

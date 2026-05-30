@@ -121,6 +121,18 @@ int _uvc_mjpeg_payload_has_markers(const uvc_stream_handle_t *strmh) {
 	return found_sos;
 }
 
+void _uvc_mjpeg_note_payload_append(uvc_stream_handle_t *strmh) {
+	const uint8_t *data;
+	const size_t len = strmh ? strmh->got_bytes : 0;
+
+	if (!strmh || strmh->frame_format != UVC_FRAME_FORMAT_MJPEG || len < 2)
+		return;
+
+	data = strmh->outbuf;
+	if (data && data[len - 2] == 0xff && data[len - 1] == 0xd9)
+		strmh->frame_complete_monotonic_ns = uvc_diag_now_ns();
+}
+
 void _uvc_diag_mjpeg_drop(uvc_stream_handle_t *strmh, const char *reason) {
 	if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG)
 		return;

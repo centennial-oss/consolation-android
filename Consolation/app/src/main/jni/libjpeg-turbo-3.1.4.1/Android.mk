@@ -110,6 +110,20 @@ LIBJPEG_TURBO_3141_SOURCES := \
 	src/jcarith.c \
 	src/jdarith.c
 
+LIBJPEG_TURBO_3141_TURBOJPEG_SOURCES := \
+	src/turbojpeg.c \
+	src/transupp.c \
+	src/jdatadst-tj.c \
+	src/jdatasrc-tj.c \
+	src/rdbmp.c \
+	src/wrapper/rdppm-8.c \
+	src/wrapper/rdppm-12.c \
+	src/wrapper/rdppm-16.c \
+	src/wrbmp.c \
+	src/wrapper/wrppm-8.c \
+	src/wrapper/wrppm-12.c \
+	src/wrapper/wrppm-16.c
+
 LIBJPEG_TURBO_3141_ARM_NEON_SOURCES := \
 	simd/arm/jcgray-neon.c \
 	simd/arm/jcphuff-neon.c \
@@ -131,9 +145,12 @@ LOCAL_MODULE := jpeg-turbo3141_static
 LOCAL_C_INCLUDES := $(LIBJPEG_TURBO_3141_INCLUDES)
 LOCAL_EXPORT_C_INCLUDES := $(LIBJPEG_TURBO_3141_INCLUDES)
 LOCAL_CFLAGS := $(LOCAL_C_INCLUDES:%=-I%)
-LOCAL_CFLAGS += -DANDROID_NDK -DANDROID -DNEON_INTRINSICS
+LOCAL_CFLAGS += -DANDROID_NDK -DANDROID -DNEON_INTRINSICS \
+	-DBMP_SUPPORTED -DPPM_SUPPORTED
 LOCAL_ARM_MODE := arm
-LOCAL_SRC_FILES := $(LIBJPEG_TURBO_3141_SOURCES)
+LOCAL_SRC_FILES := \
+	$(LIBJPEG_TURBO_3141_SOURCES) \
+	$(LIBJPEG_TURBO_3141_TURBOJPEG_SOURCES)
 
 ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
 LOCAL_ARM_NEON := true

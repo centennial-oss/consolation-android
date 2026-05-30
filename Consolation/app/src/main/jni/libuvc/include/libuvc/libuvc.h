@@ -113,6 +113,8 @@ enum uvc_frame_format {
 	UVC_FRAME_FORMAT_P010,
 	UVC_FRAME_FORMAT_GRAY8,
 	UVC_FRAME_FORMAT_BY8,
+	/** Internal first-party planar YUV output from TurboJPEG MJPEG decode. */
+	UVC_FRAME_FORMAT_MJPEG_YUV_PLANAR,
 	/** Number of formats understood */
 	UVC_FRAME_FORMAT_COUNT,
 };
@@ -505,6 +507,16 @@ typedef struct uvc_frame {
 	void *library_frame_owner;
 	/** @internal Borrowed frame slot index (set by streaming path). */
 	uint32_t library_frame_slot;
+	/** @internal Optional native hardware buffer backing this borrowed slot. */
+	void *library_hardware_buffer;
+	/** @internal Hardware-buffer row stride in bytes when library_hardware_buffer is set. */
+	size_t library_hardware_buffer_stride;
+	/** @internal Planar YUV metadata for UVC_FRAME_FORMAT_MJPEG_YUV_PLANAR. */
+	int yuv_subsampling;
+	size_t yuv_plane_offsets[3];
+	size_t yuv_plane_strides[3];
+	uint32_t yuv_plane_widths[3];
+	uint32_t yuv_plane_heights[3];
 } uvc_frame_t;
 
 /** A callback function to handle incoming assembled UVC frames
@@ -832,6 +844,7 @@ uvc_error_t uvc_mjpeg2bgr(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_mjpeg2rgb565(uvc_frame_t *in, uvc_frame_t *out);	// XXX
 uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_mjpeg2yuyv(uvc_frame_t *in, uvc_frame_t *out);		// XXX
+uvc_error_t uvc_mjpeg2yuv_planar(uvc_frame_t *in, uvc_frame_t *out);	// XXX
 #endif
 
 uvc_error_t uvc_yuyv2rgb565(uvc_frame_t *in, uvc_frame_t *out);		// XXX
@@ -863,6 +876,12 @@ uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes); // XXX
  * For copied/allocated frames these are no-ops. */
 void uvc_frame_retain(uvc_frame_t *frame);
 void uvc_frame_release(uvc_frame_t *frame);
+/** Synchronize an optional AHardwareBuffer-backed borrowed frame for GPU use.
+ * These are no-ops for malloc-backed frames and non-Android builds.
+ * unlock makes the hardware buffer available to GPU consumers; lock reacquires
+ * a CPU pointer and updates frame->data. */
+uvc_error_t uvc_frame_hardware_buffer_unlock(uvc_frame_t *frame);
+uvc_error_t uvc_frame_hardware_buffer_lock(uvc_frame_t *frame);
 
 //**********************************************************************
 // added for diagnostic

@@ -304,6 +304,9 @@ typedef struct uvc_device_info {
 #ifndef LIBUVC_FRAME_POOL_SLOTS
 #define LIBUVC_FRAME_POOL_SLOTS 6
 #endif
+#ifndef LIBUVC_USE_AHARDWAREBUFFER_FRAME_POOL
+#define LIBUVC_USE_AHARDWAREBUFFER_FRAME_POOL 1
+#endif
 
 #define LIBUVC_XFER_BUF_SIZE	( 16 * 1024 * 1024 )
 
@@ -324,11 +327,14 @@ struct uvc_stream_handle {
   uint32_t seq, hold_seq;
   uint32_t pts, hold_pts;
   uint32_t last_scr, hold_last_scr;
-  uint64_t frame_start_monotonic_ns, hold_start_monotonic_ns;
+  uint64_t frame_start_monotonic_ns, frame_complete_monotonic_ns, hold_start_monotonic_ns;
   size_t got_bytes, hold_bytes;
   size_t size_buf;	// XXX add for boundary check
   uint8_t *outbuf, *holdbuf;
   uint8_t *frame_pool[LIBUVC_FRAME_POOL_SLOTS];
+  void *frame_pool_hardware_buffers[LIBUVC_FRAME_POOL_SLOTS];
+  size_t frame_pool_hardware_buffer_strides[LIBUVC_FRAME_POOL_SLOTS];
+  uint8_t frame_pool_hardware_buffer_locked[LIBUVC_FRAME_POOL_SLOTS];
   uint32_t frame_pool_refs[LIBUVC_FRAME_POOL_SLOTS];
   uint8_t out_slot, hold_slot;
   pthread_mutex_t cb_mutex;

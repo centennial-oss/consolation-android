@@ -243,6 +243,7 @@ static void _uvc_diag_iso_packet_shape(uvc_stream_handle_t *strmh,
 			 _uvc_diag_iso_payload_bytes(strmh, payload + header_len, data_len);
 			 memcpy(strmh->outbuf + strmh->got_bytes, payload + header_len, data_len);
 			 strmh->got_bytes += data_len;
+			 _uvc_mjpeg_note_payload_append(strmh);
 		 } else {
 			 strmh->diag_iso_overflow_count++;
 			 strmh->bfh_err |= UVC_STREAM_ERR;

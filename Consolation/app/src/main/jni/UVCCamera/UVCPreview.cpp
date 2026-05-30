@@ -175,6 +175,7 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	capture_thread_joinable(false),
 	captureQueu(NULL),
 	mGpuPreviewRenderer(new UVCGpuPreviewRenderer()),
+	mMjpegPreviewYuvFrame(NULL),
 	mFrameCallbackObj(NULL),
 	mFrameCallbackFunc(NULL),
 	callbackPixelBytes(2),
@@ -276,6 +277,10 @@ UVCPreview::~UVCPreview() {
 		mGpuPreviewRenderer->shutdown();
 		delete mGpuPreviewRenderer;
 		mGpuPreviewRenderer = NULL;
+	}
+	if (mMjpegPreviewYuvFrame) {
+		uvc_free_frame(mMjpegPreviewYuvFrame);
+		mMjpegPreviewYuvFrame = NULL;
 	}
 	clearPreviewFrame();
 	clearCaptureFrame();
@@ -982,10 +987,9 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 					&preview->mPreviewWindow, &preview->preview_mutex,
 					&preview_ready_ns, &surface_wait_ns);
 				if (preview_rendered && preview_ready_ns
-						&& frame->arrival_monotonic_ns
-						&& preview_ready_ns > frame->arrival_monotonic_ns + surface_wait_ns)
-					preview->recordEndToEndLatencyDuration(
-						preview_ready_ns - frame->arrival_monotonic_ns - surface_wait_ns);
+						&& frame->arrival_monotonic_ns)
+					preview->recordEndToEndLatencyTiming(frame->arrival_monotonic_ns,
+						preview_ready_ns);
 
 				uvc_frame_t *rgbx = preview->convertPreviewFrameToRgbx(frame);
 				if (LIKELY(rgbx)) {
@@ -996,9 +1000,9 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 								&preview_ready_ns, &surface_wait_ns) == 0) {
 							const uint64_t t_end = preview_ready_ns ? preview_ready_ns : processing_now_ns();
 							preview->recordSurfaceCopyTiming(t_end - t_copy);
-							if (frame->arrival_monotonic_ns && t_end > frame->arrival_monotonic_ns + surface_wait_ns)
-								preview->recordEndToEndLatencyDuration(
-									t_end - frame->arrival_monotonic_ns - surface_wait_ns);
+							if (frame->arrival_monotonic_ns)
+								preview->recordEndToEndLatencyTiming(
+									frame->arrival_monotonic_ns, t_end);
 						}
 						pthread_mutex_unlock(&preview->preview_mutex);
 					}
@@ -1016,10 +1020,9 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 				&preview->mPreviewWindow, &preview->preview_mutex,
 				&preview_ready_ns, &surface_wait_ns);
 			if (preview_rendered && preview_ready_ns
-					&& frame->arrival_monotonic_ns
-					&& preview_ready_ns > frame->arrival_monotonic_ns + surface_wait_ns)
-				preview->recordEndToEndLatencyDuration(
-					preview_ready_ns - frame->arrival_monotonic_ns - surface_wait_ns);
+					&& frame->arrival_monotonic_ns)
+				preview->recordEndToEndLatencyTiming(frame->arrival_monotonic_ns,
+					preview_ready_ns);
 
 			if (preview_rendered) {
 				if (!has_preview_callback && !has_capture_consumers)
@@ -1081,12 +1084,38 @@ bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
 	pthread_mutex_lock(window_mutex);
 	ANativeWindow *target = *window;
 	if (LIKELY(target)) {
-		if (frame->frame_format != UVC_FRAME_FORMAT_MJPEG
-				&& mGpuPreviewRenderer
-				&& mGpuPreviewRenderer->render(frame, target, frame_ready_ns)) {
-			rendered = true;
-			pthread_mutex_unlock(window_mutex);
-			return rendered;
+		if (mGpuPreviewRenderer) {
+			if (frame->frame_format != UVC_FRAME_FORMAT_MJPEG
+					&& mGpuPreviewRenderer->render(frame, target, frame_ready_ns)) {
+				rendered = true;
+				pthread_mutex_unlock(window_mutex);
+				return rendered;
+			}
+			if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG) {
+				if (UNLIKELY(!mMjpegPreviewYuvFrame))
+					mMjpegPreviewYuvFrame = uvc_allocate_frame(0);
+				if (LIKELY(mMjpegPreviewYuvFrame)) {
+					const uint64_t t_convert = processing_now_ns();
+					const uvc_error_t result =
+						uvc_mjpeg2yuv_planar(frame, mMjpegPreviewYuvFrame);
+					recordPreviewConversionTiming(processing_now_ns() - t_convert);
+					if (LIKELY(result == UVC_SUCCESS
+							&& mGpuPreviewRenderer->render(mMjpegPreviewYuvFrame,
+								target, frame_ready_ns))) {
+						rendered = true;
+						pthread_mutex_unlock(window_mutex);
+						return rendered;
+					}
+					if (UNLIKELY(result != UVC_SUCCESS)) {
+						UVC_DIAG_LOGI("mjpeg-diag:planar-preview-fail seq=%u bytes=%zu result=%d frame=%ux%u",
+							frame->sequence,
+							frame->actual_bytes,
+							result,
+							frame->width,
+							frame->height);
+					}
+				}
+			}
 		}
 		ANativeWindow_Buffer buffer;
 		const uint64_t lock_start_ns = processing_now_ns();
@@ -1490,10 +1519,9 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 					if (copyToSurface(converted, window, &frame_ready_ns, &surface_wait_ns) == 0) {
 						const uint64_t t_end = frame_ready_ns ? frame_ready_ns : processing_now_ns();
 						recordSurfaceCopyTiming(t_end - t_copy);
-						if (frame->arrival_monotonic_ns
-								&& t_end > frame->arrival_monotonic_ns + surface_wait_ns)
-							recordEndToEndLatencyDuration(
-								t_end - frame->arrival_monotonic_ns - surface_wait_ns);
+						if (frame->arrival_monotonic_ns)
+							recordEndToEndLatencyTiming(frame->arrival_monotonic_ns,
+								t_end);
 					}
 					pthread_mutex_unlock(&preview_mutex);
 				} else {
@@ -1509,10 +1537,8 @@ uvc_frame_t *UVCPreview::draw_preview_one(uvc_frame_t *frame, ANativeWindow **wi
 			if (copyToSurface(frame, window, &frame_ready_ns, &surface_wait_ns) == 0) {
 				const uint64_t t_end = frame_ready_ns ? frame_ready_ns : processing_now_ns();
 				recordSurfaceCopyTiming(t_end - t_copy);
-				if (frame->arrival_monotonic_ns
-						&& t_end > frame->arrival_monotonic_ns + surface_wait_ns)
-					recordEndToEndLatencyDuration(
-						t_end - frame->arrival_monotonic_ns - surface_wait_ns);
+				if (frame->arrival_monotonic_ns)
+					recordEndToEndLatencyTiming(frame->arrival_monotonic_ns, t_end);
 			}
 			pthread_mutex_unlock(&preview_mutex);
 		}

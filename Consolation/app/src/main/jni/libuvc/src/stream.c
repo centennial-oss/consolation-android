@@ -46,6 +46,7 @@
 #include <time.h>
 #ifdef __ANDROID__
 #include <android/log.h>
+#include <android/hardware_buffer.h>
 #endif
 
 #include "libuvc/libuvc.h"
@@ -121,11 +122,72 @@ void uvc_frame_release(uvc_frame_t *frame) {
 	pthread_mutex_unlock(&strmh->cb_mutex);
 }
 
+uvc_error_t uvc_frame_hardware_buffer_unlock(uvc_frame_t *frame) {
+#if defined(__ANDROID__) && LIBUVC_USE_AHARDWAREBUFFER_FRAME_POOL
+	uvc_stream_handle_t *strmh;
+	if (!frame || !frame->library_hardware_buffer)
+		return UVC_SUCCESS;
+	if (!frame->library_frame_owner || !_uvc_frame_slot_valid(frame->library_frame_slot))
+		return UVC_ERROR_INVALID_PARAM;
+	strmh = (uvc_stream_handle_t *)frame->library_frame_owner;
+	pthread_mutex_lock(&strmh->cb_mutex);
+	if (strmh->frame_pool_hardware_buffer_locked[frame->library_frame_slot]) {
+		if (AHardwareBuffer_unlock(
+				(AHardwareBuffer *)frame->library_hardware_buffer, NULL) != 0) {
+			pthread_mutex_unlock(&strmh->cb_mutex);
+			return UVC_ERROR_IO;
+		}
+		strmh->frame_pool_hardware_buffer_locked[frame->library_frame_slot] = 0;
+	}
+	pthread_mutex_unlock(&strmh->cb_mutex);
+	return UVC_SUCCESS;
+#else
+	(void)frame;
+	return UVC_SUCCESS;
+#endif
+}
+
+uvc_error_t uvc_frame_hardware_buffer_lock(uvc_frame_t *frame) {
+#if defined(__ANDROID__) && LIBUVC_USE_AHARDWAREBUFFER_FRAME_POOL
+	uvc_stream_handle_t *strmh;
+	void *mapped = NULL;
+	if (!frame || !frame->library_hardware_buffer)
+		return UVC_SUCCESS;
+	if (!frame->library_frame_owner || !_uvc_frame_slot_valid(frame->library_frame_slot))
+		return UVC_ERROR_INVALID_PARAM;
+	strmh = (uvc_stream_handle_t *)frame->library_frame_owner;
+	pthread_mutex_lock(&strmh->cb_mutex);
+	if (!strmh->frame_pool_hardware_buffer_locked[frame->library_frame_slot]) {
+		if (AHardwareBuffer_lock(
+				(AHardwareBuffer *)frame->library_hardware_buffer,
+				AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+					| AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+				-1, NULL, &mapped) != 0 || !mapped) {
+			pthread_mutex_unlock(&strmh->cb_mutex);
+			return UVC_ERROR_IO;
+		}
+		strmh->frame_pool[frame->library_frame_slot] = (uint8_t *)mapped;
+		if (strmh->hold_slot == frame->library_frame_slot)
+			strmh->holdbuf = (uint8_t *)mapped;
+		if (strmh->out_slot == frame->library_frame_slot)
+			strmh->outbuf = (uint8_t *)mapped;
+		frame->data = mapped;
+		strmh->frame_pool_hardware_buffer_locked[frame->library_frame_slot] = 1;
+	}
+	pthread_mutex_unlock(&strmh->cb_mutex);
+	return UVC_SUCCESS;
+#else
+	(void)frame;
+	return UVC_SUCCESS;
+#endif
+}
+
 static void _uvc_discard_assembled_frame(uvc_stream_handle_t *strmh, const char *reason) {
 	if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG)
 		_uvc_diag_mjpeg_drop(strmh, reason);
 	strmh->got_bytes = 0;
 	strmh->frame_start_monotonic_ns = 0;
+	strmh->frame_complete_monotonic_ns = 0;
 	strmh->last_scr = 0;
 	strmh->pts = 0;
 	strmh->bfh_err = 0;
@@ -669,8 +731,11 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 	{
 		strmh->hold_bfh_err = strmh->bfh_err;	// XXX
 		strmh->hold_bytes = strmh->got_bytes;
-		/* Timestamp when a full frame is assembled and published (EOF/FID boundary). */
-		strmh->hold_start_monotonic_ns = uvc_diag_now_ns();
+		/* Timestamp when the full frame payload was received.  MJPEG devices
+		 * may omit EOF and only publish on the next FID flip, so prefer the
+		 * EOI append time when available instead of the later publish time. */
+		strmh->hold_start_monotonic_ns = strmh->frame_complete_monotonic_ns
+			? strmh->frame_complete_monotonic_ns : uvc_diag_now_ns();
 		strmh->hold_slot = strmh->out_slot;
 		strmh->holdbuf = strmh->frame_pool[strmh->hold_slot];
 		strmh->hold_last_scr = strmh->last_scr;
@@ -693,6 +758,7 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 	strmh->seq++;
 	strmh->got_bytes = 0;
 	strmh->frame_start_monotonic_ns = 0;
+	strmh->frame_complete_monotonic_ns = 0;
 	strmh->last_scr = 0;
 	strmh->pts = 0;
 	strmh->bfh_err = 0;	// XXX
@@ -1127,6 +1193,82 @@ static uvc_streaming_interface_t *_uvc_get_stream_if(uvc_device_handle_t *devh,
 #define LIBUVC_FRAME_BUF_MIN_SIZE (64 * 1024)
 #define LIBUVC_FRAME_BUF_MARGIN_SIZE (64 * 1024)
 #define LIBUVC_FRAME_BUF_ALIGNMENT 4096
+#define LIBUVC_AHB_SLOT_WIDTH_PIXELS 4096
+
+static void _uvc_release_frame_pool_slot(uvc_stream_handle_t *strmh, uint32_t slot) {
+	if (!strmh || slot >= LIBUVC_FRAME_POOL_SLOTS)
+		return;
+#if defined(__ANDROID__) && LIBUVC_USE_AHARDWAREBUFFER_FRAME_POOL
+	if (strmh->frame_pool_hardware_buffers[slot]) {
+		if (strmh->frame_pool_hardware_buffer_locked[slot])
+			AHardwareBuffer_unlock(
+				(AHardwareBuffer *)strmh->frame_pool_hardware_buffers[slot],
+				NULL);
+		AHardwareBuffer_release(
+			(AHardwareBuffer *)strmh->frame_pool_hardware_buffers[slot]);
+		strmh->frame_pool_hardware_buffers[slot] = NULL;
+		strmh->frame_pool[slot] = NULL;
+		strmh->frame_pool_hardware_buffer_strides[slot] = 0;
+		strmh->frame_pool_hardware_buffer_locked[slot] = 0;
+		return;
+	}
+#endif
+	if (strmh->frame_pool[slot]) {
+		free(strmh->frame_pool[slot]);
+		strmh->frame_pool[slot] = NULL;
+	}
+	strmh->frame_pool_hardware_buffer_strides[slot] = 0;
+}
+
+static int _uvc_allocate_frame_pool_slot(uvc_stream_handle_t *strmh,
+		uint32_t slot, size_t bytes) {
+	if (!strmh || slot >= LIBUVC_FRAME_POOL_SLOTS || !bytes)
+		return 0;
+#if defined(__ANDROID__) && LIBUVC_USE_AHARDWAREBUFFER_FRAME_POOL
+	{
+		AHardwareBuffer_Desc desc;
+		AHardwareBuffer *buffer = NULL;
+		void *mapped = NULL;
+		const uint32_t width = LIBUVC_AHB_SLOT_WIDTH_PIXELS;
+		const uint32_t row_bytes = width * 4u;
+		uint32_t height = (uint32_t)((bytes + row_bytes - 1u) / row_bytes);
+		if (!height)
+			height = 1;
+		memset(&desc, 0, sizeof(desc));
+		desc.width = width;
+		desc.height = height;
+		desc.layers = 1;
+		desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+		desc.usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+			| AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN
+			| AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+		if (AHardwareBuffer_allocate(&desc, &buffer) == 0 && buffer) {
+			AHardwareBuffer_describe(buffer, &desc);
+			if (AHardwareBuffer_lock(buffer,
+					AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+						| AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+					-1, NULL, &mapped) == 0 && mapped) {
+				const size_t stride_bytes = (size_t)desc.stride * 4u;
+				const size_t total_bytes = stride_bytes * (size_t)desc.height;
+				if (desc.stride == width && total_bytes >= bytes) {
+					strmh->frame_pool_hardware_buffers[slot] = buffer;
+					strmh->frame_pool_hardware_buffer_strides[slot] = stride_bytes;
+					strmh->frame_pool_hardware_buffer_locked[slot] = 1;
+					strmh->frame_pool[slot] = (uint8_t *)mapped;
+					return 1;
+				}
+				AHardwareBuffer_unlock(buffer, NULL);
+			}
+			AHardwareBuffer_release(buffer);
+		}
+	}
+#endif
+	strmh->frame_pool[slot] = malloc(bytes);
+	strmh->frame_pool_hardware_buffers[slot] = NULL;
+	strmh->frame_pool_hardware_buffer_strides[slot] = 0;
+	strmh->frame_pool_hardware_buffer_locked[slot] = 0;
+	return strmh->frame_pool[slot] != NULL;
+}
 
 static size_t _uvc_stream_frame_buffer_size(const uvc_stream_ctrl_t *ctrl,
 		uvc_streaming_interface_t *stream_if) {
@@ -1219,14 +1361,22 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 	stream_buf_size = _uvc_stream_frame_buffer_size(ctrl, stream_if);
 	{
 		uint32_t i;
+		uint32_t ahb_slots = 0;
 		for (i = 0; i < LIBUVC_FRAME_POOL_SLOTS; i++) {
-			strmh->frame_pool[i] = malloc(stream_buf_size);
-			if (UNLIKELY(!strmh->frame_pool[i])) {
+			if (UNLIKELY(!_uvc_allocate_frame_pool_slot(strmh, i, stream_buf_size))) {
 				ret = UVC_ERROR_NO_MEM;
 				goto fail;
 			}
+			if (strmh->frame_pool_hardware_buffers[i])
+				ahb_slots++;
 			strmh->frame_pool_refs[i] = 0;
 		}
+		LOGI("startup-diag:libuvc frame_pool backing=%s slots=%u/%u bytes=%zu",
+			ahb_slots == LIBUVC_FRAME_POOL_SLOTS ? "ahardwarebuffer"
+				: (ahb_slots ? "mixed" : "malloc"),
+			ahb_slots,
+			(unsigned)LIBUVC_FRAME_POOL_SLOTS,
+			stream_buf_size);
 	}
 	strmh->hold_slot = 0;
 	strmh->out_slot = 1 % LIBUVC_FRAME_POOL_SLOTS;
@@ -1250,8 +1400,7 @@ fail:
 	if (strmh) {
 		uint32_t i;
 		for (i = 0; i < LIBUVC_FRAME_POOL_SLOTS; i++) {
-			free(strmh->frame_pool[i]);
-			strmh->frame_pool[i] = NULL;
+			_uvc_release_frame_pool_slot(strmh, i);
 		}
 		strmh->outbuf = NULL;
 		strmh->holdbuf = NULL;
@@ -1479,6 +1628,8 @@ static void *_uvc_user_caller(void *arg) {
 		if (LIKELY(!strmh->hold_bfh_err)) {
 			uvc_frame_release(&strmh->frame);
 			strmh->frame.library_frame_owner = NULL;
+			strmh->frame.library_hardware_buffer = NULL;
+			strmh->frame.library_hardware_buffer_stride = 0;
 		}
 	}
 
@@ -1541,6 +1692,10 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
 	frame->library_owns_data = 0;
 	frame->library_frame_owner = strmh;
 	frame->library_frame_slot = strmh->hold_slot;
+	frame->library_hardware_buffer =
+		strmh->frame_pool_hardware_buffers[strmh->hold_slot];
+	frame->library_hardware_buffer_stride =
+		strmh->frame_pool_hardware_buffer_strides[strmh->hold_slot];
 	_uvc_frame_retain_locked(strmh, strmh->hold_slot);
 	frame->sequence = strmh->hold_seq;
 	frame->capture_time.tv_sec = 0;
@@ -1576,6 +1731,8 @@ uvc_error_t uvc_stream_get_frame(uvc_stream_handle_t *strmh,
 				&& _uvc_frame_slot_valid(strmh->frame.library_frame_slot)) {
 			_uvc_frame_release_locked(strmh, strmh->frame.library_frame_slot);
 			strmh->frame.library_frame_owner = NULL;
+			strmh->frame.library_hardware_buffer = NULL;
+			strmh->frame.library_hardware_buffer_stride = 0;
 		}
 		if (strmh->last_polled_seq < strmh->hold_seq) {
 			_uvc_populate_frame(strmh);
@@ -1745,10 +1902,7 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 	{
 		uint32_t i;
 		for (i = 0; i < LIBUVC_FRAME_POOL_SLOTS; i++) {
-			if (strmh->frame_pool[i]) {
-				free(strmh->frame_pool[i]);
-				strmh->frame_pool[i] = NULL;
-			}
+			_uvc_release_frame_pool_slot(strmh, i);
 			strmh->frame_pool_refs[i] = 0;
 		}
 		strmh->outbuf = NULL;
