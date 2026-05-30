@@ -851,6 +851,76 @@ static void yu12_to_rgbx_neon(const uint8_t *y_plane, const uint8_t *u_plane,
 	}
 }
 
+/* P010: 10-bit 4:2:0, NV12-like planar layout but every sample is a 16-bit
+ * little-endian word with the valid bits in the high byte. Conversion uses only
+ * the high byte (the scalar path's `(lo | (hi<<8)) >> 8` reduces to that byte),
+ * so a vld4 over 32 bytes lands the high bytes of the even pixels in lane 1 and
+ * of the odd pixels in lane 3 — directly feeding the shared 8-pair helper. */
+static void p010_to_rgbx_neon_two_rows(const uint8_t *y0, const uint8_t *y1,
+		const uint8_t *uv, uint8_t *dst0, uint8_t *dst1, int width) {
+	int x = 0;
+	for (; x + 16 <= width; x += 16) {
+		const uint8x8x4_t y0_words = vld4_u8(y0);
+		const uint8x8x4_t y1_words = vld4_u8(y1);
+		const uint8x8x4_t uv_words = vld4_u8(uv);
+
+		yuv422_to_rgbx_neon_8pairs(dst0, y0_words.val[1], uv_words.val[1],
+			y0_words.val[3], uv_words.val[3]);
+		yuv422_to_rgbx_neon_8pairs(dst1, y1_words.val[1], uv_words.val[1],
+			y1_words.val[3], uv_words.val[3]);
+
+		y0 += 32;
+		y1 += 32;
+		uv += 32;
+		dst0 += 64;
+		dst1 += 64;
+	}
+	for (; x + 2 <= width; x += 2) {
+		const int u = uv[1] - 128;
+		const int v = uv[3] - 128;
+		const int r = (22987 * v) >> 14;
+		const int g = (-5636 * u - 11698 * v) >> 14;
+		const int b = (29049 * u) >> 14;
+
+		dst0[0] = sat(y0[1] + r);
+		dst0[1] = sat(y0[1] + g);
+		dst0[2] = sat(y0[1] + b);
+		dst0[3] = 0xff;
+		dst0[4] = sat(y0[3] + r);
+		dst0[5] = sat(y0[3] + g);
+		dst0[6] = sat(y0[3] + b);
+		dst0[7] = 0xff;
+
+		dst1[0] = sat(y1[1] + r);
+		dst1[1] = sat(y1[1] + g);
+		dst1[2] = sat(y1[1] + b);
+		dst1[3] = 0xff;
+		dst1[4] = sat(y1[3] + r);
+		dst1[5] = sat(y1[3] + g);
+		dst1[6] = sat(y1[3] + b);
+		dst1[7] = 0xff;
+
+		y0 += 4;
+		y1 += 4;
+		uv += 4;
+		dst0 += 8;
+		dst1 += 8;
+	}
+}
+
+static void p010_to_rgbx_neon(const uint8_t *y_plane, const uint8_t *uv_plane,
+		uint8_t *rgba, size_t width, size_t height, size_t out_step) {
+	const size_t y_row_bytes = width * 2;
+	for (size_t y = 0; y + 1 < height; y += 2) {
+		const uint8_t *y0 = y_plane + y * y_row_bytes;
+		const uint8_t *y1 = y0 + y_row_bytes;
+		const uint8_t *uv = uv_plane + (y / 2) * y_row_bytes;
+		uint8_t *dst0 = rgba + y * out_step;
+		uint8_t *dst1 = dst0 + out_step;
+		p010_to_rgbx_neon_two_rows(y0, y1, uv, dst0, dst1, (int) width);
+	}
+}
+
 #endif
 
 static uvc_error_t internal_yuyv2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
@@ -1247,6 +1317,13 @@ static uvc_error_t internal_p0102rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	const uint8_t * restrict uv_plane = y_plane + width * height * 2;
 	uint8_t * restrict rgba = out->data;
 	const size_t out_step = out->step;
+
+#if LIBUVC_HAS_ARM_NEON
+	if (LIKELY(width >= 16 && !(width & 1) && !(height & 1))) {
+		p010_to_rgbx_neon(y_plane, uv_plane, rgba, width, height, out_step);
+		return UVC_SUCCESS;
+	}
+#endif
 
 	for (size_t y = 0; y < height; ++y) {
 		const uint8_t *y_row = y_plane + y * width * 2;
