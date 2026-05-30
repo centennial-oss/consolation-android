@@ -27,6 +27,7 @@
 
 #include "libUVCCamera.h"
 #include <stdint.h>
+#include <atomic>
 #include <pthread.h>
 #include <android/native_window.h>
 #include "bounded_pointer_ring.h"
@@ -97,40 +98,47 @@ private:
 	size_t previewCallbackPixelBytes;
 	volatile bool preview_frame_callback_enabled;
 	volatile bool capture_frame_callback_enabled;
-	pthread_mutex_t processing_stats_mutex;
-	uint64_t processingPreviewConvertCount;
-	uint64_t processingPreviewConvertTotalNs;
-	uint64_t processingPreviewConvertMaxNs;
-	uint64_t processingCallbackConvertCount;
-	uint64_t processingCallbackConvertTotalNs;
-	uint64_t processingCallbackConvertMaxNs;
-	uint64_t processingCopyCount;
-	uint64_t processingCopyTotalNs;
-	uint64_t processingCopyMaxNs;
-	uint64_t processingEndToEndLatencyCount;
-	uint64_t processingEndToEndLatencyTotalNs;
-	uint64_t processingEndToEndLatencyMaxNs;
-	uint64_t processingPayloadCount;
-	uint64_t processingPayloadTotalBytes;
-	uint64_t processingPayloadMaxBytes;
-	uint64_t processingPreviewQueueDropCount;
-	uint64_t processingPreviewQueueDepthSampleCount;
-	uint64_t processingPreviewQueueDepthTotalMilli;
-	uint64_t processingPreviewQueueDepthMaxMilli;
-	uint64_t processingPreviewEnqueueDepthSampleCount;
-	uint64_t processingPreviewEnqueueDepthTotalMilli;
-	uint64_t processingPreviewEnqueueDepthMaxMilli;
-	uint64_t processingUvcCallbackCount;
-	uint64_t processingUvcCallbackTotalNs;
-	uint64_t processingUvcCallbackMaxNs;
-	uint64_t processingCallbackLagCount;
-	uint64_t processingCallbackLagTotalNs;
-	uint64_t processingCallbackLagMaxNs;
-	uint64_t processingPreCallbackSkippedFrames;
-	uint32_t processingLastUvcSequence;
-	bool processingLastUvcSequenceValid;
-	uint32_t diagMjpegDecodedCount;
-	uint32_t diagMjpegLastLuma;
+	/* Processing statistics are written from the hot frame path (UVC callback,
+	 * preview, and capture threads) and snapshot+reset from getAndResetProcessingStats.
+	 * They are independent relaxed atomics so the per-frame record* helpers take no
+	 * lock; the readout is a per-field atomic snapshot (eventually consistent across
+	 * fields, which is fine for diagnostics). */
+	std::atomic<uint64_t> processingPreviewConvertCount;
+	std::atomic<uint64_t> processingPreviewConvertTotalNs;
+	std::atomic<uint64_t> processingPreviewConvertMaxNs;
+	std::atomic<uint64_t> processingCallbackConvertCount;
+	std::atomic<uint64_t> processingCallbackConvertTotalNs;
+	std::atomic<uint64_t> processingCallbackConvertMaxNs;
+	std::atomic<uint64_t> processingCopyCount;
+	std::atomic<uint64_t> processingCopyTotalNs;
+	std::atomic<uint64_t> processingCopyMaxNs;
+	std::atomic<uint64_t> processingEndToEndLatencyCount;
+	std::atomic<uint64_t> processingEndToEndLatencyTotalNs;
+	std::atomic<uint64_t> processingEndToEndLatencyMaxNs;
+	std::atomic<uint64_t> processingPayloadCount;
+	std::atomic<uint64_t> processingPayloadTotalBytes;
+	std::atomic<uint64_t> processingPayloadMaxBytes;
+	std::atomic<uint64_t> processingPreviewQueueDropCount;
+	std::atomic<uint64_t> processingPreviewQueueDepthSampleCount;
+	std::atomic<uint64_t> processingPreviewQueueDepthTotalMilli;
+	std::atomic<uint64_t> processingPreviewQueueDepthMaxMilli;
+	std::atomic<uint64_t> processingPreviewEnqueueDepthSampleCount;
+	std::atomic<uint64_t> processingPreviewEnqueueDepthTotalMilli;
+	std::atomic<uint64_t> processingPreviewEnqueueDepthMaxMilli;
+	std::atomic<uint64_t> processingUvcCallbackCount;
+	std::atomic<uint64_t> processingUvcCallbackTotalNs;
+	std::atomic<uint64_t> processingUvcCallbackMaxNs;
+	std::atomic<uint64_t> processingCallbackLagCount;
+	std::atomic<uint64_t> processingCallbackLagTotalNs;
+	std::atomic<uint64_t> processingCallbackLagMaxNs;
+	std::atomic<uint64_t> processingPreCallbackSkippedFrames;
+	/* Packed UVC sequence-gap tracker: bit63 = valid, bits0..31 = last sequence.
+	 * One atomic so (valid, sequence) is always read coherently — separate atomics
+	 * would let a concurrent reset zero the sequence between the two reads and
+	 * produce a bogus skipped-frame count. */
+	std::atomic<uint64_t> processingUvcSeqState;
+	std::atomic<uint32_t> diagMjpegDecodedCount;
+	std::atomic<uint32_t> diagMjpegLastLuma;
 	volatile uint64_t streamingStartMonotonicNs;
 	volatile bool firstFrameLogged;
 // improve performance by reducing memory allocation

@@ -85,7 +85,21 @@ static uint64_t processing_now_ns()
 		+ static_cast<uint64_t>(ts.tv_nsec);
 }
 
+/** Relaxed atomic max: store `value` into `target` if it exceeds the current value. */
+static inline void atomic_store_max(std::atomic<uint64_t> &target, uint64_t value)
+{
+	uint64_t prev = target.load(std::memory_order_relaxed);
+	while (value > prev
+		&& !target.compare_exchange_weak(prev, value,
+			std::memory_order_relaxed, std::memory_order_relaxed)) {
+		// prev is reloaded by compare_exchange_weak on failure
+	}
+}
+
 } // namespace
+
+/** processingUvcSeqState bit63 marks the last-sequence value as valid. */
+#define UVC_SEQ_STATE_VALID_BIT (1ULL << 63)
 
 #define	LOCAL_DEBUG 0
 #define PREVIEW_PIXEL_BYTES 4	// RGBA/RGBX
@@ -197,8 +211,7 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	processingCallbackLagTotalNs(0),
 	processingCallbackLagMaxNs(0),
 	processingPreCallbackSkippedFrames(0),
-	processingLastUvcSequence(0),
-	processingLastUvcSequenceValid(false),
+	processingUvcSeqState(0),
 	diagMjpegDecodedCount(0),
 	diagMjpegLastLuma(0),
 	streamingStartMonotonicNs(0),
@@ -210,8 +223,7 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 //
 	pthread_cond_init(&capture_sync, NULL);
 	pthread_mutex_init(&capture_mutex, NULL);
-	pthread_mutex_init(&processing_stats_mutex, NULL);
-//	
+//
 	pthread_mutex_init(&pool_mutex, NULL);
 	iframecallback_fields.onFrame = nullptr;
 	preview_iframecallback_fields.onFrame = nullptr;
@@ -266,7 +278,6 @@ UVCPreview::~UVCPreview() {
 	pthread_cond_destroy(&preview_sync);
 	pthread_mutex_destroy(&capture_mutex);
 	pthread_cond_destroy(&capture_sync);
-	pthread_mutex_destroy(&processing_stats_mutex);
 	pthread_mutex_destroy(&pool_mutex);
 	EXIT();
 }
@@ -371,41 +382,29 @@ void UVCPreview::clear_pool() {
 inline const bool UVCPreview::isRunning() const {return mIsRunning; }
 
 void UVCPreview::recordPreviewConversionTiming(uint64_t duration_ns) {
-	pthread_mutex_lock(&processing_stats_mutex);
-	processingPreviewConvertCount++;
-	processingPreviewConvertTotalNs += duration_ns;
-	if (duration_ns > processingPreviewConvertMaxNs)
-		processingPreviewConvertMaxNs = duration_ns;
-	pthread_mutex_unlock(&processing_stats_mutex);
+	processingPreviewConvertCount.fetch_add(1, std::memory_order_relaxed);
+	processingPreviewConvertTotalNs.fetch_add(duration_ns, std::memory_order_relaxed);
+	atomic_store_max(processingPreviewConvertMaxNs, duration_ns);
 }
 
 void UVCPreview::recordCallbackConversionTiming(uint64_t duration_ns) {
-	pthread_mutex_lock(&processing_stats_mutex);
-	processingCallbackConvertCount++;
-	processingCallbackConvertTotalNs += duration_ns;
-	if (duration_ns > processingCallbackConvertMaxNs)
-		processingCallbackConvertMaxNs = duration_ns;
-	pthread_mutex_unlock(&processing_stats_mutex);
+	processingCallbackConvertCount.fetch_add(1, std::memory_order_relaxed);
+	processingCallbackConvertTotalNs.fetch_add(duration_ns, std::memory_order_relaxed);
+	atomic_store_max(processingCallbackConvertMaxNs, duration_ns);
 }
 
 void UVCPreview::recordSurfaceCopyTiming(uint64_t duration_ns) {
-	pthread_mutex_lock(&processing_stats_mutex);
-	processingCopyCount++;
-	processingCopyTotalNs += duration_ns;
-	if (duration_ns > processingCopyMaxNs)
-		processingCopyMaxNs = duration_ns;
-	pthread_mutex_unlock(&processing_stats_mutex);
+	processingCopyCount.fetch_add(1, std::memory_order_relaxed);
+	processingCopyTotalNs.fetch_add(duration_ns, std::memory_order_relaxed);
+	atomic_store_max(processingCopyMaxNs, duration_ns);
 }
 
 void UVCPreview::recordEndToEndLatencyDuration(uint64_t duration_ns) {
 	if (!duration_ns)
 		return;
-	pthread_mutex_lock(&processing_stats_mutex);
-	processingEndToEndLatencyCount++;
-	processingEndToEndLatencyTotalNs += duration_ns;
-	if (duration_ns > processingEndToEndLatencyMaxNs)
-		processingEndToEndLatencyMaxNs = duration_ns;
-	pthread_mutex_unlock(&processing_stats_mutex);
+	processingEndToEndLatencyCount.fetch_add(1, std::memory_order_relaxed);
+	processingEndToEndLatencyTotalNs.fetch_add(duration_ns, std::memory_order_relaxed);
+	atomic_store_max(processingEndToEndLatencyMaxNs, duration_ns);
 }
 
 void UVCPreview::recordEndToEndLatencyTiming(uint64_t start_ns, uint64_t end_ns) {
@@ -415,12 +414,9 @@ void UVCPreview::recordEndToEndLatencyTiming(uint64_t start_ns, uint64_t end_ns)
 }
 
 void UVCPreview::recordPayloadBytes(size_t bytes) {
-	pthread_mutex_lock(&processing_stats_mutex);
-	processingPayloadCount++;
-	processingPayloadTotalBytes += bytes;
-	if (bytes > processingPayloadMaxBytes)
-		processingPayloadMaxBytes = bytes;
-	pthread_mutex_unlock(&processing_stats_mutex);
+	processingPayloadCount.fetch_add(1, std::memory_order_relaxed);
+	processingPayloadTotalBytes.fetch_add(bytes, std::memory_order_relaxed);
+	atomic_store_max(processingPayloadMaxBytes, bytes);
 }
 
 void UVCPreview::recordMjpegDecodedVisualSample(uint32_t sequence, size_t bytes,
@@ -471,13 +467,13 @@ void UVCPreview::recordMjpegDecodedVisualSample(uint32_t sequence, size_t bytes,
 		return;
 
 	luma_avg = (uint32_t)(luma_total / (samples * 256u));
-	pthread_mutex_lock(&processing_stats_mutex);
-	diagMjpegDecodedCount++;
-	prior = diagMjpegLastLuma;
+	const uint32_t decoded =
+		diagMjpegDecodedCount.fetch_add(1, std::memory_order_relaxed) + 1;
+	prior = diagMjpegLastLuma.load(std::memory_order_relaxed);
 	delta = luma_avg > prior ? luma_avg - prior : prior - luma_avg;
-	if (delta >= 10 || diagMjpegDecodedCount <= 20 || !(diagMjpegDecodedCount % 120)) {
+	if (delta >= 10 || decoded <= 20 || !(decoded % 120)) {
 		UVC_DIAG_LOGI("mjpeg-diag:decoded count=%u seq=%u bytes=%zu luma=%u last_luma=%u delta=%u frame=%ux%u",
-			diagMjpegDecodedCount,
+			decoded,
 			sequence,
 			bytes,
 			luma_avg,
@@ -490,7 +486,7 @@ void UVCPreview::recordMjpegDecodedVisualSample(uint32_t sequence, size_t bytes,
 	if (delta >= 30) {
 		UVC_DIAG_LOGI("mjpeg-diag:bands count=%u seq=%u "
 			"b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u",
-			diagMjpegDecodedCount,
+			decoded,
 			sequence,
 			band_luma[0], band_luma[1], band_luma[2], band_luma[3],
 			band_luma[4], band_luma[5], band_luma[6], band_luma[7]);
@@ -500,7 +496,7 @@ void UVCPreview::recordMjpegDecodedVisualSample(uint32_t sequence, size_t bytes,
 				&& band_luma[7] + 80 < band_luma[0])) {
 		UVC_DIAG_LOGI("mjpeg-diag:band-anomaly count=%u seq=%u bytes=%zu rgbx=%p "
 			"stride=%zu bands=%u,%u,%u,%u,%u,%u,%u,%u",
-			diagMjpegDecodedCount,
+			decoded,
 			sequence,
 			bytes,
 			rgbx,
@@ -508,34 +504,26 @@ void UVCPreview::recordMjpegDecodedVisualSample(uint32_t sequence, size_t bytes,
 			band_luma[0], band_luma[1], band_luma[2], band_luma[3],
 			band_luma[4], band_luma[5], band_luma[6], band_luma[7]);
 	}
-	diagMjpegLastLuma = luma_avg;
-	pthread_mutex_unlock(&processing_stats_mutex);
+	diagMjpegLastLuma.store(luma_avg, std::memory_order_relaxed);
 #endif
 }
 
 void UVCPreview::recordPreviewQueueDepthSample(uint64_t depth_frames) {
 	const uint64_t depth_milli = depth_frames * 1000ULL;
-	pthread_mutex_lock(&processing_stats_mutex);
-	processingPreviewQueueDepthSampleCount++;
-	processingPreviewQueueDepthTotalMilli += depth_milli;
-	if (depth_milli > processingPreviewQueueDepthMaxMilli)
-		processingPreviewQueueDepthMaxMilli = depth_milli;
-	pthread_mutex_unlock(&processing_stats_mutex);
+	processingPreviewQueueDepthSampleCount.fetch_add(1, std::memory_order_relaxed);
+	processingPreviewQueueDepthTotalMilli.fetch_add(depth_milli, std::memory_order_relaxed);
+	atomic_store_max(processingPreviewQueueDepthMaxMilli, depth_milli);
 }
 
 static inline void recordPreviewEnqueueDepthSample(
-	pthread_mutex_t *stats_mutex,
-	uint64_t *sample_count,
-	uint64_t *total_milli,
-	uint64_t *max_milli,
+	std::atomic<uint64_t> *sample_count,
+	std::atomic<uint64_t> *total_milli,
+	std::atomic<uint64_t> *max_milli,
 	uint64_t depth_frames) {
 	const uint64_t depth_milli = depth_frames * 1000ULL;
-	pthread_mutex_lock(stats_mutex);
-	(*sample_count)++;
-	(*total_milli) += depth_milli;
-	if (depth_milli > *max_milli)
-		*max_milli = depth_milli;
-	pthread_mutex_unlock(stats_mutex);
+	sample_count->fetch_add(1, std::memory_order_relaxed);
+	total_milli->fetch_add(depth_milli, std::memory_order_relaxed);
+	atomic_store_max(*max_milli, depth_milli);
 }
 
 void UVCPreview::getAndResetProcessingStats(uint64_t stats[UVC_PROCESSING_STATS_COUNT]) {
@@ -551,78 +539,75 @@ void UVCPreview::getAndResetProcessingStats(uint64_t stats[UVC_PROCESSING_STATS_
 		&stream_is_isochronous,
 		&stream_published_count,
 		&stream_dropped_before_cb_count);
-	pthread_mutex_lock(&processing_stats_mutex);
-	stats[0] = processingPreviewConvertCount;
-	stats[1] = processingEndToEndLatencyCount
-		? processingEndToEndLatencyTotalNs / processingEndToEndLatencyCount : 0;
-	stats[2] = processingPreviewConvertMaxNs;
-	stats[3] = processingCallbackConvertCount;
-	stats[4] = processingCallbackConvertCount
-		? processingCallbackConvertTotalNs / processingCallbackConvertCount : 0;
-	stats[5] = processingCallbackConvertMaxNs;
-	stats[6] = processingCopyCount;
-	stats[7] = processingCopyCount
-		? processingCopyTotalNs / processingCopyCount : 0;
-	stats[8] = processingCopyMaxNs;
-	stats[9] = processingPayloadCount;
-	stats[10] = processingPayloadCount
-		? processingPayloadTotalBytes / processingPayloadCount : 0;
-	stats[11] = processingPayloadMaxBytes;
-	stats[12] = processingPreviewQueueDropCount;
-	stats[13] = processingPreviewQueueDepthSampleCount
-		? processingPreviewQueueDepthTotalMilli / processingPreviewQueueDepthSampleCount : 0;
-	stats[14] = processingPreviewConvertCount
-		? processingPreviewConvertTotalNs / processingPreviewConvertCount : 0;
-	stats[15] = processingEndToEndLatencyMaxNs;
-	stats[16] = processingPreviewQueueDepthMaxMilli;
-	stats[17] = processingPreviewEnqueueDepthSampleCount
-		? processingPreviewEnqueueDepthTotalMilli / processingPreviewEnqueueDepthSampleCount : 0;
-	stats[18] = processingPreviewEnqueueDepthMaxMilli;
-	stats[19] = processingUvcCallbackCount
-		? processingUvcCallbackTotalNs / processingUvcCallbackCount : 0;
-	stats[20] = processingUvcCallbackMaxNs;
-	stats[21] = processingCallbackLagCount
-		? processingCallbackLagTotalNs / processingCallbackLagCount : 0;
-	stats[22] = processingCallbackLagMaxNs;
-	stats[23] = processingCallbackLagCount;
-	stats[24] = processingPreCallbackSkippedFrames;
+	/* Atomically snapshot+reset each field (exchange to 0). The window is
+	 * eventually consistent across fields rather than locked-coherent, which is
+	 * acceptable for periodic diagnostics. */
+	const auto take = [](std::atomic<uint64_t> &field) {
+		return field.exchange(0, std::memory_order_relaxed);
+	};
+	const uint64_t previewConvertCount = take(processingPreviewConvertCount);
+	const uint64_t previewConvertTotalNs = take(processingPreviewConvertTotalNs);
+	const uint64_t previewConvertMaxNs = take(processingPreviewConvertMaxNs);
+	const uint64_t callbackConvertCount = take(processingCallbackConvertCount);
+	const uint64_t callbackConvertTotalNs = take(processingCallbackConvertTotalNs);
+	const uint64_t callbackConvertMaxNs = take(processingCallbackConvertMaxNs);
+	const uint64_t copyCount = take(processingCopyCount);
+	const uint64_t copyTotalNs = take(processingCopyTotalNs);
+	const uint64_t copyMaxNs = take(processingCopyMaxNs);
+	const uint64_t endToEndCount = take(processingEndToEndLatencyCount);
+	const uint64_t endToEndTotalNs = take(processingEndToEndLatencyTotalNs);
+	const uint64_t endToEndMaxNs = take(processingEndToEndLatencyMaxNs);
+	const uint64_t payloadCount = take(processingPayloadCount);
+	const uint64_t payloadTotalBytes = take(processingPayloadTotalBytes);
+	const uint64_t payloadMaxBytes = take(processingPayloadMaxBytes);
+	const uint64_t previewQueueDropCount = take(processingPreviewQueueDropCount);
+	const uint64_t previewQueueDepthSampleCount = take(processingPreviewQueueDepthSampleCount);
+	const uint64_t previewQueueDepthTotalMilli = take(processingPreviewQueueDepthTotalMilli);
+	const uint64_t previewQueueDepthMaxMilli = take(processingPreviewQueueDepthMaxMilli);
+	const uint64_t previewEnqueueDepthSampleCount = take(processingPreviewEnqueueDepthSampleCount);
+	const uint64_t previewEnqueueDepthTotalMilli = take(processingPreviewEnqueueDepthTotalMilli);
+	const uint64_t previewEnqueueDepthMaxMilli = take(processingPreviewEnqueueDepthMaxMilli);
+	const uint64_t uvcCallbackCount = take(processingUvcCallbackCount);
+	const uint64_t uvcCallbackTotalNs = take(processingUvcCallbackTotalNs);
+	const uint64_t uvcCallbackMaxNs = take(processingUvcCallbackMaxNs);
+	const uint64_t callbackLagCount = take(processingCallbackLagCount);
+	const uint64_t callbackLagTotalNs = take(processingCallbackLagTotalNs);
+	const uint64_t callbackLagMaxNs = take(processingCallbackLagMaxNs);
+	const uint64_t preCallbackSkippedFrames = take(processingPreCallbackSkippedFrames);
+	processingUvcSeqState.store(0, std::memory_order_relaxed);
+
+	stats[0] = previewConvertCount;
+	stats[1] = endToEndCount ? endToEndTotalNs / endToEndCount : 0;
+	stats[2] = previewConvertMaxNs;
+	stats[3] = callbackConvertCount;
+	stats[4] = callbackConvertCount ? callbackConvertTotalNs / callbackConvertCount : 0;
+	stats[5] = callbackConvertMaxNs;
+	stats[6] = copyCount;
+	stats[7] = copyCount ? copyTotalNs / copyCount : 0;
+	stats[8] = copyMaxNs;
+	stats[9] = payloadCount;
+	stats[10] = payloadCount ? payloadTotalBytes / payloadCount : 0;
+	stats[11] = payloadMaxBytes;
+	stats[12] = previewQueueDropCount;
+	stats[13] = previewQueueDepthSampleCount
+		? previewQueueDepthTotalMilli / previewQueueDepthSampleCount : 0;
+	stats[14] = previewConvertCount ? previewConvertTotalNs / previewConvertCount : 0;
+	stats[15] = endToEndMaxNs;
+	stats[16] = previewQueueDepthMaxMilli;
+	stats[17] = previewEnqueueDepthSampleCount
+		? previewEnqueueDepthTotalMilli / previewEnqueueDepthSampleCount : 0;
+	stats[18] = previewEnqueueDepthMaxMilli;
+	stats[19] = uvcCallbackCount ? uvcCallbackTotalNs / uvcCallbackCount : 0;
+	stats[20] = uvcCallbackMaxNs;
+	stats[21] = callbackLagCount ? callbackLagTotalNs / callbackLagCount : 0;
+	stats[22] = callbackLagMaxNs;
+	stats[23] = callbackLagCount;
+	stats[24] = preCallbackSkippedFrames;
 	stats[25] = stream_interval_100ns;
 	stats[26] = stream_altsetting >= 0 ? (uint64_t)stream_altsetting : 0;
 	stats[27] = stream_published_count;
 	stats[28] = stream_dropped_before_cb_count;
 	stats[29] = stream_is_isochronous ? 1 : 0;
-	processingPreviewConvertCount = 0;
-	processingPreviewConvertTotalNs = 0;
-	processingPreviewConvertMaxNs = 0;
-	processingCallbackConvertCount = 0;
-	processingCallbackConvertTotalNs = 0;
-	processingCallbackConvertMaxNs = 0;
-	processingCopyCount = 0;
-	processingCopyTotalNs = 0;
-	processingCopyMaxNs = 0;
-	processingEndToEndLatencyCount = 0;
-	processingEndToEndLatencyTotalNs = 0;
-	processingEndToEndLatencyMaxNs = 0;
-	processingPayloadCount = 0;
-	processingPayloadTotalBytes = 0;
-	processingPayloadMaxBytes = 0;
-	processingPreviewQueueDropCount = 0;
-	processingPreviewQueueDepthSampleCount = 0;
-	processingPreviewQueueDepthTotalMilli = 0;
-	processingPreviewQueueDepthMaxMilli = 0;
-	processingPreviewEnqueueDepthSampleCount = 0;
-	processingPreviewEnqueueDepthTotalMilli = 0;
-	processingPreviewEnqueueDepthMaxMilli = 0;
-	processingUvcCallbackCount = 0;
-	processingUvcCallbackTotalNs = 0;
-	processingUvcCallbackMaxNs = 0;
-	processingCallbackLagCount = 0;
-	processingCallbackLagTotalNs = 0;
-	processingCallbackLagMaxNs = 0;
-	processingPreCallbackSkippedFrames = 0;
-	processingLastUvcSequence = 0;
-	processingLastUvcSequenceValid = false;
-	pthread_mutex_unlock(&processing_stats_mutex);
 }
 
 int UVCPreview::setPreviewSize(int width, int height, int min_fps, int max_fps, int mode, float bandwidth) {
@@ -918,36 +903,34 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 			if (!preview || !start_ns)
 				return;
 			const uint64_t elapsed_ns = processing_now_ns() - start_ns;
-			pthread_mutex_lock(&preview->processing_stats_mutex);
-			preview->processingUvcCallbackCount++;
-			preview->processingUvcCallbackTotalNs += elapsed_ns;
-			if (elapsed_ns > preview->processingUvcCallbackMaxNs)
-				preview->processingUvcCallbackMaxNs = elapsed_ns;
-			pthread_mutex_unlock(&preview->processing_stats_mutex);
+			preview->processingUvcCallbackCount.fetch_add(1, std::memory_order_relaxed);
+			preview->processingUvcCallbackTotalNs.fetch_add(elapsed_ns, std::memory_order_relaxed);
+			atomic_store_max(preview->processingUvcCallbackMaxNs, elapsed_ns);
 		}
 	} callback_timing_scope = { preview, processing_now_ns() };
 	if UNLIKELY(!preview->isRunning() || !frame || !frame->frame_format || !frame->data || !frame->data_bytes) return;
-	pthread_mutex_lock(&preview->processing_stats_mutex);
-	if (preview->processingLastUvcSequenceValid) {
-		const uint32_t last_seq = preview->processingLastUvcSequence;
-		if (frame->sequence > last_seq + 1U) {
-			preview->processingPreCallbackSkippedFrames +=
-				(uint64_t)(frame->sequence - last_seq - 1U);
+	{
+		const uint64_t seq_state =
+			preview->processingUvcSeqState.load(std::memory_order_relaxed);
+		if (seq_state & UVC_SEQ_STATE_VALID_BIT) {
+			const uint32_t last_seq = (uint32_t)(seq_state & 0xffffffffULL);
+			if (frame->sequence > last_seq + 1U) {
+				preview->processingPreCallbackSkippedFrames.fetch_add(
+					(uint64_t)(frame->sequence - last_seq - 1U),
+					std::memory_order_relaxed);
+			}
 		}
+		preview->processingUvcSeqState.store(
+			UVC_SEQ_STATE_VALID_BIT | (uint64_t)frame->sequence,
+			std::memory_order_relaxed);
 	}
-	preview->processingLastUvcSequence = frame->sequence;
-	preview->processingLastUvcSequenceValid = true;
-	pthread_mutex_unlock(&preview->processing_stats_mutex);
 	if (LIKELY(frame->arrival_monotonic_ns)) {
 		const uint64_t now_ns = processing_now_ns();
 		if (LIKELY(now_ns > frame->arrival_monotonic_ns)) {
 			const uint64_t lag_ns = now_ns - frame->arrival_monotonic_ns;
-			pthread_mutex_lock(&preview->processing_stats_mutex);
-			preview->processingCallbackLagCount++;
-			preview->processingCallbackLagTotalNs += lag_ns;
-			if (lag_ns > preview->processingCallbackLagMaxNs)
-				preview->processingCallbackLagMaxNs = lag_ns;
-			pthread_mutex_unlock(&preview->processing_stats_mutex);
+			preview->processingCallbackLagCount.fetch_add(1, std::memory_order_relaxed);
+			preview->processingCallbackLagTotalNs.fetch_add(lag_ns, std::memory_order_relaxed);
+			atomic_store_max(preview->processingCallbackLagMaxNs, lag_ns);
 		}
 	}
 	if (!preview->firstFrameLogged) {
@@ -1184,15 +1167,12 @@ void UVCPreview::addPreviewFrame(uvc_frame_t *frame) {
 	if (isRunning()) {
 		uvc_frame_t *drop = preview_frame_ring.enqueue_drop_oldest_if_full(frame);
 		recordPreviewEnqueueDepthSample(
-			&processing_stats_mutex,
 			&processingPreviewEnqueueDepthSampleCount,
 			&processingPreviewEnqueueDepthTotalMilli,
 			&processingPreviewEnqueueDepthMaxMilli,
 			static_cast<uint64_t>(preview_frame_ring.size()));
 		if UNLIKELY(drop) {
-			pthread_mutex_lock(&processing_stats_mutex);
-			processingPreviewQueueDropCount++;
-			pthread_mutex_unlock(&processing_stats_mutex);
+			processingPreviewQueueDropCount.fetch_add(1, std::memory_order_relaxed);
 			recycle_frame(drop);
 		}
 		frame = nullptr;
