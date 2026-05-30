@@ -56,6 +56,7 @@ LOCAL_CFLAGS := $(LOCAL_C_INCLUDES:%=-I%)
 LOCAL_CFLAGS += -DANDROID_NDK
 LOCAL_CFLAGS += -DLOG_NDEBUG
 LOCAL_CFLAGS += -DUVC_DEBUGGING
+LOCAL_CFLAGS += $(CONSOLATION_FIRST_PARTY_LTO_CFLAGS)
 
 # Tune isoch transfer ring vs RAM / latency (-DLIBUVC_NUM_TRANSFER_BUFS=N)
 # LOCAL_CFLAGS += -DLIBUVC_NUM_TRANSFER_BUFS=12
@@ -88,16 +89,4 @@ LOCAL_SRC_FILES := \
 LOCAL_MODULE := libuvc_static
 include $(BUILD_STATIC_LIBRARY)
 
-######################################################################
-# libuvc.so
-######################################################################
-include $(CLEAR_VARS)
-LOCAL_MODULE_TAGS := optional
-LOCAL_EXPORT_LDLIBS += -llog
-
-LOCAL_WHOLE_STATIC_LIBRARIES = libuvc_static
-LOCAL_STATIC_LIBRARIES += libyuv_static
-LOCAL_DISABLE_FATAL_LINKER_WARNINGS := true
-
-LOCAL_MODULE := uvc
-include $(BUILD_SHARED_LIBRARY)
+# libuvc is linked into libUVCCamera.so (first-party merge + LTO); no libuvc.so.

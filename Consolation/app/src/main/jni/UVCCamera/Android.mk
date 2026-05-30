@@ -37,6 +37,9 @@ LOCAL_C_INCLUDES := \
 		$(LOCAL_PATH)/ \
 		$(LOCAL_PATH)/../libusb-1.0.29 \
 		$(LOCAL_PATH)/../ \
+		$(LOCAL_PATH)/../libuvc/include \
+		$(LOCAL_PATH)/../libuvc/include/libuvc \
+		$(LOCAL_PATH)/../libyuv/include \
 		$(LOCAL_PATH)/../rapidjson/include \
 
 LOCAL_CFLAGS := $(LOCAL_C_INCLUDES:%=-I%)
@@ -44,12 +47,19 @@ LOCAL_CFLAGS += -DANDROID_NDK
 LOCAL_CFLAGS += -DLOG_NDEBUG
 LOCAL_CFLAGS += -DACCESS_RAW_DESCRIPTORS
 LOCAL_CFLAGS += -O3 -fstrict-aliasing -fprefetch-loop-arrays
+LOCAL_CFLAGS += $(CONSOLATION_FIRST_PARTY_LTO_CFLAGS)
 
 LOCAL_LDLIBS := -L$(SYSROOT)/usr/lib -ldl
 LOCAL_LDLIBS += -llog
 LOCAL_LDLIBS += -landroid
 
-LOCAL_SHARED_LIBRARIES += usb100 uvc
+LOCAL_LDFLAGS += $(CONSOLATION_FIRST_PARTY_LTO_LDFLAGS)
+LOCAL_DISABLE_FATAL_LINKER_WARNINGS := true
+
+# First-party libuvc is merged here (not a separate libuvc.so).
+LOCAL_WHOLE_STATIC_LIBRARIES += libuvc_static
+LOCAL_STATIC_LIBRARIES += libyuv_static
+LOCAL_SHARED_LIBRARIES += usb100 jpeg-turbo3141
 
 LOCAL_ARM_MODE := arm
 
