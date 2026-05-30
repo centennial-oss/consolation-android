@@ -52,6 +52,8 @@ LOCAL_CFLAGS += $(CONSOLATION_FIRST_PARTY_LTO_CFLAGS)
 LOCAL_LDLIBS := -L$(SYSROOT)/usr/lib -ldl
 LOCAL_LDLIBS += -llog
 LOCAL_LDLIBS += -landroid
+LOCAL_LDLIBS += -lEGL
+LOCAL_LDLIBS += -lGLESv3
 
 LOCAL_LDFLAGS += $(CONSOLATION_FIRST_PARTY_LTO_LDFLAGS)
 LOCAL_DISABLE_FATAL_LINKER_WARNINGS := true
@@ -68,6 +70,7 @@ LOCAL_SRC_FILES := \
 		jni_iframe_callback_cache.cpp \
 		utilbase.cpp \
 		UVCCamera.cpp \
+		UVCGpuPreviewRenderer.cpp \
 		UVCPreview.cpp \
 		UVCButtonCallback.cpp \
 		UVCStatusCallback.cpp \

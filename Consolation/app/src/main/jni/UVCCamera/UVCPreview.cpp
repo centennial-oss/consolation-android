@@ -174,6 +174,7 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	mIsCapturing(false),
 	capture_thread_joinable(false),
 	captureQueu(NULL),
+	mGpuPreviewRenderer(new UVCGpuPreviewRenderer()),
 	mFrameCallbackObj(NULL),
 	mFrameCallbackFunc(NULL),
 	callbackPixelBytes(2),
@@ -271,6 +272,11 @@ UVCPreview::~UVCPreview() {
 	if (mCaptureWindow)
 		ANativeWindow_release(mCaptureWindow);
 	mCaptureWindow = NULL;
+	if (mGpuPreviewRenderer) {
+		mGpuPreviewRenderer->shutdown();
+		delete mGpuPreviewRenderer;
+		mGpuPreviewRenderer = NULL;
+	}
 	clearPreviewFrame();
 	clearCaptureFrame();
 	clear_pool();
@@ -643,6 +649,8 @@ int UVCPreview::setPreviewDisplay(ANativeWindow *preview_window) {
 		if (mPreviewWindow != preview_window) {
 			if (mPreviewWindow)
 				ANativeWindow_release(mPreviewWindow);
+			if (mGpuPreviewRenderer)
+				mGpuPreviewRenderer->resetSurface();
 			mPreviewWindow = preview_window;
 			if (LIKELY(mPreviewWindow)) {
 				ANativeWindow_setBuffersGeometry(mPreviewWindow,
@@ -875,6 +883,8 @@ int UVCPreview::stopPreview() {
 	clearCaptureFrame();
 	pthread_mutex_lock(&preview_mutex);
 	if (mPreviewWindow) {
+		if (mGpuPreviewRenderer)
+			mGpuPreviewRenderer->resetSurface();
 		ANativeWindow_release(mPreviewWindow);
 		mPreviewWindow = NULL;
 	}
@@ -968,19 +978,30 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 			bool preview_rendered = false;
 
 			if (UNLIKELY(preview->capture_thread_joinable)) {
+				preview_rendered = preview->renderFrameDirectToSurface(frame,
+					&preview->mPreviewWindow, &preview->preview_mutex,
+					&preview_ready_ns, &surface_wait_ns);
+				if (preview_rendered && preview_ready_ns
+						&& frame->arrival_monotonic_ns
+						&& preview_ready_ns > frame->arrival_monotonic_ns + surface_wait_ns)
+					preview->recordEndToEndLatencyDuration(
+						preview_ready_ns - frame->arrival_monotonic_ns - surface_wait_ns);
+
 				uvc_frame_t *rgbx = preview->convertPreviewFrameToRgbx(frame);
 				if (LIKELY(rgbx)) {
-					pthread_mutex_lock(&preview->preview_mutex);
-					const uint64_t t_copy = processing_now_ns();
-					if (copyToSurface(rgbx, &preview->mPreviewWindow,
-							&preview_ready_ns, &surface_wait_ns) == 0) {
-						const uint64_t t_end = preview_ready_ns ? preview_ready_ns : processing_now_ns();
-						preview->recordSurfaceCopyTiming(t_end - t_copy);
-						if (frame->arrival_monotonic_ns && t_end > frame->arrival_monotonic_ns + surface_wait_ns)
-							preview->recordEndToEndLatencyDuration(
-								t_end - frame->arrival_monotonic_ns - surface_wait_ns);
+					if (!preview_rendered) {
+						pthread_mutex_lock(&preview->preview_mutex);
+						const uint64_t t_copy = processing_now_ns();
+						if (copyToSurface(rgbx, &preview->mPreviewWindow,
+								&preview_ready_ns, &surface_wait_ns) == 0) {
+							const uint64_t t_end = preview_ready_ns ? preview_ready_ns : processing_now_ns();
+							preview->recordSurfaceCopyTiming(t_end - t_copy);
+							if (frame->arrival_monotonic_ns && t_end > frame->arrival_monotonic_ns + surface_wait_ns)
+								preview->recordEndToEndLatencyDuration(
+									t_end - frame->arrival_monotonic_ns - surface_wait_ns);
+						}
+						pthread_mutex_unlock(&preview->preview_mutex);
 					}
-					pthread_mutex_unlock(&preview->preview_mutex);
 
 					if (preview->capture_thread_joinable) {
 						preview->addCaptureFrame(rgbx);
@@ -1060,6 +1081,13 @@ bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
 	pthread_mutex_lock(window_mutex);
 	ANativeWindow *target = *window;
 	if (LIKELY(target)) {
+		if (frame->frame_format != UVC_FRAME_FORMAT_MJPEG
+				&& mGpuPreviewRenderer
+				&& mGpuPreviewRenderer->render(frame, target, frame_ready_ns)) {
+			rendered = true;
+			pthread_mutex_unlock(window_mutex);
+			return rendered;
+		}
 		ANativeWindow_Buffer buffer;
 		const uint64_t lock_start_ns = processing_now_ns();
 		if (LIKELY(ANativeWindow_lock(target, &buffer, NULL) == 0)) {

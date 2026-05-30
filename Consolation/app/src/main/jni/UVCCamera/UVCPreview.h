@@ -32,6 +32,7 @@
 #include <android/native_window.h>
 #include "bounded_pointer_ring.h"
 #include "objectarray.h"
+#include "UVCGpuPreviewRenderer.h"
 
 #pragma interface
 
@@ -87,6 +88,7 @@ private:
 	pthread_mutex_t capture_mutex;
 	pthread_cond_t capture_sync;
 	uvc_frame_t *captureQueu;			// keep latest frame
+	UVCGpuPreviewRenderer *mGpuPreviewRenderer;
 	jobject mFrameCallbackObj;
 	convFunc_t mFrameCallbackFunc;
 	Fields_iframecallback iframecallback_fields;
