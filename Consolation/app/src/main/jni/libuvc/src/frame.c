@@ -921,6 +921,31 @@ static void p010_to_rgbx_neon(const uint8_t *y_plane, const uint8_t *uv_plane,
 	}
 }
 
+/* BGR3: 24-bit BGR packed pixels. vld3 de-interleaves B/G/R; vst4 writes
+ * RGBX with alpha 0xff. */
+static void bgr2rgbx_neon_line(const uint8_t *src, uint8_t *dst, int width) {
+	int x = 0;
+	for (; x + 16 <= width; x += 16) {
+		const uint8x16x3_t bgr = vld3q_u8(src);
+		uint8x16x4_t rgbx;
+		rgbx.val[0] = bgr.val[2];
+		rgbx.val[1] = bgr.val[1];
+		rgbx.val[2] = bgr.val[0];
+		rgbx.val[3] = vdupq_n_u8(0xff);
+		vst4q_u8(dst, rgbx);
+		src += 48;
+		dst += 64;
+	}
+	for (; x < width; ++x) {
+		dst[0] = src[2];
+		dst[1] = src[1];
+		dst[2] = src[0];
+		dst[3] = 0xff;
+		src += PIXEL_BGR;
+		dst += PIXEL_RGBX;
+	}
+}
+
 #endif
 
 static uvc_error_t internal_yuyv2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
@@ -1245,6 +1270,15 @@ static uvc_error_t internal_bgr2rgbx(uvc_frame_t *in, uvc_frame_t *out) {
 	const size_t src_step = in->step ? in->step : width * PIXEL_BGR;
 	uint8_t * restrict dst = out->data;
 	const size_t dst_step = out->step;
+
+#if LIBUVC_HAS_ARM_NEON
+	if (LIKELY(width >= 16)) {
+		for (size_t y = 0; y < height; ++y) {
+			bgr2rgbx_neon_line(src + y * src_step, dst + y * dst_step, (int) width);
+		}
+		return UVC_SUCCESS;
+	}
+#endif
 
 	for (size_t y = 0; y < height; ++y) {
 		const uint8_t *src_row = src + y * src_step;
