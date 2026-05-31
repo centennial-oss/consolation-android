@@ -33,20 +33,20 @@
 #*********************************************************************/
 
 ######################################################################
-# libuvc_static.a (static library with static link to libjpeg, libusb1.0)
+# libuvc_static.a (static library with static link to libjpeg, libusb1)
 ######################################################################
 LOCAL_PATH	:= $(call my-dir)/../..
 include $(CLEAR_VARS)
 
 LOCAL_C_INCLUDES += \
-	$(LOCAL_PATH)/../libusb-1.0.29 \
+	$(LOCAL_PATH)/../libusb-1.0.30 \
 	$(LOCAL_PATH)/.. \
 	$(LOCAL_PATH)/include \
 	$(LOCAL_PATH)/include/libuvc \
 	$(LOCAL_PATH)/../libyuv/include
 
 LOCAL_EXPORT_C_INCLUDES := \
-	$(LOCAL_PATH)/../libusb-1.0.29 \
+	$(LOCAL_PATH)/../libusb-1.0.30 \
 	$(LOCAL_PATH)/ \
 	$(LOCAL_PATH)/include \
 	$(LOCAL_PATH)/include/libuvc \
@@ -70,7 +70,7 @@ endif
 
 #LOCAL_STATIC_LIBRARIES += jpeg-turbo3141_static
 LOCAL_SHARED_LIBRARIES += jpeg-turbo3141
-LOCAL_SHARED_LIBRARIES += usb100
+LOCAL_SHARED_LIBRARIES += libusb1
 LOCAL_STATIC_LIBRARIES += libyuv_static
 
 LOCAL_SRC_FILES := \

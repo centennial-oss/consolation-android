@@ -66,7 +66,7 @@ You can make a debug build with `make build` and a release build with `make buil
 We use [libjpeg-turbo v3.1.4.1](https://github.com/libjpeg-turbo/libjpeg-turbo) unmodified to decode the MJPEG pixel format.
 
 ### libusb
-We use [libusb v1.0.29](https://github.com/libusb/libusb) to stream from UVC capture cards, with internal modifications for memory optimizations. See the [patches](patches) directory for details.
+We use [libusb v1.0.30](https://github.com/libusb/libusb) to stream from UVC capture cards, with internal modifications for memory optimizations. See the [patches](patches) directory for details.
 
 ### UVCCamera and libuvc
 

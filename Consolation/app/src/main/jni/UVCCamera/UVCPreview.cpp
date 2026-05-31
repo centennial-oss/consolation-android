@@ -168,6 +168,8 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	frameBytes(DEFAULT_PREVIEW_WIDTH * DEFAULT_PREVIEW_HEIGHT * 2),	// YUYV
 	frameMode(0),
 	preview_frame_ring(PREVIEW_QUEUE_MAX),
+	mjpeg_decode_thread_joinable(false),
+	mjpeg_decode_frame_ring(MJPEG_DECODE_QUEUE_MAX),
 	previewFormat(WINDOW_FORMAT_RGBX_8888),
 	previewBytes(DEFAULT_PREVIEW_WIDTH * DEFAULT_PREVIEW_HEIGHT * PREVIEW_PIXEL_BYTES),
 	mIsRunning(false),
@@ -222,6 +224,8 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	ENTER();
 	pthread_cond_init(&preview_sync, NULL);
 	pthread_mutex_init(&preview_mutex, NULL);
+	pthread_cond_init(&mjpeg_decode_sync, NULL);
+	pthread_mutex_init(&mjpeg_decode_mutex, NULL);
 //
 	pthread_cond_init(&capture_sync, NULL);
 	pthread_mutex_init(&capture_mutex, NULL);
@@ -283,10 +287,13 @@ UVCPreview::~UVCPreview() {
 		mMjpegPreviewYuvFrame = NULL;
 	}
 	clearPreviewFrame();
+	clearMjpegDecodeFrame();
 	clearCaptureFrame();
 	clear_pool();
 	pthread_mutex_destroy(&preview_mutex);
 	pthread_cond_destroy(&preview_sync);
+	pthread_mutex_destroy(&mjpeg_decode_mutex);
+	pthread_cond_destroy(&mjpeg_decode_sync);
 	pthread_mutex_destroy(&capture_mutex);
 	pthread_cond_destroy(&capture_sync);
 	pthread_mutex_destroy(&pool_mutex);
@@ -871,6 +878,9 @@ int UVCPreview::stopPreview() {
 	if (LIKELY(b)) {
 		mIsRunning = false;
 		pthread_cond_signal(&preview_sync);
+		pthread_mutex_lock(&mjpeg_decode_mutex);
+		pthread_cond_signal(&mjpeg_decode_sync);
+		pthread_mutex_unlock(&mjpeg_decode_mutex);
 		if (capture_thread_joinable)
 			pthread_cond_signal(&capture_sync);
 		if (capture_thread_joinable) {
@@ -982,6 +992,14 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 			uint64_t surface_wait_ns = 0;
 			bool preview_rendered = false;
 
+			if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG
+					&& !has_preview_callback
+					&& !has_capture_consumers
+					&& preview->mjpeg_decode_thread_joinable) {
+				preview->addMjpegDecodeFrame(frame);
+				return;
+			}
+
 			if (UNLIKELY(preview->capture_thread_joinable)) {
 				preview_rendered = preview->renderFrameDirectToSurface(frame,
 					&preview->mPreviewWindow, &preview->preview_mutex,
@@ -1074,6 +1092,125 @@ uvc_frame_t *UVCPreview::createFrameNotification(uvc_frame_t *frame) {
 	notification->source = frame->source;
 	notification->actual_bytes = notification->data ? 1 : 0;
 	return notification;
+}
+
+bool UVCPreview::startMjpegDecodeWorker() {
+	if (mjpeg_decode_thread_joinable || frameMode != REQUEST_MODE_MJPEG)
+		return true;
+	mjpeg_decode_thread_joinable = true;
+	const int result = pthread_create(&mjpeg_decode_thread, NULL,
+		mjpeg_decode_thread_func, (void *)this);
+	if (UNLIKELY(result != 0)) {
+		mjpeg_decode_thread_joinable = false;
+		LOGW("UVCPreview::startMjpegDecodeWorker pthread_create failed");
+		return false;
+	}
+	return true;
+}
+
+void UVCPreview::stopMjpegDecodeWorker() {
+	const bool should_join = mjpeg_decode_thread_joinable;
+	pthread_mutex_lock(&mjpeg_decode_mutex);
+	mjpeg_decode_thread_joinable = false;
+	pthread_cond_signal(&mjpeg_decode_sync);
+	pthread_mutex_unlock(&mjpeg_decode_mutex);
+	if (should_join) {
+		if (pthread_join(mjpeg_decode_thread, NULL) != EXIT_SUCCESS)
+			LOGW("UVCPreview::stopMjpegDecodeWorker pthread_join failed");
+	}
+	clearMjpegDecodeFrame();
+}
+
+void UVCPreview::addMjpegDecodeFrame(uvc_frame_t *frame) {
+	if (UNLIKELY(!frame))
+		return;
+
+	uvc_frame_t *queued = uvc_allocate_frame(0);
+	if (UNLIKELY(!queued))
+		return;
+	*queued = *frame;
+	queued->library_owns_data = 0;
+	uvc_frame_retain(queued);
+	pthread_mutex_lock(&mjpeg_decode_mutex);
+	if (isRunning() && mjpeg_decode_thread_joinable) {
+		uvc_frame_t *drop = mjpeg_decode_frame_ring.enqueue_drop_oldest_if_full(queued);
+		if (drop) {
+			processingPreviewQueueDropCount.fetch_add(1, std::memory_order_relaxed);
+			uvc_frame_release(drop);
+			uvc_free_frame(drop);
+		}
+		queued = NULL;
+		pthread_cond_signal(&mjpeg_decode_sync);
+	}
+	pthread_mutex_unlock(&mjpeg_decode_mutex);
+	if (queued) {
+		uvc_frame_release(queued);
+		uvc_free_frame(queued);
+	}
+}
+
+uvc_frame_t *UVCPreview::waitMjpegDecodeFrame() {
+	uvc_frame_t *frame = NULL;
+	pthread_mutex_lock(&mjpeg_decode_mutex);
+	while (isRunning() && mjpeg_decode_thread_joinable
+			&& mjpeg_decode_frame_ring.empty())
+		pthread_cond_wait(&mjpeg_decode_sync, &mjpeg_decode_mutex);
+	if (LIKELY(isRunning() && mjpeg_decode_thread_joinable
+			&& !mjpeg_decode_frame_ring.empty()))
+		frame = mjpeg_decode_frame_ring.dequeue();
+	pthread_mutex_unlock(&mjpeg_decode_mutex);
+	return frame;
+}
+
+void UVCPreview::clearMjpegDecodeFrame() {
+	pthread_mutex_lock(&mjpeg_decode_mutex);
+	while (!mjpeg_decode_frame_ring.empty()) {
+		uvc_frame_t *frame = mjpeg_decode_frame_ring.dequeue();
+		uvc_frame_release(frame);
+		uvc_free_frame(frame);
+	}
+	mjpeg_decode_frame_ring.reset_storage();
+	pthread_mutex_unlock(&mjpeg_decode_mutex);
+}
+
+void *UVCPreview::mjpeg_decode_thread_func(void *vptr_args) {
+#if defined(__ANDROID__)
+	consolation_tune_thread_latency("UVC-mjpg");
+#endif
+	UVCPreview *preview = reinterpret_cast<UVCPreview *>(vptr_args);
+	if (LIKELY(preview))
+		preview->do_mjpeg_decode();
+	pthread_exit(NULL);
+}
+
+void UVCPreview::do_mjpeg_decode() {
+	for (; LIKELY(isRunning() && mjpeg_decode_thread_joinable); ) {
+		uvc_frame_t *frame = waitMjpegDecodeFrame();
+		if (!frame)
+			break;
+
+		uvc_frame_t *decoded = get_frame(0);
+		if (LIKELY(decoded)) {
+			const uint64_t t_convert = processing_now_ns();
+			const uvc_error_t result = uvc_mjpeg2yuv_planar(frame, decoded);
+			recordPreviewConversionTiming(processing_now_ns() - t_convert);
+			if (LIKELY(result == UVC_SUCCESS)) {
+				addPreviewFrame(decoded);
+				decoded = NULL;
+			} else {
+				UVC_DIAG_LOGI("mjpeg-diag:async-planar-decode-fail seq=%u bytes=%zu result=%d frame=%ux%u",
+					frame->sequence,
+					frame->actual_bytes,
+					result,
+					frame->width,
+					frame->height);
+			}
+		}
+		if (decoded)
+			recycle_frame(decoded);
+		uvc_frame_release(frame);
+		uvc_free_frame(frame);
+	}
 }
 
 bool UVCPreview::renderFrameDirectToSurface(uvc_frame_t *frame,
@@ -1223,11 +1360,13 @@ void UVCPreview::addPreviewFrame(uvc_frame_t *frame) {
 	pthread_mutex_lock(&preview_mutex);
 	if (isRunning()) {
 		uvc_frame_t *drop = preview_frame_ring.enqueue_drop_oldest_if_full(frame);
+		const uint64_t queued_backlog =
+			preview_frame_ring.size() > 0 ? preview_frame_ring.size() - 1 : 0;
 		recordPreviewEnqueueDepthSample(
 			&processingPreviewEnqueueDepthSampleCount,
 			&processingPreviewEnqueueDepthTotalMilli,
 			&processingPreviewEnqueueDepthMaxMilli,
-			static_cast<uint64_t>(preview_frame_ring.size()));
+			queued_backlog);
 		if UNLIKELY(drop) {
 			processingPreviewQueueDropCount.fetch_add(1, std::memory_order_relaxed);
 			recycle_frame(drop);
@@ -1364,6 +1503,8 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 		streamingStartMonotonicNs = processing_now_ns();
 		firstFrameLogged = false;
 		clearPreviewFrame();
+		if (frameMode == REQUEST_MODE_MJPEG)
+			startMjpegDecodeWorker();
 #if LOCAL_DEBUG
 		LOGI("Streaming...");
 #endif
@@ -1408,6 +1549,19 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 						}
 						continue;
 					}
+					if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG_YUV_PLANAR) {
+						uint64_t frame_ready_ns = 0;
+						uint64_t surface_wait_ns = 0;
+						if (renderFrameDirectToSurface(frame, &mPreviewWindow,
+								&preview_mutex, &frame_ready_ns, &surface_wait_ns)
+								&& frame_ready_ns && frame->arrival_monotonic_ns) {
+							recordEndToEndLatencyTiming(frame->arrival_monotonic_ns,
+								frame_ready_ns);
+						}
+						recycle_frame(frame);
+						frame = NULL;
+						continue;
+					}
 					if (frame->frame_format != UVC_FRAME_FORMAT_UNKNOWN)
 						frame = draw_preview_one(frame, &mPreviewWindow, nullptr,
 							PREVIEW_PIXEL_BYTES);
@@ -1428,6 +1582,7 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 #if LOCAL_DEBUG
 		LOGI("preview_thread_func:wait for all callbacks complete");
 #endif
+		stopMjpegDecodeWorker();
 		uvc_stop_streaming(mDeviceHandle);
 		LOGI("startup-diag:uvc_stop_streaming called");
 #if LOCAL_DEBUG

@@ -23,15 +23,15 @@ DEBUG_AUTOSTART_FILE := Consolation/app/src/debug/java/org/centennialoss/consola
 # Set JAVA_HOME to the Android Studio bundled JDK
 export JAVA_HOME := /Applications/Android Studio.app/Contents/jbr/Contents/Home
 
-LIBUSB_DIR    := Consolation/app/src/main/jni/libusb-1.0.29
-PREALLOC_DIR  := patches/libusb-1.0.29-prealloc
+LIBUSB_DIR    := Consolation/app/src/main/jni/libusb-1.0.30
+PREALLOC_DIR  := patches/libusb-1.0.30-prealloc
 PREALLOC_SENTINEL := $(LIBUSB_DIR)/.prealloc-applied
 
 patch-libusb: $(PREALLOC_SENTINEL)
 
 $(PREALLOC_SENTINEL):
 	patch --forward --batch -p1 \
-		< $(PREALLOC_DIR)/libusb-1.0.29-prealloc.patch
+		< $(PREALLOC_DIR)/libusb-1.0.30-prealloc.patch
 	cp $(PREALLOC_DIR)/libusb_prealloc_ext.c $(LIBUSB_DIR)/libusb/os/
 	cp $(PREALLOC_DIR)/libusb_prealloc.h     $(LIBUSB_DIR)/libusb/
 	touch $(PREALLOC_SENTINEL)

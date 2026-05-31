@@ -38,6 +38,8 @@
 
 /** Preview FIFO depth; drop-oldest on overflow (see BoundedPointerRing). */
 #define PREVIEW_QUEUE_MAX 4
+/** MJPEG decode input depth; keep tight to avoid adding frame latency. */
+#define MJPEG_DECODE_QUEUE_MAX 2
 
 #define DEFAULT_PREVIEW_WIDTH 640
 #define DEFAULT_PREVIEW_HEIGHT 480
@@ -77,6 +79,11 @@ private:
 	pthread_cond_t preview_sync;
 	/** Incoming frames; fixed ring, O(1) enqueue with drop-oldest on overflow */
 	BoundedPointerRing<uvc_frame_t *> preview_frame_ring;
+	pthread_t mjpeg_decode_thread;
+	volatile bool mjpeg_decode_thread_joinable;
+	pthread_mutex_t mjpeg_decode_mutex;
+	pthread_cond_t mjpeg_decode_sync;
+	BoundedPointerRing<uvc_frame_t *> mjpeg_decode_frame_ring;
 	int previewFormat;
 	size_t previewBytes;
 //
@@ -161,6 +168,13 @@ private:
 		pthread_mutex_t *window_mutex, uint64_t *frame_ready_ns = NULL,
 		uint64_t *surface_wait_ns = NULL);
 	uvc_frame_t *createFrameNotification(uvc_frame_t *frame);
+	bool startMjpegDecodeWorker();
+	void stopMjpegDecodeWorker();
+	void addMjpegDecodeFrame(uvc_frame_t *frame);
+	uvc_frame_t *waitMjpegDecodeFrame();
+	void clearMjpegDecodeFrame();
+	static void *mjpeg_decode_thread_func(void *vptr_args);
+	void do_mjpeg_decode();
 	void addPreviewFrame(uvc_frame_t *frame);
 	uvc_frame_t *waitPreviewFrame();
 	void clearPreviewFrame();
