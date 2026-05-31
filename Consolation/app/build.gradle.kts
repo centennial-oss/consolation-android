@@ -1,9 +1,11 @@
 import java.io.File
 import java.util.Properties
+import com.github.triplet.gradle.androidpublisher.ReleaseStatus
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.play.publisher)
 }
 
 /** Prefer Consolation/keystore.properties, then repo-root keystore.properties (Gradle root is Consolation/). */
@@ -150,6 +152,24 @@ android {
             path = file("src/main/jni/Android.mk")
         }
     }
+}
+
+play {
+    serviceAccountCredentials.set(
+        rootProject.file(
+            providers.gradleProperty("consolation.play.serviceAccountCredentials")
+                .orElse("play-service-account.json")
+                .get()
+        )
+    )
+    artifactDir.set(rootProject.layout.projectDirectory.dir("app/build/outputs/bundle/release"))
+    track.set(providers.gradleProperty("consolation.play.track").orElse("internal"))
+    releaseName.set(providers.gradleProperty("consolation.play.releaseName").orElse(appVersionName))
+    releaseStatus.set(
+        providers.gradleProperty("consolation.play.releaseStatus")
+            .map { ReleaseStatus.valueOf(it.uppercase()) }
+            .orElse(ReleaseStatus.COMPLETED)
+    )
 }
 
 dependencies {
