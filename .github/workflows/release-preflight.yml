@@ -14,5 +14,5 @@ jobs:
     with:
       is_preflight: true
       build_number: ${{ github.run_number }}
-      play_track: production
+      play_track: internal
     secrets: inherit

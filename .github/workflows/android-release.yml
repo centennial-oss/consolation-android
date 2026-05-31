@@ -9,7 +9,7 @@ on:
         required: true
       build_number:
         description: Build number from the calling workflow run
-        type: number
+        type: string
         required: true
       play_track:
         description: Google Play track (internal, production, etc.)
