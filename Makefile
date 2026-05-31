@@ -39,8 +39,14 @@ PREALLOC_SENTINEL := $(LIBUSB_DIR)/.prealloc-applied
 patch-libusb: $(PREALLOC_SENTINEL)
 
 $(PREALLOC_SENTINEL):
-	patch --forward --batch -p1 \
-		< $(PREALLOC_DIR)/libusb-1.0.30-prealloc.patch
+	@if patch --dry-run --forward --batch -p1 < $(PREALLOC_DIR)/libusb-1.0.30-prealloc.patch >/dev/null 2>&1; then \
+		patch --forward --batch -p1 < $(PREALLOC_DIR)/libusb-1.0.30-prealloc.patch; \
+	elif patch --dry-run --reverse --batch -p1 < $(PREALLOC_DIR)/libusb-1.0.30-prealloc.patch >/dev/null 2>&1; then \
+		echo "libusb prealloc patch already applied"; \
+	else \
+		echo "error: libusb prealloc patch does not apply cleanly" >&2; \
+		exit 1; \
+	fi
 	cp $(PREALLOC_DIR)/libusb_prealloc_ext.c $(LIBUSB_DIR)/libusb/os/
 	cp $(PREALLOC_DIR)/libusb_prealloc.h     $(LIBUSB_DIR)/libusb/
 	touch $(PREALLOC_SENTINEL)
