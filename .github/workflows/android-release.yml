@@ -1,0 +1,73 @@
+name: Android Release
+
+on:
+  workflow_call:
+    inputs:
+      is_preflight:
+        description: Run preflight checks instead of publishing a release
+        type: boolean
+        required: true
+      build_number:
+        description: Build number from the calling workflow run
+        type: number
+        required: true
+      play_track:
+        description: Google Play track (internal, production, etc.)
+        type: string
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+      ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
+      PLAY_TRACK: ${{ inputs.play_track }}
+      PLAY_RELEASE_STATUS: DRAFT
+      BUILD_NUMBER: ${{ inputs.build_number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate release secrets
+        if: inputs.is_preflight
+        run: make validate-android-release-secret-material
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Run Android release preflight
+        if: inputs.is_preflight
+        run: make android-release-preflight
+
+      - name: Build signed artifacts and upload to Play Console
+        if: inputs.is_preflight == false
+        run: make android-publish-release
+
+      - name: Create draft GitHub release
+        if: inputs.is_preflight == false
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/release/Consolation-*-android.apk
+            dist/release/Consolation-*-android.aab
+          generate_release_notes: true
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

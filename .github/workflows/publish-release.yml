@@ -15,47 +15,9 @@ permissions:
 jobs:
   build-publish-and-release:
     if: github.repository_owner == 'centennial-oss'
-    runs-on: ubuntu-latest
-    env:
-      ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
-      ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
-      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
-      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
-      PLAY_TRACK: internal
-      PLAY_RELEASE_STATUS: DRAFT
-      BUILD_NUMBER: ${{ github.run_number }}
-    steps:
-      - name: Print Build Number
-        run: echo "BUILD_NUMBER=${BUILD_NUMBER}"
-
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up JDK
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Build signed artifacts and upload to Play Console
-        run: make android-publish-release
-
-      - name: Create draft GitHub release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            dist/release/Consolation-*-android.apk
-            dist/release/Consolation-*-android.aab
-          generate_release_notes: true
-          draft: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    uses: ./.github/workflows/android-release.yml
+    with:
+      is_preflight: false
+      build_number: ${{ github.run_number }}
+      play_track: internal
+    secrets: inherit
