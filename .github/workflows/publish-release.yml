@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,7 +22,7 @@ jobs:
       ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
       ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
       GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
-      PLAY_TRACK: production
+      PLAY_TRACK: internal
       PLAY_RELEASE_STATUS: DRAFT
       BUILD_NUMBER: ${{ github.run_number }}
     steps:
@@ -35,28 +34,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      # - name: Set up JDK
-      #   uses: actions/setup-java@v5
-      #   with:
-      #     distribution: temurin
-      #     java-version: '21'
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
 
-      # - name: Set up Android SDK
-      #   uses: android-actions/setup-android@v4
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
 
-      # - name: Set up Gradle
-      #   uses: gradle/actions/setup-gradle@v6
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
 
-      # - name: Build signed artifacts and upload to Play Console
-      #   run: make android-publish-release
+      - name: Build signed artifacts and upload to Play Console
+        run: make android-publish-release
 
-      # - name: Create draft GitHub release
-      #   uses: softprops/action-gh-release@v3
-      #   with:
-      #     files: |
-      #       dist/release/Consolation-*-android.apk
-      #       dist/release/Consolation-*-android.aab
-      #     generate_release_notes: true
-      #     draft: true
-      #   env:
-      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create draft GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/release/Consolation-*-android.apk
+            dist/release/Consolation-*-android.aab
+          generate_release_notes: true
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
