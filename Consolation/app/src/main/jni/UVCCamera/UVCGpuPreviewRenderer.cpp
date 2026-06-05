@@ -32,7 +32,7 @@ static const char *vertex_shader_src =
 
 static const char *yuyv_fragment_shader_src =
 	"#version 300 es\n"
-	"precision mediump float;\n"
+	"precision highp float;\n"
 	"precision highp int;\n"
 	"uniform sampler2D uPacked;\n"
 	"uniform int uWidth;\n"
@@ -70,7 +70,7 @@ static const char *yuyv_fragment_shader_src =
 
 static const char *nv12_fragment_shader_src =
 	"#version 300 es\n"
-	"precision mediump float;\n"
+	"precision highp float;\n"
 	"precision highp int;\n"
 	"uniform sampler2D uY;\n"
 	"uniform sampler2D uUV;\n"
@@ -93,7 +93,7 @@ static const char *nv12_fragment_shader_src =
 
 static const char *yu12_fragment_shader_src =
 	"#version 300 es\n"
-	"precision mediump float;\n"
+	"precision highp float;\n"
 	"precision highp int;\n"
 	"uniform sampler2D uY;\n"
 	"uniform sampler2D uU;\n"
@@ -118,7 +118,7 @@ static const char *yu12_fragment_shader_src =
 
 static const char *mjpeg_planar_fragment_shader_src =
 	"#version 300 es\n"
-	"precision mediump float;\n"
+	"precision highp float;\n"
 	"precision highp int;\n"
 	"uniform sampler2D uY;\n"
 	"uniform sampler2D uU;\n"
@@ -152,7 +152,7 @@ static const char *mjpeg_planar_fragment_shader_src =
 
 static const char *bgr_fragment_shader_src =
 	"#version 300 es\n"
-	"precision mediump float;\n"
+	"precision highp float;\n"
 	"uniform sampler2D uBgr;\n"
 	"in vec2 vTex;\n"
 	"out vec4 fragColor;\n"
@@ -163,7 +163,7 @@ static const char *bgr_fragment_shader_src =
 
 static const char *p010_fragment_shader_src =
 	"#version 300 es\n"
-	"precision mediump float;\n"
+	"precision highp float;\n"
 	"precision highp int;\n"
 	"precision highp usampler2D;\n"
 	"uniform highp usampler2D uY16;\n"
@@ -187,7 +187,7 @@ static const char *p010_fragment_shader_src =
 
 static const char *hardware_linear_fragment_shader_src =
 	"#version 300 es\n"
-	"precision mediump float;\n"
+	"precision highp float;\n"
 	"precision highp int;\n"
 	"uniform sampler2D uStorage;\n"
 	"uniform int uWidth;\n"
