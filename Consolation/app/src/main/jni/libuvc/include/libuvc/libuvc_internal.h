@@ -446,6 +446,10 @@ struct uvc_stream_handle {
   uint32_t diag_iso_min_packet_len;
   uint32_t diag_iso_max_packet_len;
   uint32_t diag_iso_packet_len_hash;
+  /* Per-transaction size of a high-bandwidth ISO endpoint (0 otherwise), and
+   * how many host-merged packets were split back apart (see stream_iso.c). */
+  uint32_t iso_txn_size;
+  uint32_t diag_iso_demerged;
 };
 
 /** Handle on an open UVC device
