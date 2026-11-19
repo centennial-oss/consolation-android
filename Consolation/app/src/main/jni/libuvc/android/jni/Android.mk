@@ -56,6 +56,9 @@ LOCAL_CFLAGS := $(LOCAL_C_INCLUDES:%=-I%)
 LOCAL_CFLAGS += -DANDROID_NDK
 LOCAL_CFLAGS += -DLOG_NDEBUG
 LOCAL_CFLAGS += -DUVC_DEBUGGING
+# Same level as UVCCamera and libusb, which this code sits between on the
+# per-packet path.
+LOCAL_CFLAGS += -O3
 LOCAL_CFLAGS += $(CONSOLATION_FIRST_PARTY_LTO_CFLAGS)
 
 # Tune isoch transfer ring vs RAM / latency (-DLIBUVC_NUM_TRANSFER_BUFS=N)

@@ -348,6 +348,20 @@ static uint32_t uvc_mjpeg_diag_full_hash(const uint8_t *data, size_t len) {
  * @param in MJPEG frame
  * @param out RGB frame
  */
+/** True if the JPEG's own dimensions equal the frame the output buffer was
+ * sized for.  Call after jpeg_start_decompress().
+ *
+ * The output buffer and row step come from the negotiated width/height, but
+ * libjpeg writes rows as wide, and as many, as the JPEG header says.  A JPEG
+ * that is wider overruns each row (and the last one the buffer); one that is
+ * narrower or shorter leaves stale pixels.  Height alone does not catch the
+ * first case. */
+static inline int uvc_mjpeg_geometry_matches(const struct jpeg_decompress_struct *dinfo,
+		const uvc_frame_t *out) {
+	return dinfo->output_width == (JDIMENSION) out->width
+		&& dinfo->output_height == (JDIMENSION) out->height;
+}
+
 uvc_error_t uvc_mjpeg2rgb(uvc_frame_t *in, uvc_frame_t *out) {
 	struct jpeg_decompress_struct dinfo;
 	struct error_mgr jerr;
@@ -397,7 +411,7 @@ uvc_error_t uvc_mjpeg2rgb(uvc_frame_t *in, uvc_frame_t *out) {
 	jpeg_start_decompress(&dinfo);
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo.output_height == (JDIMENSION) out->height)) {
+			uvc_mjpeg_geometry_matches(&dinfo, out))) {
 		for (; dinfo.output_scanline < dinfo.output_height ;) {
 			buffer[0] = data + (lines_read) * out_step;
 			for (i = 1; i < MAX_READLINE; i++)
@@ -473,7 +487,7 @@ uvc_error_t uvc_mjpeg2bgr(uvc_frame_t *in, uvc_frame_t *out) {
 	const int out_step = out->step;
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo.output_height == (JDIMENSION) out->height)) {
+			uvc_mjpeg_geometry_matches(&dinfo, out))) {
 		for (; dinfo.output_scanline < dinfo.output_height ;) {
 			buffer[0] = data + (lines_read) * out_step;
 			for (i = 1; i < MAX_READLINE; i++)
@@ -549,7 +563,7 @@ uvc_error_t uvc_mjpeg2rgb565(uvc_frame_t *in, uvc_frame_t *out) {
 	const int out_step = out->step;
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo.output_height == (JDIMENSION) out->height)) {
+			uvc_mjpeg_geometry_matches(&dinfo, out))) {
 		for (; dinfo.output_scanline < dinfo.output_height ;) {
 			buffer[0] = data + (lines_read) * out_step;
 			for (i = 1; i < MAX_READLINE; i++)
@@ -1046,7 +1060,7 @@ uvc_error_t uvc_mjpeg2yuyv(uvc_frame_t *in, uvc_frame_t *out) {
 	const int out_step = out->step;
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo->output_height == (JDIMENSION) out->height)) {
+			uvc_mjpeg_geometry_matches(dinfo, out))) {
 		for (; dinfo->output_scanline < dinfo->output_height ;) {
 			// convert lines of mjpeg data to YCbCr
 			num_scanlines = jpeg_read_scanlines(dinfo, buffer, MAX_READLINE);
@@ -1083,4 +1097,452 @@ fail:
 	_mjpeg_decoder_reset(decoder);
 	return uvc_mjpeg_lines_match_height(lines_read, out->height)
 		? UVC_SUCCESS : UVC_ERROR_OTHER+1;
+}
+
+/*********************************************************************
+ * Incremental MJPEG -> planar YUV decoder (see libuvc.h).
+ *
+ * libjpeg can decode from a source that runs dry: the source manager's
+ * fill_input_buffer() returns FALSE, the library unwinds to the last point it
+ * can resume from and returns "suspended" to the caller.  Here the source is
+ * the frame buffer the USB thread is still appending to, so "dry" just means
+ * "not received yet" and the caller retries once more bytes are in place.  The
+ * buffer is contiguous and only ever grows, so resuming is a matter of raising
+ * bytes_in_buffer; nothing is copied or moved.
+ *
+ * Output is libjpeg's raw (per-component, pre-upsampling) data written
+ * straight into the caller's planes, the same result TurboJPEG's
+ * tj3DecompressToYUVPlanes8() produces for the non-incremental path.
+ *********************************************************************/
+
+enum mjpeg_stream_state {
+	MJPEG_STREAM_IDLE = 0,
+	MJPEG_STREAM_HEADER,
+	MJPEG_STREAM_WAIT_OUTPUT,
+	MJPEG_STREAM_START,
+	MJPEG_STREAM_ROWS,
+	MJPEG_STREAM_FINISH,
+	MJPEG_STREAM_DONE,
+	MJPEG_STREAM_FAILED,
+	MJPEG_STREAM_UNSUPPORTED
+};
+
+struct mjpeg_stream_error_mgr {
+	struct jpeg_error_mgr super;
+	jmp_buf jmp;
+	unsigned int warning_count;
+	char first_warning[JMSG_LENGTH_MAX];
+};
+
+struct uvc_mjpeg_stream_decoder {
+	struct jpeg_decompress_struct dinfo;
+	struct mjpeg_stream_error_mgr jerr;
+	struct jpeg_source_mgr src;
+	int created;
+	enum mjpeg_stream_state state;
+
+	const uint8_t *data;		/* start of the image; grows in place */
+	size_t pending_skip;		/* marker payload bytes still to step over */
+	int no_more_data;
+	int truncated;			/* ran dry after no_more_data: fake EOI fed */
+
+	uint32_t expected_width, expected_height;
+	int subsamp;
+	int num_planes;
+	uint32_t plane_width[3], plane_height[3];
+	uint32_t min_stride[3];
+
+	unsigned char *plane[3];
+	int stride[3];
+	/* Sink for the rows of the bottom iMCU row that lie below a plane. */
+	JSAMPLE *scratch_row[3];
+	size_t scratch_row_bytes[3];
+	JSAMPROW rows[3][4 * DCTSIZE];	/* max_v_samp_factor is at most 4 */
+};
+
+static void _mjpeg_stream_error_exit(j_common_ptr cinfo) {
+	struct mjpeg_stream_error_mgr *err = (struct mjpeg_stream_error_mgr *)cinfo->err;
+	longjmp(err->jmp, 1);
+}
+
+/* Keep the text of the first warning only: a damaged bitstream usually warns
+ * many times and the first one says where things went wrong (the warning
+ * policy shared with the non-incremental path keys off that text). */
+static void _mjpeg_stream_emit_message(j_common_ptr cinfo, int msg_level) {
+	struct mjpeg_stream_error_mgr *err = (struct mjpeg_stream_error_mgr *)cinfo->err;
+	if (msg_level >= 0)
+		return;
+	if (!err->warning_count)
+		(*cinfo->err->format_message)(cinfo, err->first_warning);
+	err->warning_count++;
+}
+
+static void _mjpeg_stream_init_source(j_decompress_ptr cinfo) {
+	(void)cinfo;
+}
+
+static boolean _mjpeg_stream_fill_input_buffer(j_decompress_ptr cinfo) {
+	static const JOCTET fake_eoi[2] = { 0xff, JPEG_EOI };
+	uvc_mjpeg_stream_decoder_t *dec = (uvc_mjpeg_stream_decoder_t *)cinfo->client_data;
+
+	if (!dec->no_more_data)
+		return FALSE;	/* suspend: the rest has not been received yet */
+
+	/* The image is as long as it will ever be and the decoder still wants
+	 * more: it is truncated.  Feed end-of-image so the decode terminates;
+	 * the result is rejected in uvc_mjpeg_stream_advance(). */
+	dec->truncated = 1;
+	dec->src.next_input_byte = fake_eoi;
+	dec->src.bytes_in_buffer = sizeof(fake_eoi);
+	return TRUE;
+}
+
+static void _mjpeg_stream_skip_input_data(j_decompress_ptr cinfo, long num_bytes) {
+	uvc_mjpeg_stream_decoder_t *dec = (uvc_mjpeg_stream_decoder_t *)cinfo->client_data;
+	size_t want;
+
+	if (num_bytes <= 0)
+		return;
+	want = (size_t)num_bytes;
+	if (want > dec->src.bytes_in_buffer) {
+		/* The skip runs past what has arrived; libjpeg does not retry a skip,
+		 * so the remainder is applied when more bytes are made visible. */
+		dec->pending_skip += want - dec->src.bytes_in_buffer;
+		want = dec->src.bytes_in_buffer;
+	}
+	dec->src.next_input_byte += want;
+	dec->src.bytes_in_buffer -= want;
+}
+
+static void _mjpeg_stream_term_source(j_decompress_ptr cinfo) {
+	(void)cinfo;
+}
+
+uvc_mjpeg_stream_decoder_t *uvc_mjpeg_stream_decoder_create(void) {
+	uvc_mjpeg_stream_decoder_t *dec = calloc(1, sizeof(*dec));
+	if (UNLIKELY(!dec))
+		return NULL;
+
+	dec->dinfo.err = jpeg_std_error(&dec->jerr.super);
+	dec->jerr.super.error_exit = _mjpeg_stream_error_exit;
+	dec->jerr.super.emit_message = _mjpeg_stream_emit_message;
+	if (setjmp(dec->jerr.jmp)) {
+		free(dec);
+		return NULL;
+	}
+	jpeg_create_decompress(&dec->dinfo);
+	dec->created = 1;
+	dec->dinfo.client_data = dec;
+
+	dec->src.init_source = _mjpeg_stream_init_source;
+	dec->src.fill_input_buffer = _mjpeg_stream_fill_input_buffer;
+	dec->src.skip_input_data = _mjpeg_stream_skip_input_data;
+	dec->src.resync_to_restart = jpeg_resync_to_restart;
+	dec->src.term_source = _mjpeg_stream_term_source;
+	dec->dinfo.src = &dec->src;
+	return dec;
+}
+
+void uvc_mjpeg_stream_decoder_destroy(uvc_mjpeg_stream_decoder_t *dec) {
+	int i;
+
+	if (!dec)
+		return;
+	if (dec->created) {
+		if (!setjmp(dec->jerr.jmp))
+			jpeg_destroy_decompress(&dec->dinfo);
+	}
+	for (i = 0; i < 3; i++)
+		free(dec->scratch_row[i]);
+	free(dec);
+}
+
+void uvc_mjpeg_stream_abort(uvc_mjpeg_stream_decoder_t *dec) {
+	if (!dec || dec->state == MJPEG_STREAM_IDLE)
+		return;
+	if (!setjmp(dec->jerr.jmp))
+		jpeg_abort_decompress(&dec->dinfo);
+	dec->state = MJPEG_STREAM_IDLE;
+	dec->data = NULL;
+}
+
+void uvc_mjpeg_stream_begin(uvc_mjpeg_stream_decoder_t *dec, const uint8_t *data,
+		uint32_t expected_width, uint32_t expected_height) {
+	if (UNLIKELY(!dec))
+		return;
+	uvc_mjpeg_stream_abort(dec);
+
+	dec->data = data;
+	dec->pending_skip = 0;
+	dec->no_more_data = 0;
+	dec->truncated = 0;
+	dec->expected_width = expected_width;
+	dec->expected_height = expected_height;
+	dec->jerr.warning_count = 0;
+	dec->jerr.first_warning[0] = 0;
+	dec->plane[0] = dec->plane[1] = dec->plane[2] = NULL;
+	dec->src.next_input_byte = data;
+	dec->src.bytes_in_buffer = 0;
+	dec->dinfo.src = &dec->src;
+	dec->state = data ? MJPEG_STREAM_HEADER : MJPEG_STREAM_FAILED;
+}
+
+/* Sampling layout -> TJSAMP_*, or -1 for anything the planar renderer path
+ * does not take (the same set uvc_mjpeg_planar_layout accepts). */
+static int _mjpeg_stream_subsamp(const struct jpeg_decompress_struct *dinfo) {
+	const jpeg_component_info *c = dinfo->comp_info;
+
+	if (dinfo->num_components == 1 && dinfo->jpeg_color_space == JCS_GRAYSCALE)
+		return TJSAMP_GRAY;
+	if (dinfo->num_components != 3 || dinfo->jpeg_color_space != JCS_YCbCr)
+		return -1;
+	if (c[1].h_samp_factor != 1 || c[1].v_samp_factor != 1
+			|| c[2].h_samp_factor != 1 || c[2].v_samp_factor != 1)
+		return -1;
+	switch ((c[0].h_samp_factor << 4) | c[0].v_samp_factor) {
+	case 0x11: return TJSAMP_444;
+	case 0x21: return TJSAMP_422;
+	case 0x22: return TJSAMP_420;
+	case 0x12: return TJSAMP_440;
+	case 0x41: return TJSAMP_411;
+	case 0x14: return TJSAMP_441;
+	default: return -1;
+	}
+}
+
+/* Header is parsed: work out the plane layout, or decline the image. */
+static enum mjpeg_stream_state _mjpeg_stream_after_header(uvc_mjpeg_stream_decoder_t *dec) {
+	struct jpeg_decompress_struct *dinfo = &dec->dinfo;
+	int i;
+
+	if (dinfo->image_width != dec->expected_width
+			|| dinfo->image_height != dec->expected_height)
+		return MJPEG_STREAM_FAILED;	/* not the negotiated frame */
+	if (dinfo->data_precision != 8)
+		return MJPEG_STREAM_UNSUPPORTED;
+
+	dec->subsamp = _mjpeg_stream_subsamp(dinfo);
+	if (dec->subsamp < 0 || !mjpeg_subsampling_supported_for_gpu(dec->subsamp))
+		return MJPEG_STREAM_UNSUPPORTED;
+	if (dinfo->max_v_samp_factor > 4)
+		return MJPEG_STREAM_UNSUPPORTED;
+
+	if (dinfo->dc_huff_tbl_ptrs[0] == NULL) {
+		/* MJPEG without its own Huffman tables: the standard ones apply. */
+		insert_huff_tables(dinfo);
+	}
+
+	/* Raw output: no colour conversion, no upsampling.  Same DCT choice as
+	 * the TurboJPEG path so both decode paths produce the same pixels. */
+	dinfo->raw_data_out = TRUE;
+	dinfo->do_fancy_upsampling = FALSE;
+	dinfo->dct_method = JDCT_FASTEST;
+	dinfo->out_color_space = dinfo->jpeg_color_space;
+	jpeg_calc_output_dimensions(dinfo);
+
+	dec->num_planes = dinfo->num_components;
+	for (i = 0; i < 3; i++) {
+		if (i >= dec->num_planes) {
+			dec->plane_width[i] = dec->plane_height[i] = dec->min_stride[i] = 0;
+			continue;
+		}
+		const int pw = tj3YUVPlaneWidth(i, (int)dec->expected_width, dec->subsamp);
+		const int ph = tj3YUVPlaneHeight(i, (int)dec->expected_height, dec->subsamp);
+		if (pw <= 0 || ph <= 0)
+			return MJPEG_STREAM_UNSUPPORTED;
+		dec->plane_width[i] = (uint32_t)pw;
+		dec->plane_height[i] = (uint32_t)ph;
+		/* libjpeg writes whole DCT blocks, so a row can extend past the
+		 * plane's width up to the next block boundary. */
+		dec->min_stride[i] = (uint32_t)dinfo->comp_info[i].width_in_blocks * DCTSIZE;
+		if (dec->min_stride[i] < dec->plane_width[i])
+			dec->min_stride[i] = dec->plane_width[i];
+	}
+	return MJPEG_STREAM_WAIT_OUTPUT;
+}
+
+uvc_error_t uvc_mjpeg_stream_layout(const uvc_mjpeg_stream_decoder_t *dec,
+		uint32_t widths[3], uint32_t heights[3], int *subsamp_out) {
+	int i;
+
+	if (UNLIKELY(!dec || dec->state < MJPEG_STREAM_WAIT_OUTPUT
+			|| dec->state >= MJPEG_STREAM_FAILED))
+		return UVC_ERROR_INVALID_PARAM;
+	for (i = 0; i < 3; i++) {
+		widths[i] = dec->plane_width[i];
+		heights[i] = dec->plane_height[i];
+	}
+	if (subsamp_out)
+		*subsamp_out = dec->subsamp;
+	return UVC_SUCCESS;
+}
+
+uvc_error_t uvc_mjpeg_stream_min_strides(const uvc_mjpeg_stream_decoder_t *dec,
+		uint32_t min_strides[3]) {
+	int i;
+
+	if (UNLIKELY(!dec || dec->state < MJPEG_STREAM_WAIT_OUTPUT
+			|| dec->state >= MJPEG_STREAM_FAILED))
+		return UVC_ERROR_INVALID_PARAM;
+	for (i = 0; i < 3; i++)
+		min_strides[i] = dec->min_stride[i];
+	return UVC_SUCCESS;
+}
+
+uvc_error_t uvc_mjpeg_stream_set_output(uvc_mjpeg_stream_decoder_t *dec,
+		unsigned char *planes[3], const int strides[3]) {
+	int i;
+
+	if (UNLIKELY(!dec || dec->state != MJPEG_STREAM_WAIT_OUTPUT))
+		return UVC_ERROR_INVALID_PARAM;
+
+	for (i = 0; i < dec->num_planes; i++) {
+		if (UNLIKELY(!planes[i] || strides[i] < 0
+				|| (uint32_t)strides[i] < dec->min_stride[i]))
+			return UVC_ERROR_INVALID_PARAM;
+		if (dec->scratch_row_bytes[i] < dec->min_stride[i]) {
+			JSAMPLE *row = realloc(dec->scratch_row[i], dec->min_stride[i]);
+			if (UNLIKELY(!row))
+				return UVC_ERROR_NO_MEM;
+			dec->scratch_row[i] = row;
+			dec->scratch_row_bytes[i] = dec->min_stride[i];
+		}
+		dec->plane[i] = planes[i];
+		dec->stride[i] = strides[i];
+	}
+	dec->state = MJPEG_STREAM_START;
+	return UVC_SUCCESS;
+}
+
+/* Point libjpeg at the plane rows of the iMCU row that starts at image line
+ * output_scanline.  Rows below a plane's last row go to the scratch row. */
+static void _mjpeg_stream_aim_rows(uvc_mjpeg_stream_decoder_t *dec, JSAMPARRAY out[3]) {
+	const struct jpeg_decompress_struct *dinfo = &dec->dinfo;
+	int ci, r;
+
+	for (ci = 0; ci < dec->num_planes; ci++) {
+		const int v = dinfo->comp_info[ci].v_samp_factor;
+		const int rows = v * DCTSIZE;
+		const uint32_t first = (uint32_t)(dinfo->output_scanline
+			* (JDIMENSION)v / (JDIMENSION)dinfo->max_v_samp_factor);
+
+		for (r = 0; r < rows; r++) {
+			const uint32_t row = first + (uint32_t)r;
+			dec->rows[ci][r] = row < dec->plane_height[ci]
+				? dec->plane[ci] + (size_t)row * (size_t)dec->stride[ci]
+				: dec->scratch_row[ci];
+		}
+		out[ci] = dec->rows[ci];
+	}
+}
+
+static int _mjpeg_stream_status(const uvc_mjpeg_stream_decoder_t *dec) {
+	switch (dec->state) {
+	case MJPEG_STREAM_WAIT_OUTPUT: return UVC_MJPEG_STREAM_NEED_OUTPUT;
+	case MJPEG_STREAM_DONE: return UVC_MJPEG_STREAM_DONE;
+	case MJPEG_STREAM_UNSUPPORTED: return UVC_MJPEG_STREAM_UNSUPPORTED;
+	case MJPEG_STREAM_IDLE:
+	case MJPEG_STREAM_FAILED: return UVC_MJPEG_STREAM_FAILED;
+	default: return UVC_MJPEG_STREAM_NEED_DATA;
+	}
+}
+
+int uvc_mjpeg_stream_advance(uvc_mjpeg_stream_decoder_t *dec, size_t bytes_available,
+		int no_more_data) {
+	struct jpeg_decompress_struct *dinfo;
+	size_t pos;
+
+	if (UNLIKELY(!dec))
+		return UVC_MJPEG_STREAM_FAILED;
+	if (dec->state < MJPEG_STREAM_HEADER || dec->state >= MJPEG_STREAM_DONE
+			|| dec->state == MJPEG_STREAM_WAIT_OUTPUT)
+		return _mjpeg_stream_status(dec);
+
+	dinfo = &dec->dinfo;
+	if (setjmp(dec->jerr.jmp)) {
+		/* libjpeg gave up on the bitstream. */
+		if (!setjmp(dec->jerr.jmp))
+			jpeg_abort_decompress(dinfo);
+		dec->state = MJPEG_STREAM_FAILED;
+		return UVC_MJPEG_STREAM_FAILED;
+	}
+
+	/* Make the newly arrived bytes visible.  The read pointer stays where
+	 * libjpeg left it (it rewinds to a resumable point when it suspends). */
+	if (LIKELY(!dec->truncated)) {
+		pos = (size_t)(dec->src.next_input_byte - dec->data);
+		if (UNLIKELY(pos > bytes_available))
+			pos = bytes_available;
+		if (dec->pending_skip) {
+			const size_t take = MIN(dec->pending_skip, bytes_available - pos);
+			pos += take;
+			dec->pending_skip -= take;
+		}
+		dec->src.next_input_byte = dec->data + pos;
+		dec->src.bytes_in_buffer = bytes_available - pos;
+	}
+	dec->no_more_data = no_more_data;
+	if (dec->pending_skip && !no_more_data)
+		return UVC_MJPEG_STREAM_NEED_DATA;
+
+	if (dec->state == MJPEG_STREAM_HEADER) {
+		if (jpeg_read_header(dinfo, TRUE) == JPEG_SUSPENDED)
+			return UVC_MJPEG_STREAM_NEED_DATA;
+		dec->state = _mjpeg_stream_after_header(dec);
+		if (dec->state != MJPEG_STREAM_WAIT_OUTPUT) {
+			const enum mjpeg_stream_state verdict = dec->state;
+			jpeg_abort_decompress(dinfo);
+			dec->state = verdict;
+		}
+		return _mjpeg_stream_status(dec);
+	}
+
+	if (dec->state == MJPEG_STREAM_START) {
+		if (!jpeg_start_decompress(dinfo))
+			return UVC_MJPEG_STREAM_NEED_DATA;
+		dec->state = MJPEG_STREAM_ROWS;
+	}
+
+	if (dec->state == MJPEG_STREAM_ROWS) {
+		const JDIMENSION imcu_lines = (JDIMENSION)dinfo->max_v_samp_factor * DCTSIZE;
+		JSAMPARRAY out[3] = { NULL, NULL, NULL };
+
+		while (dinfo->output_scanline < dinfo->output_height) {
+			_mjpeg_stream_aim_rows(dec, out);
+			if (!jpeg_read_raw_data(dinfo, out, imcu_lines))
+				return UVC_MJPEG_STREAM_NEED_DATA;
+		}
+		dec->state = MJPEG_STREAM_FINISH;
+	}
+
+	if (dec->state == MJPEG_STREAM_FINISH) {
+		if (!jpeg_finish_decompress(dinfo))
+			return UVC_MJPEG_STREAM_NEED_DATA;
+		dec->state = dec->truncated ? MJPEG_STREAM_FAILED : MJPEG_STREAM_DONE;
+	}
+	return _mjpeg_stream_status(dec);
+}
+
+uvc_error_t uvc_mjpeg_stream_finish(uvc_mjpeg_stream_decoder_t *dec, const uvc_frame_t *frame) {
+	struct mjpeg_decoder_ctx *policy;
+	uvc_error_t ret = UVC_SUCCESS;
+
+	if (UNLIKELY(!dec || !frame || dec->state != MJPEG_STREAM_DONE))
+		return UVC_ERROR_INVALID_PARAM;
+
+	/* Same verdict state as uvc_mjpeg2yuv_planes on this thread, so the two
+	 * decode paths agree about a device that pads before EOI. */
+	policy = _mjpeg_decoder_get();
+	if (UNLIKELY(!policy)) {
+		ret = UVC_ERROR_NO_MEM;
+	} else if (dec->jerr.warning_count) {
+		if (!_mjpeg_planar_warning_tolerated(policy, frame, dec->jerr.first_warning))
+			ret = UVC_ERROR_OTHER;
+	} else {
+		_mjpeg_planar_warning_clean(policy, frame);
+	}
+
+	dec->state = MJPEG_STREAM_IDLE;
+	dec->data = NULL;
+	return ret;
 }

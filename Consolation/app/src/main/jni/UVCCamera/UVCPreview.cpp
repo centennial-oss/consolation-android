@@ -46,6 +46,7 @@
 #include "libuvc_internal.h"
 
 #include <sys/resource.h>
+#include <dlfcn.h>
 #include <android/hardware_buffer.h>
 #include <sys/stat.h>
 #include <sys/system_properties.h>
@@ -107,9 +108,7 @@ static inline void atomic_store_max(std::atomic<uint64_t> &target, uint64_t valu
  * read and compares with the fingerprint taken when they were produced.  A
  * mismatch means something wrote into the buffer while it was in flight, and
  * the stage name says between which two threads.  Reads ~1 KiB per check. */
-#ifndef UVC_FRAME_INTEGRITY_CHECK
-#define UVC_FRAME_INTEGRITY_CHECK 1
-#endif
+/* UVC_FRAME_INTEGRITY_CHECK defaults to the runtime-diagnostics switch; see libuvc.h. */
 
 namespace {
 static bool frame_integrity_ok(const uvc_frame_t *frame, const char *stage,
@@ -349,6 +348,12 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	mGpuPlanarNext = 0;
 	mGpuPlanarRenderFailures = 0;
 	mMergedRender = true;
+	mUsbThreadTid.store(0, std::memory_order_relaxed);
+	mStreamDecodeEnabled = false;
+	memset(&mLive, 0, sizeof(mLive));
+	memset(&mStream, 0, sizeof(mStream));
+	mPerfHintSession = NULL;
+	mPerfHintTried = false;
 	{
 		/* Pick a GPU-sampleable buffer format for the zero-copy planar path.
 		 * R8 is the natural fit but many gralloc implementations reject it;
@@ -585,6 +590,14 @@ bool UVCPreview::decode_mjpeg_to_gpu_planar(uvc_frame_t *frame)
 		return true;
 	}
 
+	emitGpuPlanarFrame(out, frame, widths, heights, subsamp);
+	return true;
+}
+
+void UVCPreview::emitGpuPlanarFrame(uvc_frame_t *out, const uvc_frame_t *frame,
+	const uint32_t widths[3], const uint32_t heights[3], int subsamp)
+{
+	GpuPlanarFrame *g = reinterpret_cast<GpuPlanarFrame *>(out);
 	out->width = frame->width;
 	out->height = frame->height;
 	out->frame_format = UVC_FRAME_FORMAT_MJPEG_YUV_PLANAR;
@@ -612,7 +625,6 @@ bool UVCPreview::decode_mjpeg_to_gpu_planar(uvc_frame_t *frame)
 		presentPlanarFrame(out);
 	else
 		addPreviewFrame(out);
-	return true;
 }
 
 uvc_frame_t *UVCPreview::mjpeg_header_get() {
@@ -1372,6 +1384,113 @@ int UVCPreview::stopPreview() {
 int copyToSurface(uvc_frame_t *frame, ANativeWindow **window,
 	uint64_t *frame_ready_ns = NULL, uint64_t *surface_wait_ns = NULL);
 
+bool UVCPreview::admitFrame(uvc_frame_t *frame) {
+	{
+		const uint64_t seq_state =
+			processingUvcSeqState.load(std::memory_order_relaxed);
+		if (seq_state & UVC_SEQ_STATE_VALID_BIT) {
+			const uint32_t last_seq = (uint32_t)(seq_state & 0xffffffffULL);
+			if (frame->sequence > last_seq + 1U) {
+				processingPreCallbackSkippedFrames.fetch_add(
+					(uint64_t)(frame->sequence - last_seq - 1U),
+					std::memory_order_relaxed);
+			}
+		}
+		processingUvcSeqState.store(
+			UVC_SEQ_STATE_VALID_BIT | (uint64_t)frame->sequence,
+			std::memory_order_relaxed);
+	}
+	if (LIKELY(frame->arrival_monotonic_ns)) {
+		const uint64_t now_ns = processing_now_ns();
+		if (LIKELY(now_ns > frame->arrival_monotonic_ns)) {
+			const uint64_t lag_ns = now_ns - frame->arrival_monotonic_ns;
+			processingCallbackLagCount.fetch_add(1, std::memory_order_relaxed);
+			processingCallbackLagTotalNs.fetch_add(lag_ns, std::memory_order_relaxed);
+			atomic_store_max(processingCallbackLagMaxNs, lag_ns);
+		}
+	}
+	if (!firstFrameLogged) {
+		firstFrameLogged = true;
+		const uint64_t t0 = streamingStartMonotonicNs;
+		if (t0 > 0) {
+			const uint64_t elapsed_ms = (processing_now_ns() - t0) / 1000000ULL;
+			LOGI("startup-diag:first frame received after %llu ms format=%d size=%ux%u bytes=%zu",
+				(unsigned long long)elapsed_ms,
+				frame->frame_format,
+				frame->width,
+				frame->height,
+				frame->actual_bytes);
+		}
+	}
+	if (UNLIKELY(
+		((frame->frame_format != UVC_FRAME_FORMAT_MJPEG) && (frame->actual_bytes < frameBytes))
+		|| (frame->width != frameWidth) || (frame->height != frameHeight) )) {
+
+#if LOCAL_DEBUG
+		LOGD("broken frame!:format=%d,actual_bytes=%d/%d(%d,%d/%d,%d)",
+			frame->frame_format, frame->actual_bytes, frameBytes,
+			frame->width, frame->height, frameWidth, frameHeight);
+#endif
+		return false;
+	}
+	return true;
+}
+
+bool UVCPreview::mjpegFastPathActive() const {
+	return frameMode != REQUEST_MODE_H264
+		&& mjpeg_decode_thread_joinable
+		&& !hasPreviewFrameCallback()
+		&& !hasCaptureConsumers();
+}
+
+/* Runs on the USB event thread, at the instant libuvc publishes a frame.  For
+ * the MJPEG fast path the regular callback only queues the frame for the
+ * decoder, so doing that here saves the wake-up of libuvc's callback thread.
+ * Anything else is declined (0) and takes the regular callback. */
+int UVCPreview::uvc_preview_publish_hook(uvc_frame_t *frame, void *vptr_args) {
+	UVCPreview *preview = reinterpret_cast<UVCPreview *>(vptr_args);
+	if (UNLIKELY(!preview || !frame))
+		return 0;
+	if (UNLIKELY(!preview->mUsbThreadTid.load(std::memory_order_relaxed)))
+		preview->mUsbThreadTid.store(gettid(), std::memory_order_relaxed);
+	if (UNLIKELY(!preview->isRunning() || frame->frame_format != UVC_FRAME_FORMAT_MJPEG
+			|| !frame->data || !frame->data_bytes || !preview->mjpegFastPathActive()))
+		return 0;
+
+	const uint64_t start_ns = processing_now_ns();
+	if (LIKELY(preview->admitFrame(frame))) {
+		preview->recordPayloadBytes(frame->actual_bytes);
+		preview->addMjpegDecodeFrame(frame);
+	}
+	const uint64_t elapsed_ns = processing_now_ns() - start_ns;
+	preview->processingUvcCallbackCount.fetch_add(1, std::memory_order_relaxed);
+	preview->processingUvcCallbackTotalNs.fetch_add(elapsed_ns, std::memory_order_relaxed);
+	atomic_store_max(preview->processingUvcCallbackMaxNs, elapsed_ns);
+	return 1;
+}
+
+/* Runs on the USB event thread: note how far the frame under assembly has got
+ * and let the decode thread follow. */
+void UVCPreview::uvc_preview_assembly_hook(const uvc_assembly_event_t *event, void *vptr_args) {
+	UVCPreview *preview = reinterpret_cast<UVCPreview *>(vptr_args);
+	if (UNLIKELY(!preview || !event || !preview->mStreamDecodeEnabled
+			|| !preview->isRunning() || !preview->mjpegFastPathActive()))
+		return;
+
+	pthread_mutex_lock(&preview->mjpeg_decode_mutex);
+	if (event->type == UVC_ASSEMBLY_PROGRESS) {
+		preview->mLive.gen = event->generation;
+		preview->mLive.data = event->data;
+		preview->mLive.bytes = event->bytes;
+		preview->mLive.complete = event->complete != 0;
+	} else {
+		preview->mLive.discarded_gen = event->generation;
+	}
+	preview->mLive.dirty = true;
+	pthread_cond_signal(&preview->mjpeg_decode_sync);
+	pthread_mutex_unlock(&preview->mjpeg_decode_mutex);
+}
+
 void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args) {
 	UVCPreview *preview = reinterpret_cast<UVCPreview *>(vptr_args);
 	struct UvcCallbackTimingScope final {
@@ -1387,54 +1506,8 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 		}
 	} callback_timing_scope = { preview, processing_now_ns() };
 	if UNLIKELY(!preview->isRunning() || !frame || !frame->frame_format || !frame->data || !frame->data_bytes) return;
-	{
-		const uint64_t seq_state =
-			preview->processingUvcSeqState.load(std::memory_order_relaxed);
-		if (seq_state & UVC_SEQ_STATE_VALID_BIT) {
-			const uint32_t last_seq = (uint32_t)(seq_state & 0xffffffffULL);
-			if (frame->sequence > last_seq + 1U) {
-				preview->processingPreCallbackSkippedFrames.fetch_add(
-					(uint64_t)(frame->sequence - last_seq - 1U),
-					std::memory_order_relaxed);
-			}
-		}
-		preview->processingUvcSeqState.store(
-			UVC_SEQ_STATE_VALID_BIT | (uint64_t)frame->sequence,
-			std::memory_order_relaxed);
-	}
-	if (LIKELY(frame->arrival_monotonic_ns)) {
-		const uint64_t now_ns = processing_now_ns();
-		if (LIKELY(now_ns > frame->arrival_monotonic_ns)) {
-			const uint64_t lag_ns = now_ns - frame->arrival_monotonic_ns;
-			preview->processingCallbackLagCount.fetch_add(1, std::memory_order_relaxed);
-			preview->processingCallbackLagTotalNs.fetch_add(lag_ns, std::memory_order_relaxed);
-			atomic_store_max(preview->processingCallbackLagMaxNs, lag_ns);
-		}
-	}
-	if (!preview->firstFrameLogged) {
-		preview->firstFrameLogged = true;
-		const uint64_t t0 = preview->streamingStartMonotonicNs;
-		if (t0 > 0) {
-			const uint64_t elapsed_ms = (processing_now_ns() - t0) / 1000000ULL;
-			LOGI("startup-diag:first frame received after %llu ms format=%d size=%ux%u bytes=%zu",
-				(unsigned long long)elapsed_ms,
-				frame->frame_format,
-				frame->width,
-				frame->height,
-				frame->actual_bytes);
-		}
-	}
-	if (UNLIKELY(
-		((frame->frame_format != UVC_FRAME_FORMAT_MJPEG) && (frame->actual_bytes < preview->frameBytes))
-		|| (frame->width != preview->frameWidth) || (frame->height != preview->frameHeight) )) {
-
-#if LOCAL_DEBUG
-		LOGD("broken frame!:format=%d,actual_bytes=%d/%d(%d,%d/%d,%d)",
-			frame->frame_format, frame->actual_bytes, preview->frameBytes,
-			frame->width, frame->height, preview->frameWidth, preview->frameHeight);
-#endif
+	if (UNLIKELY(!preview->admitFrame(frame)))
 		return;
-	}
 	if (LIKELY(preview->isRunning())) {
 		preview->recordPayloadBytes(frame->actual_bytes);
 
@@ -1664,11 +1737,23 @@ void UVCPreview::do_mjpeg_decode() {
 		LOGI("merged-render: %s (decode thread %s the planar frame)",
 			mMergedRender ? "on" : "off", mMergedRender ? "renders" : "hands off");
 	}
+	mStream.dec = mStreamDecodeEnabled ? uvc_mjpeg_stream_decoder_create() : NULL;
+	if (mStreamDecodeEnabled && !mStream.dec) {
+		LOGW("stream-decode: decoder allocation failed; decoding whole frames");
+		mStreamDecodeEnabled = false;
+	}
 	for (; LIKELY(isRunning() && mjpeg_decode_thread_joinable); ) {
-		uvc_frame_t *frame = waitMjpegDecodeFrame();
-		if (!frame)
+		uvc_frame_t *frame = NULL;
+		LiveAssembly live;
+		if (!waitMjpegWork(&frame, &live))
 			break;
+		if (!frame) {
+			/* No finished frame waiting: work ahead on the one arriving. */
+			streamDecodeFollow(live);
+			continue;
+		}
 
+		const uint64_t t_frame = processing_now_ns();
 		/* Stage 2: callback thread enqueue -> decode thread dequeue (retained slot). */
 		if (UNLIKELY(!frame_integrity_ok(frame, "callback->decode", g_integrity_mismatch_decode))) {
 			processingPreviewQueueDropCount.fetch_add(1, std::memory_order_relaxed);
@@ -1697,53 +1782,351 @@ void UVCPreview::do_mjpeg_decode() {
 				}
 			}
 		}
-		if (mGpuPlanarEnabled && decode_mjpeg_to_gpu_planar(frame)) {
-			uvc_frame_release(frame);
-			mjpeg_header_put(frame);
-			continue;
-		}
-		uvc_frame_t *decoded = get_frame(0);
-		if (LIKELY(decoded)) {
-			const uint64_t t_convert = processing_now_ns();
-			const uvc_error_t result = uvc_mjpeg2yuv_planar(frame, decoded);
-			recordPreviewConversionTiming(processing_now_ns() - t_convert);
-			if (LIKELY(result == UVC_SUCCESS)) {
-				/* Stage 3 check happens on the preview thread: was the JPEG
-				 * still intact once decoding finished (writer overtook reader)? */
-				if (UNLIKELY(!frame_integrity_ok(frame, "during-decode", g_integrity_mismatch_decode))) {
-					processingPreviewQueueDropCount.fetch_add(1, std::memory_order_relaxed);
-					recycle_frame(decoded);
-					decoded = NULL;
-					uvc_frame_release(frame);
-					mjpeg_header_put(frame);
-					continue;
-				}
-#if UVC_FRAME_INTEGRITY_CHECK
-				decoded->integrity_sample_hash =
-					uvc_frame_sample_hash(decoded->data, decoded->actual_bytes);
-#endif
-				if (mMergedRender)
-					presentPlanarFrame(decoded);
-				else
-					addPreviewFrame(decoded);
-				decoded = NULL;
-			} else {
-				/* Corrupt or undecodable frame: not shown, last good frame stays.
-				 * Surface it in the dropped-frames telemetry counter. */
-				processingPreviewQueueDropCount.fetch_add(1, std::memory_order_relaxed);
-				UVC_DIAG_LOGI("mjpeg-diag:async-planar-decode-fail seq=%u bytes=%zu result=%d frame=%ux%u",
-					frame->sequence,
-					frame->actual_bytes,
-					result,
-					frame->width,
-					frame->height);
-			}
-		}
-		if (decoded)
-			recycle_frame(decoded);
+		if (!streamDecodeComplete(frame))
+			decodeWholeMjpegFrame(frame);
+		perfHintReport(mStream.work_ns + (processing_now_ns() - t_frame));
+		mStream.work_ns = 0;
 		uvc_frame_release(frame);
 		mjpeg_header_put(frame);
 	}
+	streamDecodeAbort();
+	if (mStream.dec) {
+		uvc_mjpeg_stream_decoder_destroy(mStream.dec);
+		mStream.dec = NULL;
+	}
+	memset(&mStream, 0, sizeof(mStream));
+	perfHintClose();
+}
+
+/* Decode a published frame in one go (the path used before decode-ahead, and
+ * still the fallback for anything decode-ahead declines or gets wrong). */
+void UVCPreview::decodeWholeMjpegFrame(uvc_frame_t *frame) {
+	if (mGpuPlanarEnabled && decode_mjpeg_to_gpu_planar(frame)) {
+		return;
+	}
+	uvc_frame_t *decoded = get_frame(0);
+	if (LIKELY(decoded)) {
+		const uint64_t t_convert = processing_now_ns();
+		const uvc_error_t result = uvc_mjpeg2yuv_planar(frame, decoded);
+		recordPreviewConversionTiming(processing_now_ns() - t_convert);
+		if (LIKELY(result == UVC_SUCCESS)) {
+			/* Stage 3 check happens on the preview thread: was the JPEG
+			 * still intact once decoding finished (writer overtook reader)? */
+			if (UNLIKELY(!frame_integrity_ok(frame, "during-decode", g_integrity_mismatch_decode))) {
+				processingPreviewQueueDropCount.fetch_add(1, std::memory_order_relaxed);
+				recycle_frame(decoded);
+				decoded = NULL;
+				return;
+			}
+#if UVC_FRAME_INTEGRITY_CHECK
+			decoded->integrity_sample_hash =
+				uvc_frame_sample_hash(decoded->data, decoded->actual_bytes);
+#endif
+			if (mMergedRender)
+				presentPlanarFrame(decoded);
+			else
+				addPreviewFrame(decoded);
+			decoded = NULL;
+		} else {
+			/* Corrupt or undecodable frame: not shown, last good frame stays.
+			 * Surface it in the dropped-frames telemetry counter. */
+			processingPreviewQueueDropCount.fetch_add(1, std::memory_order_relaxed);
+			UVC_DIAG_LOGI("mjpeg-diag:async-planar-decode-fail seq=%u bytes=%zu result=%d frame=%ux%u",
+				frame->sequence,
+				frame->actual_bytes,
+				result,
+				frame->width,
+				frame->height);
+		}
+	}
+	if (decoded)
+		recycle_frame(decoded);
+}
+
+bool UVCPreview::waitMjpegWork(uvc_frame_t **final_frame, LiveAssembly *live) {
+	bool have = false;
+	pthread_mutex_lock(&mjpeg_decode_mutex);
+	while (isRunning() && mjpeg_decode_thread_joinable
+			&& mjpeg_decode_frame_ring.empty() && !mLive.dirty)
+		pthread_cond_wait(&mjpeg_decode_sync, &mjpeg_decode_mutex);
+	if (LIKELY(isRunning() && mjpeg_decode_thread_joinable)) {
+		have = true;
+		if (!mjpeg_decode_frame_ring.empty()) {
+			/* A published frame always goes first: it is older than whatever
+			 * is arriving now.  Progress stays flagged for the next round. */
+			*final_frame = mjpeg_decode_frame_ring.dequeue();
+		} else {
+			*live = mLive;
+			mLive.dirty = false;
+		}
+	}
+	pthread_mutex_unlock(&mjpeg_decode_mutex);
+	return have;
+}
+
+void UVCPreview::streamDecodeReleaseOutput(bool unlock_only) {
+	if (!mStream.out)
+		return;
+	GpuPlanarFrame *g = reinterpret_cast<GpuPlanarFrame *>(mStream.out);
+	for (int i = 0; i < mStream.locked; i++)
+		AHardwareBuffer_unlock((AHardwareBuffer *)g->ahb[i], NULL);
+	mStream.locked = 0;
+	if (!unlock_only) {
+		gpu_planar_put(mStream.out, -1);
+		mStream.out = NULL;
+	}
+}
+
+/* Drop whatever is in progress.  The generation stays recorded as dead so
+ * late progress reports for it do not restart the decode. */
+void UVCPreview::streamDecodeAbort() {
+	if (mStream.dec && mStream.active)
+		uvc_mjpeg_stream_abort(mStream.dec);
+	streamDecodeReleaseOutput(false);
+	mStream.active = false;
+	mStream.done = false;
+	mStream.dead = true;
+}
+
+/* The JPEG header is in: get a GPU planar target of the right shape and
+ * point the decoder at it. */
+bool UVCPreview::streamDecodeAcquireOutput() {
+	uint32_t min_strides[3];
+	if (uvc_mjpeg_stream_layout(mStream.dec, mStream.widths, mStream.heights,
+			&mStream.subsamp) != UVC_SUCCESS
+			|| uvc_mjpeg_stream_min_strides(mStream.dec, min_strides) != UVC_SUCCESS)
+		return false;
+
+	uvc_frame_t *out = gpu_planar_get(mStream.widths, mStream.heights);
+	if (UNLIKELY(!out))
+		return false;
+	GpuPlanarFrame *g = reinterpret_cast<GpuPlanarFrame *>(out);
+	mStream.out = out;
+	mStream.locked = 0;
+
+	const int nplanes = mStream.widths[1] ? 3 : 1;
+	unsigned char *planes[3] = { NULL, NULL, NULL };
+	int strides[3] = { 0, 0, 0 };
+	bool ok = true;
+	for (int i = 0; i < nplanes && ok; i++)
+		ok = g->stride[i] >= min_strides[i];
+
+	/* As in decode_mjpeg_to_gpu_planar: the first lock consumes the fence
+	 * from this slot's last GPU read. */
+	int fence = g->fence_fd;
+	g->fence_fd = -1;
+	for (int i = 0; i < nplanes && ok; i++) {
+		void *ptr = NULL;
+		const int lock_fence = i == 0 ? fence : -1;
+		if (AHardwareBuffer_lock((AHardwareBuffer *)g->ahb[i],
+				AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, lock_fence,
+				NULL, &ptr) != 0 || !ptr) {
+			ok = false;
+			break;
+		}
+		if (i == 0)
+			fence = -1;	/* handed to the lock */
+		planes[i] = (unsigned char *)ptr;
+		strides[i] = (int)g->stride[i];
+		mStream.locked = i + 1;
+	}
+	if (fence >= 0)
+		close(fence);
+	if (ok)
+		ok = uvc_mjpeg_stream_set_output(mStream.dec, planes, strides) == UVC_SUCCESS;
+	if (!ok)
+		streamDecodeReleaseOutput(false);
+	return ok;
+}
+
+void UVCPreview::streamDecodeAdvance(size_t bytes, bool no_more_data) {
+	const uint64_t t0 = processing_now_ns();
+	int st = uvc_mjpeg_stream_advance(mStream.dec, bytes, no_more_data ? 1 : 0);
+	if (st == UVC_MJPEG_STREAM_NEED_OUTPUT) {
+		if (streamDecodeAcquireOutput())
+			st = uvc_mjpeg_stream_advance(mStream.dec, bytes, no_more_data ? 1 : 0);
+		else
+			st = UVC_MJPEG_STREAM_UNSUPPORTED;
+	}
+	mStream.work_ns += processing_now_ns() - t0;
+
+	if (st == UVC_MJPEG_STREAM_DONE) {
+		/* Fully decoded.  The planes are unlocked now so the GPU can sample
+		 * them the moment the frame's verdict arrives. */
+		streamDecodeReleaseOutput(true);
+		mStream.done = true;
+	} else if (st != UVC_MJPEG_STREAM_NEED_DATA) {
+		streamDecodeAbort();	/* failed or declined: whole-frame path decides */
+	}
+}
+
+/* Follow the frame the USB thread is assembling. */
+void UVCPreview::streamDecodeFollow(const LiveAssembly &live) {
+	if (!mStream.dec || !mStreamDecodeEnabled || !mGpuPlanarEnabled) {
+		if (mStream.active || mStream.out)
+			streamDecodeAbort();
+		return;
+	}
+	if (live.discarded_gen && live.discarded_gen == mStream.gen) {
+		streamDecodeAbort();
+		return;
+	}
+	if (!live.gen || live.gen == live.discarded_gen || !live.data)
+		return;
+
+	if (live.gen != mStream.gen) {
+		/* A new frame started.  Anything still held belongs to a frame that
+		 * was neither published nor reported discarded: let it go. */
+		streamDecodeAbort();
+		mStream.gen = live.gen;
+		mStream.data = live.data;
+		mStream.dead = false;
+		mStream.work_ns = 0;
+		uvc_mjpeg_stream_begin(mStream.dec, live.data, (uint32_t)frameWidth,
+			(uint32_t)frameHeight);
+		mStream.active = true;
+	}
+	if (mStream.dead || mStream.done)
+		return;
+	streamDecodeAdvance(live.bytes, live.complete);
+}
+
+/* `frame` was published.  If it is the one decode-ahead has been working on,
+ * finish it (often there is nothing left to do) and present it. */
+bool UVCPreview::streamDecodeComplete(uvc_frame_t *frame) {
+	if (!mStream.dec || !frame->assembly_generation
+			|| mStream.gen != frame->assembly_generation) {
+		/* Not ours: it never reported progress, or the decode thread has not
+		 * looked at it yet.  Make sure nothing stale is still held. */
+		if (mStream.active || mStream.out)
+			streamDecodeAbort();
+		if (frame->assembly_generation) {
+			mStream.gen = frame->assembly_generation;
+			mStream.dead = true;
+		}
+		return false;
+	}
+	if (mStream.dead)
+		return false;
+	if (UNLIKELY(mStream.data != (const uint8_t *)frame->data)) {
+		/* Same generation number but different memory: not the bytes that
+		 * were decoded.  Never present that. */
+		streamDecodeAbort();
+		return false;
+	}
+
+	if (!mStream.done)
+		streamDecodeAdvance(frame->actual_bytes, true);
+	if (!mStream.done) {
+		/* The incremental decode did not get there.  The whole-frame path
+		 * redoes it; if that keeps happening the fault is on this side. */
+		if (++mStream.failures == 30 && mStreamDecodeEnabled) {
+			LOGW("stream-decode: 30 frames in a row needed the whole-frame path; disabling");
+			mStreamDecodeEnabled = false;
+		}
+		return false;
+	}
+	mStream.failures = 0;
+
+	uvc_frame_t *out = mStream.out;
+	const uvc_error_t result = uvc_mjpeg_stream_finish(mStream.dec, frame);
+	mStream.out = NULL;
+	mStream.active = false;
+	mStream.done = false;
+	mStream.dead = true;	/* this generation is finished with */
+	recordPreviewConversionTiming(mStream.work_ns);
+	if (UNLIKELY(result != UVC_SUCCESS)) {
+		/* Damaged bitstream: same policy as the whole-frame path, not shown. */
+		processingPreviewQueueDropCount.fetch_add(1, std::memory_order_relaxed);
+		gpu_planar_put(out, -1);
+		return true;
+	}
+	emitGpuPlanarFrame(out, frame, mStream.widths, mStream.heights, mStream.subsamp);
+	return true;
+}
+
+/*
+ * CPU performance hints (Android 13+, android/performance_hint.h).  The decode
+ * thread works in a short burst per frame and then sleeps, which frequency
+ * governors read as a light load and answer with a low clock.  A hint session
+ * tells the system how long each burst took against how long it should take.
+ * The target is deliberately a fraction of the frame interval: the aim is the
+ * shortest decode, not merely one that fits the interval.  The USB event
+ * thread joins the session when its id is known.
+ * A/B: setprop debug.consolation.perf_hint 0  (read when the stream starts).
+ * The symbols are looked up at run time; the app's minSdk predates them.
+ */
+namespace {
+struct PerfHintApi {
+	void *(*getManager)();
+	void *(*createSession)(void *manager, const int32_t *tids, size_t count, int64_t target_ns);
+	int (*reportActual)(void *session, int64_t actual_ns);
+	void (*closeSession)(void *session);
+	bool ok;
+};
+static const PerfHintApi &perf_hint_api() {
+	static PerfHintApi api = [] {
+		PerfHintApi a = {};
+		void *lib = dlopen("libandroid.so", RTLD_NOW);
+		if (lib) {
+			a.getManager = reinterpret_cast<void *(*)()>(
+				dlsym(lib, "APerformanceHint_getManager"));
+			a.createSession = reinterpret_cast<void *(*)(void *, const int32_t *, size_t, int64_t)>(
+				dlsym(lib, "APerformanceHint_createSession"));
+			a.reportActual = reinterpret_cast<int (*)(void *, int64_t)>(
+				dlsym(lib, "APerformanceHint_reportActualWorkDuration"));
+			a.closeSession = reinterpret_cast<void (*)(void *)>(
+				dlsym(lib, "APerformanceHint_closeSession"));
+		}
+		a.ok = a.getManager && a.createSession && a.reportActual && a.closeSession;
+		return a;
+	}();
+	return api;
+}
+} // namespace
+
+void UVCPreview::perfHintReport(uint64_t work_ns) {
+	if (UNLIKELY(!mPerfHintTried)) {
+		mPerfHintTried = true;
+		char pv[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.consolation.perf_hint", pv) > 0 && pv[0] == '0') {
+			LOGI("perf-hint: disabled by property");
+			return;
+		}
+		const PerfHintApi &api = perf_hint_api();
+		void *manager = api.ok ? api.getManager() : NULL;
+		if (!manager) {
+			LOGI("perf-hint: not available on this device");
+			return;
+		}
+		const int fps = requestMaxFps > 0 ? requestMaxFps : 60;
+		int64_t target_ns = (1000000000LL / fps) / 8;
+		if (target_ns < 1000000LL)
+			target_ns = 1000000LL;
+		int32_t tids[2] = { (int32_t)gettid(), 0 };
+		size_t count = 1;
+		const int usb_tid = mUsbThreadTid.load(std::memory_order_relaxed);
+		if (usb_tid > 0 && usb_tid != tids[0])
+			tids[count++] = (int32_t)usb_tid;
+		mPerfHintSession = api.createSession(manager, tids, count, target_ns);
+		if (!mPerfHintSession && count > 1) {
+			count = 1;
+			mPerfHintSession = api.createSession(manager, tids, count, target_ns);
+		}
+		LOGI("perf-hint: session %s (threads=%zu target=%lld us)",
+			mPerfHintSession ? "created" : "refused", count,
+			(long long)(target_ns / 1000));
+	}
+	if (mPerfHintSession && work_ns)
+		perf_hint_api().reportActual(mPerfHintSession, (int64_t)work_ns);
+}
+
+void UVCPreview::perfHintClose() {
+	if (mPerfHintSession) {
+		perf_hint_api().closeSession(mPerfHintSession);
+		mPerfHintSession = NULL;
+	}
+	mPerfHintTried = false;
 }
 
 /* Blacks out the buffer area around a frame decoded at (off_x, off_y); RGBX 0 is black.
@@ -2150,6 +2533,32 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 		} else if (gotEnv != JNI_OK) {
 			env = nullptr;
 		}
+	}
+	{
+		/* USB-thread hooks, MJPEG only.  A/B switches (read once per stream):
+		 *   setprop debug.consolation.usb_publish 0    frames take the callback thread
+		 *   setprop debug.consolation.stream_decode 0  decode starts at end of frame */
+		char pv[PROP_VALUE_MAX] = {};
+		const bool mjpeg = frameMode == REQUEST_MODE_MJPEG;
+		bool usb_publish = mjpeg, stream_decode = mjpeg;
+		if (__system_property_get("debug.consolation.usb_publish", pv) > 0 && pv[0] == '0')
+			usb_publish = false;
+		pv[0] = 0;
+		if (__system_property_get("debug.consolation.stream_decode", pv) > 0 && pv[0] == '0')
+			stream_decode = false;
+		/* Decode-ahead ends in a frame published on the USB thread; without
+		 * that hook its result would never be claimed. */
+		if (!usb_publish)
+			stream_decode = false;
+		pthread_mutex_lock(&mjpeg_decode_mutex);
+		memset(&mLive, 0, sizeof(mLive));
+		pthread_mutex_unlock(&mjpeg_decode_mutex);
+		mStreamDecodeEnabled = stream_decode;
+		uvc_set_usb_thread_callbacks(mDeviceHandle,
+			usb_publish ? uvc_preview_publish_hook : NULL,
+			stream_decode ? uvc_preview_assembly_hook : NULL, (void *)this);
+		LOGI("usb-thread hooks: publish=%s stream_decode=%s",
+			usb_publish ? "on" : "off", stream_decode ? "on" : "off");
 	}
 	const uint64_t t_start_streaming = processing_now_ns();
 	uvc_error_t result = uvc_start_streaming_bandwidth(

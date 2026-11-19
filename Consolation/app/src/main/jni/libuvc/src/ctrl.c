@@ -63,18 +63,27 @@ static const int REQ_TYPE_GET = 0xa1;
  *   a uvc_error_t error describing the error encountered.
  * @ingroup ctrl
  */
+/* wIndex of a request addressed to a unit or terminal: entity ID in the high
+ * byte, VideoControl interface number in the low byte (UVC 1.5 4.2).  Leaving
+ * the low byte 0 only reaches the entity when the VC interface is number 0. */
+#define UVC_ENTITY_WINDEX(devh, unit) \
+	((uint16_t)(((uint16_t)(unit) << 8) | (devh)->info->ctrl_if.bInterfaceNumber))
+
 int uvc_get_ctrl_len(uvc_device_handle_t *devh, uint8_t unit, uint8_t ctrl) {
-	unsigned char buf[2];
+	unsigned char buf[2] = { 0, 0 };
 
 	int ret = libusb_control_transfer(devh->usb_devh, REQ_TYPE_GET, UVC_GET_LEN,
 			ctrl << 8,
-			unit << 8,	// FIXME this will work wrong, invalid wIndex value
-			buf, 2, CTRL_TIMEOUT_MILLIS);
+			UVC_ENTITY_WINDEX(devh, unit),
+			buf, sizeof(buf), CTRL_TIMEOUT_MILLIS);
 
 	if (UNLIKELY(ret < 0))
 		return ret;
-	else
-		return (unsigned short) SW_TO_SHORT(buf);
+	/* GET_LEN is a two-byte wLength; anything less leaves buf partly unset
+	 * and would be reported as a made-up length. */
+	if (UNLIKELY(ret != (int)sizeof(buf)))
+		return UVC_ERROR_IO;
+	return (unsigned short) SW_TO_SHORT(buf);
 }
 
 /**
@@ -94,7 +103,7 @@ int uvc_get_ctrl(uvc_device_handle_t *devh, uint8_t unit, uint8_t ctrl,
 		void *data, int len, enum uvc_req_code req_code) {
 	return libusb_control_transfer(devh->usb_devh, REQ_TYPE_GET, req_code,
 			ctrl << 8,
-			unit << 8,	// FIXME this will work wrong, invalid wIndex value
+			UVC_ENTITY_WINDEX(devh, unit),
 			data, len, CTRL_TIMEOUT_MILLIS);
 }
 
@@ -114,7 +123,7 @@ int uvc_set_ctrl(uvc_device_handle_t *devh, uint8_t unit, uint8_t ctrl,
 		void *data, int len) {
 	return libusb_control_transfer(devh->usb_devh, REQ_TYPE_SET, UVC_SET_CUR,
 			ctrl << 8,
-			unit << 8,	// FIXME this will work wrong, invalid wIndex value
+			UVC_ENTITY_WINDEX(devh, unit),
 			data, len, CTRL_TIMEOUT_MILLIS);
 }
 

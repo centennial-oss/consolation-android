@@ -146,10 +146,48 @@ void _uvc_process_payload_bulk(uvc_stream_handle_t *strmh, const uint8_t *payloa
 	}
 }
 
+/* Bounds for the bulk transfer buffer when the device leaves
+ * dwMaxPayloadTransferSize at 0 in its probe/commit answer. */
+#define LIBUVC_BULK_FALLBACK_MIN_XFER (16u * 1024u)
+#define LIBUVC_BULK_FALLBACK_MAX_XFER (1024u * 1024u)
+#define LIBUVC_BULK_PAYLOAD_HEADER_ROOM 256u	/* bHeaderLength is one byte */
+
+/** @internal
+ * @brief Size of each bulk transfer buffer.
+ *
+ * Normally the negotiated dwMaxPayloadTransferSize: one transfer then holds
+ * exactly one payload (header + data).  Some devices answer the probe with 0
+ * there, which would give zero-length transfers and a stream that never
+ * delivers.  For those, size the buffer for a whole frame in one payload
+ * (bounded), since nothing smaller is known to be enough.
+ */
+static size_t _uvc_bulk_transfer_size(uvc_stream_handle_t *strmh) {
+	size_t size = strmh->cur_ctrl.dwMaxPayloadTransferSize;
+
+	if (LIKELY(size))
+		return size;
+
+	size = (size_t)strmh->cur_ctrl.dwMaxVideoFrameSize + LIBUVC_BULK_PAYLOAD_HEADER_ROOM;
+	if (size < LIBUVC_BULK_FALLBACK_MIN_XFER)
+		size = LIBUVC_BULK_FALLBACK_MIN_XFER;
+	if (size > LIBUVC_BULK_FALLBACK_MAX_XFER)
+		size = LIBUVC_BULK_FALLBACK_MAX_XFER;
+	/* Both bounds are multiples of every bulk wMaxPacketSize (512, 1024);
+	 * keep the result one too, so a full-size packet can never overflow. */
+	size = (size + 1023u) & ~(size_t)1023u;
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_WARN, "libUVCCamera",
+		"libuvc bulk: device reports dwMaxPayloadTransferSize=0, using %zu-byte transfers",
+		size);
+#endif
+	return size;
+}
+
 uvc_error_t _uvc_stream_setup_bulk_transfers(uvc_stream_handle_t *strmh,
 		uvc_format_desc_t *format_desc) {
 	struct libusb_transfer *transfer;
 	int transfer_id;
+	const size_t transfer_size = _uvc_bulk_transfer_size(strmh);
 
 	MARK("bulk transfer mode");
 	strmh->diag_selected_altsetting = 0;
@@ -157,7 +195,7 @@ uvc_error_t _uvc_stream_setup_bulk_transfers(uvc_stream_handle_t *strmh,
 	for (transfer_id = 0; transfer_id < (int)strmh->num_transfer_bufs; ++transfer_id) {
 		transfer = libusb_alloc_transfer(0);
 		strmh->transfers[transfer_id] = transfer;
-		strmh->transfer_bufs[transfer_id] = malloc(strmh->cur_ctrl.dwMaxPayloadTransferSize);
+		strmh->transfer_bufs[transfer_id] = malloc(transfer_size);
 		if (UNLIKELY(!transfer || !strmh->transfer_bufs[transfer_id])) {
 			_uvc_free_transfer(strmh, transfer_id);
 			return UVC_ERROR_NO_MEM;
@@ -165,7 +203,7 @@ uvc_error_t _uvc_stream_setup_bulk_transfers(uvc_stream_handle_t *strmh,
 		libusb_fill_bulk_transfer(transfer, strmh->devh->usb_devh,
 			format_desc->parent->bEndpointAddress,
 			strmh->transfer_bufs[transfer_id],
-			strmh->cur_ctrl.dwMaxPayloadTransferSize, _uvc_stream_callback,
+			(int)transfer_size, _uvc_stream_callback,
 			(void *)strmh, LIBUVC_STREAM_XFER_TIMEOUT_MS);
 		/* See stream_iso.c: build the URBs once, resubmit without allocating. */
 		if (UNLIKELY(libusb_prealloc_bulk_urbs(transfer) != LIBUSB_SUCCESS))

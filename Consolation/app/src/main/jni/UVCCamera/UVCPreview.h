@@ -130,6 +130,64 @@ private:
 		return frame && frame->yuv_hardware_buffers[0] != NULL;
 	}
 	bool decode_mjpeg_to_gpu_planar(uvc_frame_t *frame);
+	/** Stamp a decoded GPU planar target with the source frame's identity and
+	 * hand it on for presentation. */
+	void emitGpuPlanarFrame(uvc_frame_t *out, const uvc_frame_t *frame,
+		const uint32_t widths[3], const uint32_t heights[3], int subsamp);
+
+	/* ---- Frames taken on the USB thread (no callback-thread hop) ---- */
+	static int uvc_preview_publish_hook(uvc_frame_t *frame, void *vptr_args);
+	static void uvc_preview_assembly_hook(const uvc_assembly_event_t *event, void *vptr_args);
+	/** Per-frame bookkeeping and validation shared by the callback and the
+	 * publish hook.  false = drop the frame. */
+	bool admitFrame(uvc_frame_t *frame);
+	/** True when MJPEG frames go to the async decoder and nowhere else. */
+	bool mjpegFastPathActive() const;
+	std::atomic<int> mUsbThreadTid;
+
+	/* ---- Decode-ahead: decode an MJPEG frame while it is still arriving ----
+	 * The USB thread reports assembly progress (guarded by mjpeg_decode_mutex);
+	 * the decode thread follows it with an incremental decoder writing into a
+	 * GPU planar target.  Nothing is shown until the frame is published: a
+	 * frame that is discarded, or carries the error bit, is dropped with it. */
+	volatile bool mStreamDecodeEnabled;
+	struct LiveAssembly {
+		uint32_t gen;			/**< generation of the latest progress report */
+		const uint8_t *data;
+		size_t bytes;
+		bool complete;
+		uint32_t discarded_gen;	/**< latest generation reported discarded */
+		bool dirty;				/**< changed since the decode thread looked */
+	} mLive;
+	struct StreamDecode {
+		uvc_mjpeg_stream_decoder_t *dec;
+		uint32_t gen;			/**< generation this state refers to (0 = none) */
+		const uint8_t *data;	/**< where that generation's bytes live */
+		bool active;			/**< decoder holds an image in progress */
+		bool done;				/**< image fully decoded, waiting for its verdict */
+		bool dead;				/**< this generation is left to the whole-frame path */
+		uvc_frame_t *out;		/**< GPU planar target, NULL until the header is in */
+		int locked;				/**< planes currently CPU-locked */
+		uint32_t widths[3], heights[3];
+		int subsamp;
+		uint64_t work_ns;		/**< decode time spent on this generation so far */
+		uint32_t failures;		/**< consecutive frames the whole-frame path had to redo */
+	} mStream;
+	bool waitMjpegWork(uvc_frame_t **final_frame, LiveAssembly *live);
+	void streamDecodeFollow(const LiveAssembly &live);
+	void streamDecodeAdvance(size_t bytes, bool no_more_data);
+	bool streamDecodeAcquireOutput();
+	void streamDecodeReleaseOutput(bool unlock_only);
+	void streamDecodeAbort();
+	/** Finish a published frame.  true = handled (presented or dropped). */
+	bool streamDecodeComplete(uvc_frame_t *frame);
+	void decodeWholeMjpegFrame(uvc_frame_t *frame);
+
+	/* ---- CPU performance hints (ADPF), decode thread only ---- */
+	void *mPerfHintSession;
+	bool mPerfHintTried;
+	void perfHintReport(uint64_t work_ns);
+	void perfHintClose();
 	/** Render a decoded planar frame and return it to its pool.  Used by the
 	 * preview thread, or directly by the decode thread when merged rendering
 	 * is on (saves the ring hand-off; costs the decode/render overlap). */

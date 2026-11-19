@@ -517,6 +517,10 @@ typedef struct uvc_frame {
 	 * Consumers re-sample before use to detect the buffer changing underneath
 	 * them (see uvc_frame_sample_hash). 0 = not recorded. */
 	uint32_t integrity_sample_hash;
+	/** Which assembly this frame came from: matches the generation reported by
+	 * uvc_assembly_callback_t while the frame was still arriving.  0 when the
+	 * stream reports no assembly progress. */
+	uint32_t assembly_generation;
 	/** Diagnostic: USB packet trace for the payloads that built this frame
 	 * (ISO only).  len = actual_length incl. UVC header; flags: bit0 first
 	 * packet of a libusb transfer, bit1 EOF bit set, bit2 header_len != 12,
@@ -618,6 +622,55 @@ void uvc_set_status_callback(uvc_device_handle_t *devh,
 void uvc_set_button_callback(uvc_device_handle_t *devh,
                              uvc_button_callback_t cb,
                              void *user_ptr);
+
+/* ---- Callbacks that run on the USB event thread ----
+ *
+ * The frame callback given to uvc_start_streaming() runs on a helper thread,
+ * one wake-up behind the USB thread.  These two run on the USB thread itself,
+ * so they must be short and must never block on work: hand off and return.
+ * Both are optional and apply to streams started after they are set.
+ */
+
+/** A complete, valid frame was just published.  `frame` borrows a pool slot
+ * for the duration of the call only; uvc_frame_retain() it to keep the bytes.
+ * Return non-zero to take the frame: the regular frame callback is then not
+ * invoked (and its thread not woken) for it.  Return 0 to let the frame go to
+ * the regular callback as usual. */
+typedef int (uvc_publish_callback_t)(struct uvc_frame *frame, void *user_ptr);
+
+enum uvc_assembly_event_type {
+	/** More bytes of the frame being assembled are readable. */
+	UVC_ASSEMBLY_PROGRESS = 1,
+	/** The frame being assembled was thrown away (transport error, bad
+	 * markers, ...).  Nothing read from it may be shown. */
+	UVC_ASSEMBLY_DISCARDED = 2
+};
+
+/** Progress of the (MJPEG) frame currently being assembled.
+ *
+ * data[0 .. bytes) is stable and may be read from any thread until the frame
+ * of this generation is published or discarded; bytes past that are still
+ * being written.  A reader that is still going when the generation changes
+ * must discard what it produced: after a discard the same memory is reused
+ * for the next frame.  A published frame carries the same number in
+ * uvc_frame_t::assembly_generation, and its data pointer equals `data`.
+ */
+typedef struct uvc_assembly_event {
+	enum uvc_assembly_event_type type;
+	uint32_t generation;
+	const uint8_t *data;
+	size_t bytes;
+	/** The JPEG end-of-image marker has arrived: `bytes` is the whole image.
+	 * The frame is still not known to be valid until it is published. */
+	uint8_t complete;
+} uvc_assembly_event_t;
+
+typedef void (uvc_assembly_callback_t)(const uvc_assembly_event_t *event, void *user_ptr);
+
+void uvc_set_usb_thread_callbacks(uvc_device_handle_t *devh,
+		uvc_publish_callback_t *publish_cb,
+		uvc_assembly_callback_t *assembly_cb,
+		void *user_ptr);
 
 const uvc_input_terminal_t *uvc_get_input_terminals(uvc_device_handle_t *devh);
 const uvc_output_terminal_t *uvc_get_output_terminals(uvc_device_handle_t *devh);
@@ -873,6 +926,53 @@ uvc_error_t uvc_mjpeg_planar_layout(uvc_frame_t *in, uint32_t widths[3],
 	uint32_t heights[3], int *subsamp);
 /** Decode into caller-supplied planes (row strides in bytes). planes[1..2]
  * may be NULL for gray.  Applies the corrupt-frame warning policy. */
+/* ---- Incremental MJPEG -> planar YUV decoder ----
+ *
+ * Decodes a JPEG while its bytes are still arriving (see
+ * uvc_assembly_callback_t), reading the caller's buffer in place and writing
+ * straight into the caller's planes: no intermediate copy of either.  One
+ * instance decodes one image at a time and must be driven from one thread.
+ *
+ *   begin(data, w, h)
+ *   advance(bytes) ... -> NEED_OUTPUT     header parsed: layout() is valid
+ *   set_output(planes, strides)
+ *   advance(bytes) ... -> NEED_DATA       call again when more bytes exist
+ *   advance(bytes, no_more_data=1) -> DONE
+ *   finish(frame)                         applies the corrupt-frame policy
+ */
+typedef struct uvc_mjpeg_stream_decoder uvc_mjpeg_stream_decoder_t;
+
+enum uvc_mjpeg_stream_status {
+	UVC_MJPEG_STREAM_UNSUPPORTED = -2,	/**< valid JPEG this decoder will not handle; use uvc_mjpeg2yuv_planes */
+	UVC_MJPEG_STREAM_FAILED = -1,		/**< corrupt or truncated */
+	UVC_MJPEG_STREAM_NEED_DATA = 0,
+	UVC_MJPEG_STREAM_NEED_OUTPUT = 1,
+	UVC_MJPEG_STREAM_DONE = 2
+};
+
+uvc_mjpeg_stream_decoder_t *uvc_mjpeg_stream_decoder_create(void);
+void uvc_mjpeg_stream_decoder_destroy(uvc_mjpeg_stream_decoder_t *dec);
+/** Start a new image at `data`; any image in progress is abandoned. */
+void uvc_mjpeg_stream_begin(uvc_mjpeg_stream_decoder_t *dec, const uint8_t *data,
+		uint32_t expected_width, uint32_t expected_height);
+/** Decode as far as data[0 .. bytes_available) allows.  `no_more_data` says
+ * the image will not grow further, turning "need data" into a failure. */
+int uvc_mjpeg_stream_advance(uvc_mjpeg_stream_decoder_t *dec, size_t bytes_available,
+		int no_more_data);
+/** Plane geometry, identical to uvc_mjpeg_planar_layout(); valid from NEED_OUTPUT on. */
+uvc_error_t uvc_mjpeg_stream_layout(const uvc_mjpeg_stream_decoder_t *dec,
+		uint32_t widths[3], uint32_t heights[3], int *subsamp_out);
+/** Row stride each plane needs at least (the decoder writes whole DCT blocks). */
+uvc_error_t uvc_mjpeg_stream_min_strides(const uvc_mjpeg_stream_decoder_t *dec,
+		uint32_t min_strides[3]);
+uvc_error_t uvc_mjpeg_stream_set_output(uvc_mjpeg_stream_decoder_t *dec,
+		unsigned char *planes[3], const int strides[3]);
+/** After DONE: judge the decode the same way uvc_mjpeg2yuv_planes does
+ * (libjpeg warnings mean a damaged bitstream).  `frame` is the published
+ * frame the bytes turned out to belong to. */
+uvc_error_t uvc_mjpeg_stream_finish(uvc_mjpeg_stream_decoder_t *dec, const uvc_frame_t *frame);
+void uvc_mjpeg_stream_abort(uvc_mjpeg_stream_decoder_t *dec);
+
 uvc_error_t uvc_mjpeg2yuv_planes(uvc_frame_t *in, unsigned char *planes[3],
 	const int strides[3]);	// XXX
 #endif
@@ -909,6 +1009,19 @@ uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes); // XXX
 int uvc_frame_retain(uvc_frame_t *frame);
 /** Sparse FNV-1a over 16 x 64-byte windows spread across [data, data+len).
  * ~1 KiB of reads regardless of frame size; cheap enough for every frame. */
+/* Frame-buffer integrity probe: the producer fingerprints ~1 KiB of each
+ * published frame and every later hop re-samples and compares, to catch a
+ * buffer written while in flight.  It costs a handful of hash passes per frame
+ * (one of them under the stream's publish lock), so it follows the runtime
+ * diagnostics switch; force it with -DUVC_FRAME_INTEGRITY_CHECK=1.  When off,
+ * integrity_sample_hash stays 0, which consumers read as "not recorded". */
+#ifndef UVC_FRAME_INTEGRITY_CHECK
+#if defined(UVC_RUNTIME_DIAG_ENABLED) && UVC_RUNTIME_DIAG_ENABLED
+#define UVC_FRAME_INTEGRITY_CHECK 1
+#else
+#define UVC_FRAME_INTEGRITY_CHECK 0
+#endif
+#endif
 uint32_t uvc_frame_sample_hash(const void *data, size_t len);
 void uvc_frame_release(uvc_frame_t *frame);
 /** Synchronize an optional AHardwareBuffer-backed borrowed frame for GPU use.

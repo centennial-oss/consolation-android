@@ -61,6 +61,7 @@ uvc_frame_desc_t *uvc_find_frame_desc(uvc_device_handle_t *devh,
 		uint16_t format_id, uint16_t frame_id);
 static void *_uvc_user_caller(void *arg);
 void _uvc_populate_frame(uvc_stream_handle_t *strmh);
+static void _uvc_populate_frame_into(uvc_stream_handle_t *strmh, uvc_frame_t *frame);
 static void *_uvc_stall_recovery_caller(void *arg);
 static inline int _uvc_frame_slot_valid(uint32_t slot) {
 	return slot < LIBUVC_FRAME_POOL_SLOTS;
@@ -188,6 +189,7 @@ uvc_error_t uvc_frame_hardware_buffer_lock(uvc_frame_t *frame) {
 static void _uvc_discard_assembled_frame(uvc_stream_handle_t *strmh, const char *reason) {
 	if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG)
 		_uvc_diag_mjpeg_drop(strmh, reason);
+	_uvc_asm_discard(strmh);
 	strmh->got_bytes = 0;
 	strmh->frame_start_monotonic_ns = 0;
 	strmh->frame_complete_monotonic_ns = 0;
@@ -261,6 +263,20 @@ struct format_table_entry *_get_format_entry(enum uvc_frame_format format) {
 #undef FMT
 }
 
+/* DirectShow MEDIASUBTYPE_RGB24 {e436eb7d-524f-11ce-9f53-0020af0ba770}: what
+ * capture devices normally put in guidFormat for packed 24-bit RGB.  It is not
+ * a FourCC-derived GUID, so the 'BGR3'/'RGB3' entries never match it.  Bytes
+ * on the wire are B, G, R, i.e. our UVC_FRAME_FORMAT_BGR. */
+static const uint8_t uvc_guid_mediasubtype_rgb24[16] = {
+	0x7d, 0xeb, 0x36, 0xe4, 0x4f, 0x52, 0xce, 0x11,
+	0x9f, 0x53, 0x00, 0x20, 0xaf, 0x0b, 0xa7, 0x70
+};
+
+static inline int _uvc_guid_is_bgr_alias(const uint8_t guid[16]) {
+	return !memcmp(guid, "RGB3", 4)
+		|| !memcmp(guid, uvc_guid_mediasubtype_rgb24, 16);
+}
+
 static uint8_t _uvc_frame_format_matches_guid(enum uvc_frame_format fmt,
 		uint8_t guid[16]) {
 	struct format_table_entry *format;
@@ -279,7 +295,7 @@ static uint8_t _uvc_frame_format_matches_guid(enum uvc_frame_format fmt,
 			&& (!memcmp(guid, "I420", 4) || !memcmp(guid, "IYUV", 4)))
 		return 1;
 	if (!format->abstract_fmt && fmt == UVC_FRAME_FORMAT_BGR
-			&& !memcmp(guid, "RGB3", 4))
+			&& _uvc_guid_is_bgr_alias(guid))
 		return 1;
 
 	for (child_idx = 0; child_idx < format->children_count; child_idx++) {
@@ -307,7 +323,7 @@ static enum uvc_frame_format uvc_frame_format_for_guid(uint8_t guid[16]) {
 	/* Common aliases not always listed with full 16-byte GUIDs in descriptors */
 	if (!memcmp(guid, "I420", 4) || !memcmp(guid, "IYUV", 4))
 		return UVC_FRAME_FORMAT_YU12;
-	if (!memcmp(guid, "RGB3", 4))
+	if (_uvc_guid_is_bgr_alias(guid))
 		return UVC_FRAME_FORMAT_BGR;
 
 	return UVC_FRAME_FORMAT_UNKNOWN;
@@ -603,12 +619,18 @@ static uvc_error_t _uvc_get_stream_ctrl_format(uvc_device_handle_t *devh,
 			for (fps = max_fps; fps >= min_fps; fps--) {
 				if (UNLIKELY(!fps)) continue;
 				uint32_t interval_100ns = 10000000 / fps;
-				uint32_t interval_offset = interval_100ns - frame->dwMinFrameInterval;
 				LOGV("fps:%d", fps);
-				if (interval_100ns >= frame->dwMinFrameInterval
-					&& interval_100ns <= frame->dwMaxFrameInterval
-					&& !(interval_offset
-						&& (interval_offset % frame->dwFrameIntervalStep) ) ) {
+				if (interval_100ns < frame->dwMinFrameInterval
+						|| interval_100ns > frame->dwMaxFrameInterval)
+					continue;
+				/* In range.  It should also sit on the device's step grid.  A
+				 * step of 0 describes no grid (and cannot be divided by): take
+				 * the interval as asked and let the probe that follows report
+				 * what the device actually settles on. */
+				const uint32_t interval_offset = interval_100ns - frame->dwMinFrameInterval;
+				const int on_grid = !frame->dwFrameIntervalStep
+					|| !(interval_offset % frame->dwFrameIntervalStep);
+				if (on_grid) {
 					ctrl->bmHint = (1 << 0); /* don't negotiate interval */
 					ctrl->bFormatIndex = format->bFormatIndex;
 					ctrl->bFrameIndex = frame->bFrameIndex;
@@ -723,6 +745,7 @@ uvc_error_t uvc_probe_stream_ctrl(uvc_device_handle_t *devh,
  */
 void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 	uint32_t next_out_slot;
+	int offer = 0, taken = 0;
 
 	if (UNLIKELY(!_uvc_mjpeg_payload_has_markers(strmh))) {
 		_uvc_discard_assembled_frame(strmh, reason);
@@ -744,7 +767,11 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 		strmh->hold_slot = strmh->out_slot;
 		strmh->holdbuf = strmh->frame_pool[strmh->hold_slot];
 		/* Publish-time fingerprint; consumers compare before reading. */
+#if UVC_FRAME_INTEGRITY_CHECK
 		strmh->hold_sample_hash = uvc_frame_sample_hash(strmh->holdbuf, strmh->got_bytes);
+#else
+		strmh->hold_sample_hash = 0;	/* not recorded */
+#endif
 		strmh->hold_iso_trace_count = strmh->iso_trace_count;
 		memcpy(strmh->hold_iso_trace_len, strmh->iso_trace_len,
 			(size_t)strmh->iso_trace_count * sizeof(strmh->iso_trace_len[0]));
@@ -753,6 +780,18 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 		strmh->hold_last_scr = strmh->last_scr;
 		strmh->hold_pts = strmh->pts;
 		strmh->hold_seq = strmh->seq;
+		strmh->hold_asm_gen = strmh->asm_open ? strmh->asm_gen : 0;
+
+		/* Offer the frame to the USB-thread publish callback.  The sequence
+		 * is claimed before the lock is dropped so the callback thread, if
+		 * something else wakes it, does not deliver the same frame; the claim
+		 * is withdrawn below when the callback declines. */
+		if (strmh->publish_cb && !strmh->hold_bfh_err) {
+			_uvc_populate_frame_into(strmh, &strmh->publish_frame);
+			strmh->consumed_seq = strmh->hold_seq;
+			strmh->consumed_valid = 1;
+			offer = 1;
+		}
 
 		if (_uvc_frame_pick_out_slot_locked(strmh, &next_out_slot)) {
 			strmh->out_slot = (uint8_t)next_out_slot;
@@ -764,10 +803,33 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 		}
 	}
 	pthread_mutex_unlock(&strmh->cb_mutex);
+
+	if (strmh->asm_open) {
+		/* A frame carrying the error bit is "published" only to be skipped by
+		 * its consumers: for anyone decoding ahead that is a discard. */
+		if (strmh->hold_bfh_err)
+			_uvc_asm_discard(strmh);
+		strmh->asm_open = 0;
+	}
+
+	if (offer) {
+		taken = strmh->publish_cb(&strmh->publish_frame, strmh->usb_cb_user_ptr) != 0;
+		uvc_frame_release(&strmh->publish_frame);
+		strmh->publish_frame.library_frame_owner = NULL;
+		strmh->publish_frame.library_hardware_buffer = NULL;
+		strmh->publish_frame.library_hardware_buffer_stride = 0;
+		if (!taken) {
+			pthread_mutex_lock(&strmh->cb_mutex);
+			strmh->consumed_valid = 0;
+			pthread_mutex_unlock(&strmh->cb_mutex);
+		}
+	}
 	/* Signal after unlock: bionic has no wait morphing, so a waiter woken
 	 * while the mutex is still held just blocks on it again (two context
-	 * switches instead of one). */
-	pthread_cond_broadcast(&strmh->cb_cond);
+	 * switches instead of one).  A frame the publish callback took needs no
+	 * wake-up at all: that hop is what the callback exists to remove. */
+	if (!taken)
+		pthread_cond_broadcast(&strmh->cb_cond);
 
 	strmh->seq++;
 	strmh->got_bytes = 0;
@@ -991,6 +1053,10 @@ void _uvc_stream_callback(struct libusb_transfer *transfer) {
 		_uvc_process_payload_bulk(strmh, transfer->buffer, transfer->actual_length);
 	    break;
 	case LIBUSB_TRANSFER_NO_DEVICE:
+		/* The device is gone.  Clearing `running` stops resubmission and lets
+		 * the worker threads wind down; the teardown itself still happens in
+		 * uvc_stream_stop(), which keys off `started`, not `running`. */
+		strmh->device_gone = 1;
 		if (transfer->num_iso_packets) {
 			strmh->running = 0;
 			_uvc_queue_ordered_iso_transfer(strmh, transfer,
@@ -1247,12 +1313,17 @@ static void _uvc_release_frame_pool_slot(uvc_stream_handle_t *strmh, uint32_t sl
 	strmh->frame_pool_hardware_buffer_strides[slot] = 0;
 }
 
+/* gpu_sampleable: back the slot with an AHardwareBuffer so the renderer can
+ * sample the frame without an upload.  Only raw pixel formats are ever
+ * sampled; a compressed stream's slots hold bitstream bytes that go to a
+ * decoder, so for those graphics memory (and a gralloc round trip per slot at
+ * stream start) buys nothing and plain heap memory is used. */
 static int _uvc_allocate_frame_pool_slot(uvc_stream_handle_t *strmh,
-		uint32_t slot, size_t bytes) {
+		uint32_t slot, size_t bytes, int gpu_sampleable) {
 	if (!strmh || slot >= LIBUVC_FRAME_POOL_SLOTS || !bytes)
 		return 0;
 #if defined(__ANDROID__) && LIBUVC_USE_AHARDWAREBUFFER_FRAME_POOL
-	{
+	if (gpu_sampleable) {
 		AHardwareBuffer_Desc desc;
 		AHardwareBuffer *buffer = NULL;
 		void *mapped = NULL;
@@ -1290,6 +1361,7 @@ static int _uvc_allocate_frame_pool_slot(uvc_stream_handle_t *strmh,
 		}
 	}
 #endif
+	(void)gpu_sampleable;
 	strmh->frame_pool[slot] = malloc(bytes);
 	strmh->frame_pool_hardware_buffers[slot] = NULL;
 	strmh->frame_pool_hardware_buffer_strides[slot] = 0;
@@ -1389,8 +1461,19 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 	{
 		uint32_t i;
 		uint32_t ahb_slots = 0;
+		/* Unknown formats keep the hardware-buffer backing: start() rejects
+		 * them anyway, and "raw unless proven compressed" cannot take the
+		 * zero-upload path away from a pixel format. */
+		const uvc_frame_desc_t *pool_frame_desc = _uvc_find_frame_desc_stream_if(
+			stream_if, ctrl->bFormatIndex, ctrl->bFrameIndex);
+		const enum uvc_frame_format pool_format = pool_frame_desc && pool_frame_desc->parent
+			? uvc_frame_format_for_guid(pool_frame_desc->parent->guidFormat)
+			: UVC_FRAME_FORMAT_UNKNOWN;
+		const int gpu_sampleable = pool_format != UVC_FRAME_FORMAT_MJPEG
+			&& pool_format != UVC_FRAME_FORMAT_H264;
 		for (i = 0; i < LIBUVC_FRAME_POOL_SLOTS; i++) {
-			if (UNLIKELY(!_uvc_allocate_frame_pool_slot(strmh, i, stream_buf_size))) {
+			if (UNLIKELY(!_uvc_allocate_frame_pool_slot(strmh, i, stream_buf_size,
+					gpu_sampleable))) {
 				ret = UVC_ERROR_NO_MEM;
 				goto fail;
 			}
@@ -1485,6 +1568,9 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	}
 
 	strmh->running = 1;
+	strmh->started = 1;
+	strmh->device_gone = 0;
+	strmh->cb_thread_started = 0;
 	strmh->seq = 0;
 	strmh->fid = 0;
 	strmh->pts = 0;
@@ -1501,6 +1587,13 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	_uvc_diag_iso_frame_reset(strmh);
 	_uvc_mjpeg_scan_reset(strmh);
 	strmh->iso_trace_count = 0;
+	strmh->publish_cb = strmh->devh->publish_cb;
+	strmh->assembly_cb = strmh->devh->assembly_cb;
+	strmh->usb_cb_user_ptr = strmh->devh->usb_cb_user_ptr;
+	strmh->consumed_valid = 0;
+	strmh->asm_open = 0;
+	strmh->asm_reported_bytes = 0;
+	strmh->asm_report_step = 32u * 1024u;
 
 	frame_desc = uvc_find_frame_desc_stream(strmh, ctrl->bFormatIndex, ctrl->bFrameIndex);
 	if (UNLIKELY(!frame_desc)) {
@@ -1537,7 +1630,12 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 
 	// Get the interface that provides the chosen format and frame configuration
 	interface_id = strmh->stream_if->bInterfaceNumber;
-	interface = &strmh->devh->info->config->interface[interface_id];
+	interface = _uvc_find_usb_interface(strmh->devh->info->config, interface_id);
+	if (UNLIKELY(!interface)) {
+		ret = UVC_ERROR_INVALID_DEVICE;
+		LOGE("streaming interface %d not in the configuration", interface_id);
+		goto fail;
+	}
 
 	/* A VS interface uses isochronous transfers if it has multiple altsettings.
 	 * (UVC 1.5: 2.4.3. VideoStreaming Interface, on page 19) */
@@ -1576,6 +1674,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 			goto fail;
 		}
 		cb_thread_started = 1;
+		strmh->cb_thread_started = 1;
 	}
 	MARK("submit transfers");
 	for (transfer_id = 0; transfer_id < (int)strmh->num_transfer_bufs; transfer_id++) {
@@ -1605,6 +1704,7 @@ fail:
 		uvc_stream_stop(strmh);
 	} else {
 		strmh->running = 0;
+		strmh->started = 0;
 	}
 	UVC_EXIT(ret);
 	return ret;
@@ -1649,7 +1749,11 @@ static void *_uvc_user_caller(void *arg) {
 	for (; 1 ;) {
 		pthread_mutex_lock(&strmh->cb_mutex);
 		{
-			for (; strmh->running && (last_seq == strmh->hold_seq) ;) {
+			/* Nothing to do while the held frame is one already delivered,
+			 * or one the USB-thread publish callback took. */
+			for (; strmh->running && ((last_seq == strmh->hold_seq)
+					|| (strmh->consumed_valid
+						&& strmh->consumed_seq == strmh->hold_seq)) ;) {
 				pthread_cond_wait(&strmh->cb_cond, &strmh->cb_mutex);
 			}
 
@@ -1689,7 +1793,10 @@ static void *_uvc_user_caller(void *arg) {
  * must be called with stream cb lock held!
  */
 void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
-	uvc_frame_t *frame = &strmh->frame;
+	_uvc_populate_frame_into(strmh, &strmh->frame);
+}
+
+static void _uvc_populate_frame_into(uvc_stream_handle_t *strmh, uvc_frame_t *frame) {
 	uvc_frame_desc_t *frame_desc;
 
 	/** @todo this stuff that hits the main config cache should really happen
@@ -1750,6 +1857,7 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
 	frame->capture_time.tv_usec = 0;
 	frame->arrival_monotonic_ns = strmh->hold_start_monotonic_ns;
 	frame->integrity_sample_hash = strmh->hold_sample_hash;
+	frame->assembly_generation = strmh->hold_asm_gen;
 	frame->iso_trace_count = strmh->hold_iso_trace_count;
 	memcpy(frame->iso_trace_len, strmh->hold_iso_trace_len,
 		(size_t)strmh->hold_iso_trace_count * sizeof(frame->iso_trace_len[0]));
@@ -1811,6 +1919,13 @@ uvc_error_t uvc_stream_get_frame(uvc_stream_handle_t *strmh,
 
 				ts.tv_sec += add_secs;
 				ts.tv_nsec += add_nsecs;
+				/* Two sub-second parts can sum past one second, and
+				 * pthread_cond_timedwait rejects (EINVAL, no wait at all)
+				 * a tv_nsec outside [0, 1e9). */
+				if (ts.tv_nsec >= 1000000000L) {
+					ts.tv_sec += 1;
+					ts.tv_nsec -= 1000000000L;
+				}
 
 				pthread_cond_timedwait(&strmh->cb_cond, &strmh->cb_mutex, &ts);
 			}
@@ -1863,11 +1978,16 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 
 	if (!strmh) RETURN(UVC_SUCCESS, uvc_error_t);
 
-	if (UNLIKELY(!strmh->running)) {
+	/* `running` may already be 0 because the device was unplugged (the USB
+	 * thread clears it).  The threads and any transfers not yet called back
+	 * still exist then and still reference strmh, so the teardown below must
+	 * run regardless; `started` records that it is owed. */
+	if (UNLIKELY(!strmh->started)) {
 		UVC_EXIT(UVC_ERROR_INVALID_PARAM);
 		RETURN(UVC_ERROR_INVALID_PARAM, uvc_error_t);
 	}
 
+	strmh->started = 0;
 	strmh->running = 0;
 
 	pthread_mutex_lock(&strmh->cb_mutex);
@@ -1915,16 +2035,32 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 	}
 	pthread_mutex_unlock(&strmh->cb_mutex);
 
-	/** @todo stop the actual stream, camera side? */
-
 	if (strmh->stall_recovery_thread_started) {
 		pthread_join(strmh->stall_recovery_thread, NULL);
 		strmh->stall_recovery_thread_started = 0;
 	}
 
-	if (strmh->user_cb) {
+	if (strmh->cb_thread_started) {
 		/* wait for the thread to stop (triggered by LIBUSB_TRANSFER_CANCELLED transfer) */
 		pthread_join(strmh->cb_thread, NULL);
+		strmh->cb_thread_started = 0;
+	}
+
+	/* Tell the device to stop sending.  An isochronous stream ends when the
+	 * interface returns to its zero-bandwidth alternate setting, which the
+	 * kernel does when the interface is released in uvc_stream_close().  A
+	 * bulk interface has a single alternate setting, so nothing would signal
+	 * the device; resetting the endpoint (CLEAR_FEATURE(ENDPOINT_HALT)) is the
+	 * stop signal bulk UVC devices are written against.  Done after every
+	 * transfer has been reaped and the stall-recovery thread has exited, so
+	 * nothing else is using the endpoint. */
+	if (!strmh->diag_selected_isochronous && !strmh->device_gone
+			&& strmh->stream_if->bEndpointAddress) {
+		const int halt_ret = libusb_clear_halt(strmh->devh->usb_devh,
+			strmh->stream_if->bEndpointAddress);
+		if (UNLIKELY(halt_ret != LIBUSB_SUCCESS))
+			UVC_DEBUG("bulk stream stop: clear_halt(0x%02x) = %d",
+				strmh->stream_if->bEndpointAddress, halt_ret);
 	}
 
 	RETURN(UVC_SUCCESS, uvc_error_t);
@@ -1942,7 +2078,7 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 
 	if (!strmh) { UVC_EXIT_VOID() };
 
-	if (strmh->running)
+	if (strmh->started)
 		uvc_stream_stop(strmh);
 
 	uvc_release_if(strmh->devh, strmh->stream_if->bInterfaceNumber);
@@ -1970,4 +2106,21 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 	free(strmh);
 
 	UVC_EXIT_VOID();
+}
+
+/** @brief Install callbacks that run on the USB event thread.
+ * @ingroup streaming
+ *
+ * See uvc_publish_callback_t and uvc_assembly_callback_t.  Takes effect for
+ * streams started afterwards; pass NULLs to remove.
+ */
+void uvc_set_usb_thread_callbacks(uvc_device_handle_t *devh,
+		uvc_publish_callback_t *publish_cb,
+		uvc_assembly_callback_t *assembly_cb,
+		void *user_ptr) {
+	if (UNLIKELY(!devh))
+		return;
+	devh->publish_cb = publish_cb;
+	devh->assembly_cb = assembly_cb;
+	devh->usb_cb_user_ptr = user_ptr;
 }
