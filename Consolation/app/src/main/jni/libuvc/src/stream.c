@@ -764,7 +764,11 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 		strmh->hold_slot = strmh->out_slot;
 		strmh->holdbuf = strmh->frame_pool[strmh->hold_slot];
 		/* Publish-time fingerprint; consumers compare before reading. */
+#if UVC_FRAME_INTEGRITY_CHECK
 		strmh->hold_sample_hash = uvc_frame_sample_hash(strmh->holdbuf, strmh->got_bytes);
+#else
+		strmh->hold_sample_hash = 0;	/* not recorded */
+#endif
 		strmh->hold_iso_trace_count = strmh->iso_trace_count;
 		memcpy(strmh->hold_iso_trace_len, strmh->iso_trace_len,
 			(size_t)strmh->iso_trace_count * sizeof(strmh->iso_trace_len[0]));
@@ -1271,12 +1275,17 @@ static void _uvc_release_frame_pool_slot(uvc_stream_handle_t *strmh, uint32_t sl
 	strmh->frame_pool_hardware_buffer_strides[slot] = 0;
 }
 
+/* gpu_sampleable: back the slot with an AHardwareBuffer so the renderer can
+ * sample the frame without an upload.  Only raw pixel formats are ever
+ * sampled; a compressed stream's slots hold bitstream bytes that go to a
+ * decoder, so for those graphics memory (and a gralloc round trip per slot at
+ * stream start) buys nothing and plain heap memory is used. */
 static int _uvc_allocate_frame_pool_slot(uvc_stream_handle_t *strmh,
-		uint32_t slot, size_t bytes) {
+		uint32_t slot, size_t bytes, int gpu_sampleable) {
 	if (!strmh || slot >= LIBUVC_FRAME_POOL_SLOTS || !bytes)
 		return 0;
 #if defined(__ANDROID__) && LIBUVC_USE_AHARDWAREBUFFER_FRAME_POOL
-	{
+	if (gpu_sampleable) {
 		AHardwareBuffer_Desc desc;
 		AHardwareBuffer *buffer = NULL;
 		void *mapped = NULL;
@@ -1314,6 +1323,7 @@ static int _uvc_allocate_frame_pool_slot(uvc_stream_handle_t *strmh,
 		}
 	}
 #endif
+	(void)gpu_sampleable;
 	strmh->frame_pool[slot] = malloc(bytes);
 	strmh->frame_pool_hardware_buffers[slot] = NULL;
 	strmh->frame_pool_hardware_buffer_strides[slot] = 0;
@@ -1413,8 +1423,19 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh,
 	{
 		uint32_t i;
 		uint32_t ahb_slots = 0;
+		/* Unknown formats keep the hardware-buffer backing: start() rejects
+		 * them anyway, and "raw unless proven compressed" cannot take the
+		 * zero-upload path away from a pixel format. */
+		const uvc_frame_desc_t *pool_frame_desc = _uvc_find_frame_desc_stream_if(
+			stream_if, ctrl->bFormatIndex, ctrl->bFrameIndex);
+		const enum uvc_frame_format pool_format = pool_frame_desc && pool_frame_desc->parent
+			? uvc_frame_format_for_guid(pool_frame_desc->parent->guidFormat)
+			: UVC_FRAME_FORMAT_UNKNOWN;
+		const int gpu_sampleable = pool_format != UVC_FRAME_FORMAT_MJPEG
+			&& pool_format != UVC_FRAME_FORMAT_H264;
 		for (i = 0; i < LIBUVC_FRAME_POOL_SLOTS; i++) {
-			if (UNLIKELY(!_uvc_allocate_frame_pool_slot(strmh, i, stream_buf_size))) {
+			if (UNLIKELY(!_uvc_allocate_frame_pool_slot(strmh, i, stream_buf_size,
+					gpu_sampleable))) {
 				ret = UVC_ERROR_NO_MEM;
 				goto fail;
 			}

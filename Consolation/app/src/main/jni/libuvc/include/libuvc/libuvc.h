@@ -909,6 +909,19 @@ uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes); // XXX
 int uvc_frame_retain(uvc_frame_t *frame);
 /** Sparse FNV-1a over 16 x 64-byte windows spread across [data, data+len).
  * ~1 KiB of reads regardless of frame size; cheap enough for every frame. */
+/* Frame-buffer integrity probe: the producer fingerprints ~1 KiB of each
+ * published frame and every later hop re-samples and compares, to catch a
+ * buffer written while in flight.  It costs a handful of hash passes per frame
+ * (one of them under the stream's publish lock), so it follows the runtime
+ * diagnostics switch; force it with -DUVC_FRAME_INTEGRITY_CHECK=1.  When off,
+ * integrity_sample_hash stays 0, which consumers read as "not recorded". */
+#ifndef UVC_FRAME_INTEGRITY_CHECK
+#if defined(UVC_RUNTIME_DIAG_ENABLED) && UVC_RUNTIME_DIAG_ENABLED
+#define UVC_FRAME_INTEGRITY_CHECK 1
+#else
+#define UVC_FRAME_INTEGRITY_CHECK 0
+#endif
+#endif
 uint32_t uvc_frame_sample_hash(const void *data, size_t len);
 void uvc_frame_release(uvc_frame_t *frame);
 /** Synchronize an optional AHardwareBuffer-backed borrowed frame for GPU use.

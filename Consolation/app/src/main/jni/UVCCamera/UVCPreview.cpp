@@ -107,9 +107,7 @@ static inline void atomic_store_max(std::atomic<uint64_t> &target, uint64_t valu
  * read and compares with the fingerprint taken when they were produced.  A
  * mismatch means something wrote into the buffer while it was in flight, and
  * the stage name says between which two threads.  Reads ~1 KiB per check. */
-#ifndef UVC_FRAME_INTEGRITY_CHECK
-#define UVC_FRAME_INTEGRITY_CHECK 1
-#endif
+/* UVC_FRAME_INTEGRITY_CHECK defaults to the runtime-diagnostics switch; see libuvc.h. */
 
 namespace {
 static bool frame_integrity_ok(const uvc_frame_t *frame, const char *stage,

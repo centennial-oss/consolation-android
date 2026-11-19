@@ -147,6 +147,10 @@ LOCAL_EXPORT_C_INCLUDES := $(LIBJPEG_TURBO_3141_INCLUDES)
 LOCAL_CFLAGS := $(LOCAL_C_INCLUDES:%=-I%)
 LOCAL_CFLAGS += -DANDROID_NDK -DANDROID -DNEON_INTRINSICS \
 	-DBMP_SUPPORTED -DPPM_SUPPORTED
+# libjpeg-turbo's own build raises release builds to -O3; ndk-build would give
+# -O2.  The entropy (Huffman) decoder is plain C, so it is the part of MJPEG
+# decode that depends on the optimisation level.
+LOCAL_CFLAGS += -O3
 LOCAL_ARM_MODE := arm
 LOCAL_SRC_FILES := \
 	$(LIBJPEG_TURBO_3141_SOURCES) \
