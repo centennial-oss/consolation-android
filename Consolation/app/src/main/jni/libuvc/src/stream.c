@@ -261,6 +261,20 @@ struct format_table_entry *_get_format_entry(enum uvc_frame_format format) {
 #undef FMT
 }
 
+/* DirectShow MEDIASUBTYPE_RGB24 {e436eb7d-524f-11ce-9f53-0020af0ba770}: what
+ * capture devices normally put in guidFormat for packed 24-bit RGB.  It is not
+ * a FourCC-derived GUID, so the 'BGR3'/'RGB3' entries never match it.  Bytes
+ * on the wire are B, G, R, i.e. our UVC_FRAME_FORMAT_BGR. */
+static const uint8_t uvc_guid_mediasubtype_rgb24[16] = {
+	0x7d, 0xeb, 0x36, 0xe4, 0x4f, 0x52, 0xce, 0x11,
+	0x9f, 0x53, 0x00, 0x20, 0xaf, 0x0b, 0xa7, 0x70
+};
+
+static inline int _uvc_guid_is_bgr_alias(const uint8_t guid[16]) {
+	return !memcmp(guid, "RGB3", 4)
+		|| !memcmp(guid, uvc_guid_mediasubtype_rgb24, 16);
+}
+
 static uint8_t _uvc_frame_format_matches_guid(enum uvc_frame_format fmt,
 		uint8_t guid[16]) {
 	struct format_table_entry *format;
@@ -279,7 +293,7 @@ static uint8_t _uvc_frame_format_matches_guid(enum uvc_frame_format fmt,
 			&& (!memcmp(guid, "I420", 4) || !memcmp(guid, "IYUV", 4)))
 		return 1;
 	if (!format->abstract_fmt && fmt == UVC_FRAME_FORMAT_BGR
-			&& !memcmp(guid, "RGB3", 4))
+			&& _uvc_guid_is_bgr_alias(guid))
 		return 1;
 
 	for (child_idx = 0; child_idx < format->children_count; child_idx++) {
@@ -307,7 +321,7 @@ static enum uvc_frame_format uvc_frame_format_for_guid(uint8_t guid[16]) {
 	/* Common aliases not always listed with full 16-byte GUIDs in descriptors */
 	if (!memcmp(guid, "I420", 4) || !memcmp(guid, "IYUV", 4))
 		return UVC_FRAME_FORMAT_YU12;
-	if (!memcmp(guid, "RGB3", 4))
+	if (_uvc_guid_is_bgr_alias(guid))
 		return UVC_FRAME_FORMAT_BGR;
 
 	return UVC_FRAME_FORMAT_UNKNOWN;
@@ -603,12 +617,18 @@ static uvc_error_t _uvc_get_stream_ctrl_format(uvc_device_handle_t *devh,
 			for (fps = max_fps; fps >= min_fps; fps--) {
 				if (UNLIKELY(!fps)) continue;
 				uint32_t interval_100ns = 10000000 / fps;
-				uint32_t interval_offset = interval_100ns - frame->dwMinFrameInterval;
 				LOGV("fps:%d", fps);
-				if (interval_100ns >= frame->dwMinFrameInterval
-					&& interval_100ns <= frame->dwMaxFrameInterval
-					&& !(interval_offset
-						&& (interval_offset % frame->dwFrameIntervalStep) ) ) {
+				if (interval_100ns < frame->dwMinFrameInterval
+						|| interval_100ns > frame->dwMaxFrameInterval)
+					continue;
+				/* In range.  It should also sit on the device's step grid.  A
+				 * step of 0 describes no grid (and cannot be divided by): take
+				 * the interval as asked and let the probe that follows report
+				 * what the device actually settles on. */
+				const uint32_t interval_offset = interval_100ns - frame->dwMinFrameInterval;
+				const int on_grid = !frame->dwFrameIntervalStep
+					|| !(interval_offset % frame->dwFrameIntervalStep);
+				if (on_grid) {
 					ctrl->bmHint = (1 << 0); /* don't negotiate interval */
 					ctrl->bFormatIndex = format->bFormatIndex;
 					ctrl->bFrameIndex = frame->bFrameIndex;
@@ -991,6 +1011,10 @@ void _uvc_stream_callback(struct libusb_transfer *transfer) {
 		_uvc_process_payload_bulk(strmh, transfer->buffer, transfer->actual_length);
 	    break;
 	case LIBUSB_TRANSFER_NO_DEVICE:
+		/* The device is gone.  Clearing `running` stops resubmission and lets
+		 * the worker threads wind down; the teardown itself still happens in
+		 * uvc_stream_stop(), which keys off `started`, not `running`. */
+		strmh->device_gone = 1;
 		if (transfer->num_iso_packets) {
 			strmh->running = 0;
 			_uvc_queue_ordered_iso_transfer(strmh, transfer,
@@ -1485,6 +1509,9 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	}
 
 	strmh->running = 1;
+	strmh->started = 1;
+	strmh->device_gone = 0;
+	strmh->cb_thread_started = 0;
 	strmh->seq = 0;
 	strmh->fid = 0;
 	strmh->pts = 0;
@@ -1537,7 +1564,12 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 
 	// Get the interface that provides the chosen format and frame configuration
 	interface_id = strmh->stream_if->bInterfaceNumber;
-	interface = &strmh->devh->info->config->interface[interface_id];
+	interface = _uvc_find_usb_interface(strmh->devh->info->config, interface_id);
+	if (UNLIKELY(!interface)) {
+		ret = UVC_ERROR_INVALID_DEVICE;
+		LOGE("streaming interface %d not in the configuration", interface_id);
+		goto fail;
+	}
 
 	/* A VS interface uses isochronous transfers if it has multiple altsettings.
 	 * (UVC 1.5: 2.4.3. VideoStreaming Interface, on page 19) */
@@ -1576,6 +1608,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 			goto fail;
 		}
 		cb_thread_started = 1;
+		strmh->cb_thread_started = 1;
 	}
 	MARK("submit transfers");
 	for (transfer_id = 0; transfer_id < (int)strmh->num_transfer_bufs; transfer_id++) {
@@ -1605,6 +1638,7 @@ fail:
 		uvc_stream_stop(strmh);
 	} else {
 		strmh->running = 0;
+		strmh->started = 0;
 	}
 	UVC_EXIT(ret);
 	return ret;
@@ -1811,6 +1845,13 @@ uvc_error_t uvc_stream_get_frame(uvc_stream_handle_t *strmh,
 
 				ts.tv_sec += add_secs;
 				ts.tv_nsec += add_nsecs;
+				/* Two sub-second parts can sum past one second, and
+				 * pthread_cond_timedwait rejects (EINVAL, no wait at all)
+				 * a tv_nsec outside [0, 1e9). */
+				if (ts.tv_nsec >= 1000000000L) {
+					ts.tv_sec += 1;
+					ts.tv_nsec -= 1000000000L;
+				}
 
 				pthread_cond_timedwait(&strmh->cb_cond, &strmh->cb_mutex, &ts);
 			}
@@ -1863,11 +1904,16 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 
 	if (!strmh) RETURN(UVC_SUCCESS, uvc_error_t);
 
-	if (UNLIKELY(!strmh->running)) {
+	/* `running` may already be 0 because the device was unplugged (the USB
+	 * thread clears it).  The threads and any transfers not yet called back
+	 * still exist then and still reference strmh, so the teardown below must
+	 * run regardless; `started` records that it is owed. */
+	if (UNLIKELY(!strmh->started)) {
 		UVC_EXIT(UVC_ERROR_INVALID_PARAM);
 		RETURN(UVC_ERROR_INVALID_PARAM, uvc_error_t);
 	}
 
+	strmh->started = 0;
 	strmh->running = 0;
 
 	pthread_mutex_lock(&strmh->cb_mutex);
@@ -1915,16 +1961,32 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 	}
 	pthread_mutex_unlock(&strmh->cb_mutex);
 
-	/** @todo stop the actual stream, camera side? */
-
 	if (strmh->stall_recovery_thread_started) {
 		pthread_join(strmh->stall_recovery_thread, NULL);
 		strmh->stall_recovery_thread_started = 0;
 	}
 
-	if (strmh->user_cb) {
+	if (strmh->cb_thread_started) {
 		/* wait for the thread to stop (triggered by LIBUSB_TRANSFER_CANCELLED transfer) */
 		pthread_join(strmh->cb_thread, NULL);
+		strmh->cb_thread_started = 0;
+	}
+
+	/* Tell the device to stop sending.  An isochronous stream ends when the
+	 * interface returns to its zero-bandwidth alternate setting, which the
+	 * kernel does when the interface is released in uvc_stream_close().  A
+	 * bulk interface has a single alternate setting, so nothing would signal
+	 * the device; resetting the endpoint (CLEAR_FEATURE(ENDPOINT_HALT)) is the
+	 * stop signal bulk UVC devices are written against.  Done after every
+	 * transfer has been reaped and the stall-recovery thread has exited, so
+	 * nothing else is using the endpoint. */
+	if (!strmh->diag_selected_isochronous && !strmh->device_gone
+			&& strmh->stream_if->bEndpointAddress) {
+		const int halt_ret = libusb_clear_halt(strmh->devh->usb_devh,
+			strmh->stream_if->bEndpointAddress);
+		if (UNLIKELY(halt_ret != LIBUSB_SUCCESS))
+			UVC_DEBUG("bulk stream stop: clear_halt(0x%02x) = %d",
+				strmh->stream_if->bEndpointAddress, halt_ret);
 	}
 
 	RETURN(UVC_SUCCESS, uvc_error_t);
@@ -1942,7 +2004,7 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 
 	if (!strmh) { UVC_EXIT_VOID() };
 
-	if (strmh->running)
+	if (strmh->started)
 		uvc_stream_stop(strmh);
 
 	uvc_release_if(strmh->devh, strmh->stream_if->bInterfaceNumber);

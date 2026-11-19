@@ -186,9 +186,11 @@ uvc_error_t uvc_init(uvc_context_t **pctx, struct libusb_context *usb_ctx) {
  * @param ctx UVC context to shut down
  */
 void uvc_exit(uvc_context_t *ctx) {
-	uvc_device_handle_t *devh;
+	uvc_device_handle_t *devh, *next_devh;
 
-	DL_FOREACH(ctx->open_devices, devh)
+	/* uvc_close() unlinks and frees the handle, so the successor has to be
+	 * read before the call, not from the freed node afterwards. */
+	DL_FOREACH_SAFE(ctx->open_devices, devh, next_devh)
 	{
 		uvc_close(devh);
 	}

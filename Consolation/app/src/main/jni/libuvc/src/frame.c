@@ -188,7 +188,9 @@ uvc_frame_t *uvc_allocate_frame(size_t data_bytes) {
  * @param frame Frame to destroy
  */
 void uvc_free_frame(uvc_frame_t *frame) {
-	if ((frame->data_bytes > 0) && frame->library_owns_data)
+	/* Ownership, not the current byte count, decides who frees: a buffer the
+	 * library allocated stays allocated when data_bytes drops to 0. */
+	if (frame->library_owns_data)
 		free(frame->data);
 
 	free(frame);

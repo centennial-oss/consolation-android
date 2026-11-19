@@ -348,6 +348,20 @@ static uint32_t uvc_mjpeg_diag_full_hash(const uint8_t *data, size_t len) {
  * @param in MJPEG frame
  * @param out RGB frame
  */
+/** True if the JPEG's own dimensions equal the frame the output buffer was
+ * sized for.  Call after jpeg_start_decompress().
+ *
+ * The output buffer and row step come from the negotiated width/height, but
+ * libjpeg writes rows as wide, and as many, as the JPEG header says.  A JPEG
+ * that is wider overruns each row (and the last one the buffer); one that is
+ * narrower or shorter leaves stale pixels.  Height alone does not catch the
+ * first case. */
+static inline int uvc_mjpeg_geometry_matches(const struct jpeg_decompress_struct *dinfo,
+		const uvc_frame_t *out) {
+	return dinfo->output_width == (JDIMENSION) out->width
+		&& dinfo->output_height == (JDIMENSION) out->height;
+}
+
 uvc_error_t uvc_mjpeg2rgb(uvc_frame_t *in, uvc_frame_t *out) {
 	struct jpeg_decompress_struct dinfo;
 	struct error_mgr jerr;
@@ -397,7 +411,7 @@ uvc_error_t uvc_mjpeg2rgb(uvc_frame_t *in, uvc_frame_t *out) {
 	jpeg_start_decompress(&dinfo);
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo.output_height == (JDIMENSION) out->height)) {
+			uvc_mjpeg_geometry_matches(&dinfo, out))) {
 		for (; dinfo.output_scanline < dinfo.output_height ;) {
 			buffer[0] = data + (lines_read) * out_step;
 			for (i = 1; i < MAX_READLINE; i++)
@@ -473,7 +487,7 @@ uvc_error_t uvc_mjpeg2bgr(uvc_frame_t *in, uvc_frame_t *out) {
 	const int out_step = out->step;
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo.output_height == (JDIMENSION) out->height)) {
+			uvc_mjpeg_geometry_matches(&dinfo, out))) {
 		for (; dinfo.output_scanline < dinfo.output_height ;) {
 			buffer[0] = data + (lines_read) * out_step;
 			for (i = 1; i < MAX_READLINE; i++)
@@ -549,7 +563,7 @@ uvc_error_t uvc_mjpeg2rgb565(uvc_frame_t *in, uvc_frame_t *out) {
 	const int out_step = out->step;
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo.output_height == (JDIMENSION) out->height)) {
+			uvc_mjpeg_geometry_matches(&dinfo, out))) {
 		for (; dinfo.output_scanline < dinfo.output_height ;) {
 			buffer[0] = data + (lines_read) * out_step;
 			for (i = 1; i < MAX_READLINE; i++)
@@ -1046,7 +1060,7 @@ uvc_error_t uvc_mjpeg2yuyv(uvc_frame_t *in, uvc_frame_t *out) {
 	const int out_step = out->step;
 
 	if (LIKELY(out->height >= 0 &&
-			dinfo->output_height == (JDIMENSION) out->height)) {
+			uvc_mjpeg_geometry_matches(dinfo, out))) {
 		for (; dinfo->output_scanline < dinfo->output_height ;) {
 			// convert lines of mjpeg data to YCbCr
 			num_scanlines = jpeg_read_scanlines(dinfo, buffer, MAX_READLINE);

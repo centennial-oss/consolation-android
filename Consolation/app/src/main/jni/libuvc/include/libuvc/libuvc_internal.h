@@ -21,11 +21,14 @@
 
 /** Converts an unaligned 8-byte little-endian integer into an int64 */
 #define QW_TO_LONG(p) \
- ((p)[0] | ((p)[1] << 8) | ((p)[2] << 16) | ((p)[3] << 24) \
-  | ((uint64_t)(p)[4] << 32) | ((uint64_t)(p)[5] << 40) \
-  | ((uint64_t)(p)[6] << 48) | ((uint64_t)(p)[7] << 56))
-/** Converts an unaligned four-byte little-endian integer into an int32 */
-#define DW_TO_INT(p) ((p)[0] | ((p)[1] << 8) | ((p)[2] << 16) | ((p)[3] << 24))
+ ((uint64_t)DW_TO_INT(p) | ((uint64_t)DW_TO_INT((p) + 4) << 32))
+/** Converts an unaligned four-byte little-endian integer into a uint32.
+ * Each byte is widened to uint32_t before shifting: a uint8_t operand promotes
+ * to (signed) int, and shifting a byte >= 0x80 by 24 would overflow it, which
+ * is undefined and, where it "works", sign-extends when widened to 64 bits. */
+#define DW_TO_INT(p) \
+ ((uint32_t)(p)[0] | ((uint32_t)(p)[1] << 8) \
+  | ((uint32_t)(p)[2] << 16) | ((uint32_t)(p)[3] << 24))
 /** Converts an unaligned four-byte little-endian integer into an signed int32 */
 /** Converts an unaligned two-byte little-endian integer into an int16 */
 #define SW_TO_SHORT(p) ((p)[0] | ((p)[1] << 8))
@@ -152,7 +155,8 @@ enum uvc_vc_desc_subtype {
   UVC_VC_OUTPUT_TERMINAL = 0x03,
   UVC_VC_SELECTOR_UNIT = 0x04,
   UVC_VC_PROCESSING_UNIT = 0x05,
-  UVC_VC_EXTENSION_UNIT = 0x06
+  UVC_VC_EXTENSION_UNIT = 0x06,
+  UVC_VC_ENCODING_UNIT = 0x07	/* UVC 1.5 */
 };
 
 /** UVC endpoint descriptor subtype (A.7) */
@@ -317,8 +321,18 @@ struct uvc_stream_handle {
   struct uvc_stream_handle *prev, *next;
   struct uvc_streaming_interface *stream_if;
 
-  /** if true, stream is running (streaming video to host) */
+  /** if true, stream is running (streaming video to host).  Cleared by
+   * uvc_stream_stop() and also by the USB thread when the device vanishes. */
   uint8_t running;
+  /** Set by a successful-enough uvc_stream_start*(): threads and transfers
+   * exist and uvc_stream_stop() still owes their teardown.  Unlike `running`
+   * only the starting/stopping thread writes it, so a device unplug cannot
+   * make stop/close skip the teardown. */
+  uint8_t started;
+  /** cb_thread was created and must be joined. */
+  uint8_t cb_thread_started;
+  /** A transfer completed with NO_DEVICE: skip requests to the device. */
+  uint8_t device_gone;
   /** Current control block */
   struct uvc_stream_ctrl cur_ctrl;
 
@@ -429,6 +443,17 @@ struct uvc_device_handle {
   struct uvc_device_info *info;
   struct libusb_transfer *status_xfer;
   pthread_mutex_t status_mutex;	// XXX saki
+  /** status_xfer was handed to libusb at least once. */
+  uint8_t status_xfer_submitted;
+  /** Set (under status_mutex) once the handle is closing: the status callback
+   * must neither run user callbacks nor resubmit. */
+  uint8_t status_closing;
+  /** The status transfer could not be reaped before close; it and this
+   * handle's memory are deliberately left allocated (see uvc_free_devh). */
+  uint8_t status_xfer_orphaned;
+  /** Set by the status callback when it leaves the transfer idle for good.
+   * An int because libusb polls it as a "completed" flag. */
+  int status_xfer_idle;
   uint8_t status_buf[32];
   /** Function to call when we receive status updates from the camera */
   uvc_status_callback_t *status_cb;
@@ -460,6 +485,8 @@ uvc_error_t uvc_query_stream_ctrl(
     enum uvc_req_code req);
 
 uvc_error_t uvc_start_handler_thread(uvc_context_t *ctx);
+const struct libusb_interface *_uvc_find_usb_interface(
+    const struct libusb_config_descriptor *config, int interface_number);
 uvc_error_t uvc_claim_if(uvc_device_handle_t *devh, int idx);
 uvc_error_t uvc_release_if(uvc_device_handle_t *devh, int idx);
 
