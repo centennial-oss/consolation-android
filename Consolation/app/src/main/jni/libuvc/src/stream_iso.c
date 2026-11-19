@@ -180,22 +180,15 @@ static void _uvc_diag_iso_packet_shape(uvc_stream_handle_t *strmh,
 #endif /* UVC_RUNTIME_DIAG_ENABLED */
  
 /*
- * High-bandwidth ISO IN (wMaxPacketSize mult > 1, i.e. 2 or 3 transactions per
- * microframe) is corrupted by the Mentor MUSB host controller used on Unisoc
- * (and some other low-cost) SoCs: a few bytes are inserted or dropped inside the
- * packet at transaction boundaries, so an MJPEG frame still carries SOI/EOI but
- * decodes shredded below the damage.  Measured on a Unisoc ums9230 tablet:
- * 10/300 frames damaged at 3072 B/uframe, 13/302 at 2048, 0/301 at 1024.
- * Single-transaction endpoints (<= 1024 B/uframe) are reliable there, so on such
- * hosts we restrict alt-setting selection to them.
+ * Optional cap on the ISO packet size used for alt-setting selection, for
+ * testing only:  adb shell setprop debug.consolation.iso_max_packet <N>
  *
- * Detection: the sysfs bus symlink names the controller driver (readable by an
- * app process), e.g. .../64900000.usb/musb-hdrc.1.auto/usb1.  Fallback when the
- * link cannot be read: Unisoc platform names (ro.board.platform ums.., sc98.., ud7..).
- * Override for testing:  adb shell setprop debug.consolation.iso_max_packet <N>
- * (N > 0 forces that cap; the property wins over auto-detection).
+ * History: MJPEG over high-bandwidth ISO IN (2 or 3 transactions per
+ * microframe) arrived damaged on Mentor MUSB hosts (Unisoc SoCs), and such
+ * hosts used to be capped to single-transaction endpoints here.  The cause was
+ * the host merging two microframes into one packet, which is now undone in
+ * _uvc_iso_merged_split(), so no host is capped automatically any more.
  */
-#define LIBUVC_MUSB_ISO_PACKET_CAP 1024u
 
 /* This file's LOGI compiles out under LOG_NDEBUG; the cap decision must be
  * visible in normal builds, so log it directly. */
@@ -208,13 +201,9 @@ static void _uvc_diag_iso_packet_shape(uvc_stream_handle_t *strmh,
 #endif
 
 static unsigned int _uvc_iso_host_packet_cap(uvc_stream_handle_t *strmh) {
+	 (void)strmh;
 #ifdef __ANDROID__
 	 char value[PROP_VALUE_MAX] = {0};
-	 char path[64];
-	 char target[256];
-	 ssize_t n;
-	 uint8_t bus;
-	 const char *why = NULL;
 
 	 if (__system_property_get("debug.consolation.iso_max_packet", value) > 0
 			 && value[0]) {
@@ -222,48 +211,8 @@ static unsigned int _uvc_iso_host_packet_cap(uvc_stream_handle_t *strmh) {
 		 UVC_HOSTCAP_LOGI("libuvc iso host cap: forced by property %s -> %u", value, forced);
 		 return forced;
 	 }
-
-	 bus = libusb_get_bus_number(libusb_get_device(strmh->devh->usb_devh));
-	 if (bus) {
-		 snprintf(path, sizeof(path), "/sys/bus/usb/devices/usb%u", (unsigned)bus);
-		 n = readlink(path, target, sizeof(target) - 1);
-		 if (n > 0) {
-			 target[n] = 0;
-			 if (strstr(target, "musb"))
-				 why = "musb host controller";
-			 UVC_HOSTCAP_LOGI("libuvc iso host cap: bus %u -> %s", (unsigned)bus, target);
-		 } else {
-			 UVC_HOSTCAP_LOGI("libuvc iso host cap: readlink(%s) failed errno=%d", path, errno);
-		 }
-	 }
-	 if (!why && bus == 0) {
-		 /* Bus unknown (wrapped fd without a resolvable path): probe usb1..usb4. */
-		 unsigned int b;
-		 for (b = 1; b <= 4 && !why; b++) {
-			 snprintf(path, sizeof(path), "/sys/bus/usb/devices/usb%u", b);
-			 n = readlink(path, target, sizeof(target) - 1);
-			 if (n > 0) {
-				 target[n] = 0;
-				 if (strstr(target, "musb"))
-					 why = "musb host controller (bus probe)";
-			 }
-		 }
-	 }
-	 if (!why && __system_property_get("ro.board.platform", value) > 0) {
-		 if (!strncmp(value, "ums", 3) || !strncmp(value, "sc98", 4)
-				 || !strncmp(value, "sp98", 4) || !strncmp(value, "ud7", 3))
-			 why = "unisoc platform";
-	 }
-	 if (why) {
-		 UVC_HOSTCAP_LOGI("libuvc iso host cap: %s -> limiting ISO packets to %u B/uframe "
-			 "(single transaction)", why, LIBUVC_MUSB_ISO_PACKET_CAP);
-		 return LIBUVC_MUSB_ISO_PACKET_CAP;
-	 }
-	 return 0;
-#else
-	 (void)strmh;
-	 return 0;
 #endif
+	 return 0;
 }
 
  static void _uvc_process_payload_iso_packet(uvc_stream_handle_t *strmh,
@@ -402,6 +351,86 @@ static unsigned int _uvc_iso_host_packet_cap(uvc_stream_handle_t *strmh) {
 	 }
  }
  
+/*
+ * Host-merged microframes.  On a high-bandwidth ISO IN endpoint (2 or 3
+ * transactions per microframe) the Mentor MUSB host controller treats a
+ * microframe whose data is exactly one full transaction (wMaxPacketSize bytes)
+ * as unfinished and appends the NEXT microframe's data to the same packet.
+ * usbfs then reports one packet holding two complete UVC payloads back to
+ * back, and the second payload's header lands in the image as 12 junk bytes:
+ * an MJPEG decodes shredded below that point, sometimes without any libjpeg
+ * warning.  Nothing is lost on the wire, so the packet is split back apart.
+ *
+ * Returns the offset of the second payload inside `payload`, or 0 when the
+ * packet is a single payload.  Image data at a transaction boundary must never
+ * be mistaken for a header, so the candidate has to match the packet's own
+ * header in length and layout AND agree with its timestamps: same PTS within a
+ * frame, and/or an SCR a microframe or two later.  Devices whose headers carry
+ * neither field are left alone.
+ */
+static size_t _uvc_iso_merged_split(const uvc_stream_handle_t *strmh,
+		const uint8_t *payload, size_t len) {
+	const size_t txn = strmh->iso_txn_size;
+	size_t split;
+
+	if (LIKELY(!txn || len <= txn || len < 2))
+		return 0;
+
+	for (split = txn; split < len; split += txn) {
+		const uint8_t *cand = payload + split;
+		const size_t cand_len = len - split;
+		const uint8_t hl = payload[0];
+		const uint8_t bfh1 = payload[1];
+		uint8_t bfh2;
+		size_t off = 2;
+		int same_frame;
+		int proven = 0;
+
+		if (hl < 6 || hl > split || cand_len < hl || cand[0] != hl)
+			continue;
+		bfh2 = cand[1];
+		if (!(bfh1 & UVC_STREAM_EOH)
+				|| ((bfh1 ^ bfh2) & (uint8_t)~(UVC_STREAM_FID | UVC_STREAM_EOF | (1 << 6))))
+			continue;
+		same_frame = !((bfh1 ^ bfh2) & UVC_STREAM_FID) && !(bfh1 & UVC_STREAM_EOF);
+
+		if (bfh1 & UVC_STREAM_PTS) {
+			if (off + 4 > hl)
+				continue;
+			if (same_frame) {
+				if (memcmp(payload + off, cand + off, 4))
+					continue;
+				proven = 1;
+			}
+			off += 4;
+		}
+		if (bfh1 & UVC_STREAM_SCR) {
+			uint32_t stc1, stc2;
+			unsigned int sof1, sof2;
+			if (off + 6 > hl)
+				continue;
+			stc1 = (uint32_t)DW_TO_INT(payload + off);
+			stc2 = (uint32_t)DW_TO_INT(cand + off);
+			sof1 = (unsigned int)SW_TO_SHORT(payload + off + 4) & 0x7ffu;
+			sof2 = (unsigned int)SW_TO_SHORT(cand + off + 4) & 0x7ffu;
+			if ((uint32_t)(stc2 - stc1) > 0x00ffffffu
+					|| ((sof2 - sof1) & 0x7ffu) > 2u)
+				continue;
+			proven = 1;
+		}
+		/* A new frame without an SCR to vouch for it must at least open
+		 * with a JPEG SOI. */
+		if (!proven && !same_frame
+				&& strmh->frame_format == UVC_FRAME_FORMAT_MJPEG
+				&& cand_len >= (size_t)hl + 2
+				&& cand[hl] == 0xff && cand[hl + 1] == 0xd8)
+			proven = 1;
+		if (proven)
+			return split;
+	}
+	return 0;
+}
+
  void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct libusb_transfer *transfer) {
 	 int packet_id;
  
@@ -431,8 +460,25 @@ static unsigned int _uvc_iso_host_packet_cap(uvc_stream_handle_t *strmh) {
 		 _uvc_diag_iso_packet_shape(strmh, packet->actual_length, packet->length);
 #endif
 		 payload = libusb_get_iso_packet_buffer_simple(transfer, packet_id);
-		 _uvc_process_payload_iso_packet(strmh, payload, packet->actual_length,
-			 packet_id == 0);
+		 {
+			 size_t len = (size_t)packet->actual_length;
+			 int first = packet_id == 0;
+			 size_t split;
+
+			 while ((split = _uvc_iso_merged_split(strmh, payload, len)) != 0) {
+				 strmh->diag_iso_demerged++;
+				 if (strmh->diag_iso_demerged == 1
+						 || !(strmh->diag_iso_demerged % 1000))
+					 UVC_HOSTCAP_LOGI("libuvc iso: host merged two microframes into one "
+						 "packet (len=%zu split=%zu); split count=%u",
+						 len, split, strmh->diag_iso_demerged);
+				 _uvc_process_payload_iso_packet(strmh, payload, split, first);
+				 payload += split;
+				 len -= split;
+				 first = 0;
+			 }
+			 _uvc_process_payload_iso_packet(strmh, payload, len, first);
+		 }
 	 }
  }
  
@@ -525,6 +571,9 @@ static unsigned int _uvc_iso_host_packet_cap(uvc_stream_handle_t *strmh) {
 	 }
  
 	 strmh->diag_selected_altsetting = selected_altsetting->bAlternateSetting;
+	 strmh->iso_txn_size = ((selected_endpoint->wMaxPacketSize >> 11) & 0x03)
+		 ? (uint32_t)(selected_endpoint->wMaxPacketSize & 0x07ff) : 0;
+	 strmh->diag_iso_demerged = 0;
 	 strmh->num_transfer_bufs = LIBUVC_NUM_ISO_TRANSFER_BUFS;
 	 UVC_HOSTCAP_LOGI("libuvc iso-selected alt=%u ep=0x%02x packet_size=%u "
 		 "required=%u prefer_max=%u",
