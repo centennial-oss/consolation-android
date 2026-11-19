@@ -14,6 +14,11 @@
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
+    <!-- sensorLandscape on MainActivity implies this feature is required;
+         mark it optional so Play doesn't filter out portrait-only devices. -->
+    <uses-feature
+        android:name="android.hardware.screen.landscape"
+        android:required="false" />
 
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
