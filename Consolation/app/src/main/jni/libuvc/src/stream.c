@@ -61,6 +61,7 @@ uvc_frame_desc_t *uvc_find_frame_desc(uvc_device_handle_t *devh,
 		uint16_t format_id, uint16_t frame_id);
 static void *_uvc_user_caller(void *arg);
 void _uvc_populate_frame(uvc_stream_handle_t *strmh);
+static void _uvc_populate_frame_into(uvc_stream_handle_t *strmh, uvc_frame_t *frame);
 static void *_uvc_stall_recovery_caller(void *arg);
 static inline int _uvc_frame_slot_valid(uint32_t slot) {
 	return slot < LIBUVC_FRAME_POOL_SLOTS;
@@ -188,6 +189,7 @@ uvc_error_t uvc_frame_hardware_buffer_lock(uvc_frame_t *frame) {
 static void _uvc_discard_assembled_frame(uvc_stream_handle_t *strmh, const char *reason) {
 	if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG)
 		_uvc_diag_mjpeg_drop(strmh, reason);
+	_uvc_asm_discard(strmh);
 	strmh->got_bytes = 0;
 	strmh->frame_start_monotonic_ns = 0;
 	strmh->frame_complete_monotonic_ns = 0;
@@ -743,6 +745,7 @@ uvc_error_t uvc_probe_stream_ctrl(uvc_device_handle_t *devh,
  */
 void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 	uint32_t next_out_slot;
+	int offer = 0, taken = 0;
 
 	if (UNLIKELY(!_uvc_mjpeg_payload_has_markers(strmh))) {
 		_uvc_discard_assembled_frame(strmh, reason);
@@ -777,6 +780,18 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 		strmh->hold_last_scr = strmh->last_scr;
 		strmh->hold_pts = strmh->pts;
 		strmh->hold_seq = strmh->seq;
+		strmh->hold_asm_gen = strmh->asm_open ? strmh->asm_gen : 0;
+
+		/* Offer the frame to the USB-thread publish callback.  The sequence
+		 * is claimed before the lock is dropped so the callback thread, if
+		 * something else wakes it, does not deliver the same frame; the claim
+		 * is withdrawn below when the callback declines. */
+		if (strmh->publish_cb && !strmh->hold_bfh_err) {
+			_uvc_populate_frame_into(strmh, &strmh->publish_frame);
+			strmh->consumed_seq = strmh->hold_seq;
+			strmh->consumed_valid = 1;
+			offer = 1;
+		}
 
 		if (_uvc_frame_pick_out_slot_locked(strmh, &next_out_slot)) {
 			strmh->out_slot = (uint8_t)next_out_slot;
@@ -788,10 +803,33 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh, const char *reason) {
 		}
 	}
 	pthread_mutex_unlock(&strmh->cb_mutex);
+
+	if (strmh->asm_open) {
+		/* A frame carrying the error bit is "published" only to be skipped by
+		 * its consumers: for anyone decoding ahead that is a discard. */
+		if (strmh->hold_bfh_err)
+			_uvc_asm_discard(strmh);
+		strmh->asm_open = 0;
+	}
+
+	if (offer) {
+		taken = strmh->publish_cb(&strmh->publish_frame, strmh->usb_cb_user_ptr) != 0;
+		uvc_frame_release(&strmh->publish_frame);
+		strmh->publish_frame.library_frame_owner = NULL;
+		strmh->publish_frame.library_hardware_buffer = NULL;
+		strmh->publish_frame.library_hardware_buffer_stride = 0;
+		if (!taken) {
+			pthread_mutex_lock(&strmh->cb_mutex);
+			strmh->consumed_valid = 0;
+			pthread_mutex_unlock(&strmh->cb_mutex);
+		}
+	}
 	/* Signal after unlock: bionic has no wait morphing, so a waiter woken
 	 * while the mutex is still held just blocks on it again (two context
-	 * switches instead of one). */
-	pthread_cond_broadcast(&strmh->cb_cond);
+	 * switches instead of one).  A frame the publish callback took needs no
+	 * wake-up at all: that hop is what the callback exists to remove. */
+	if (!taken)
+		pthread_cond_broadcast(&strmh->cb_cond);
 
 	strmh->seq++;
 	strmh->got_bytes = 0;
@@ -1549,6 +1587,13 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	_uvc_diag_iso_frame_reset(strmh);
 	_uvc_mjpeg_scan_reset(strmh);
 	strmh->iso_trace_count = 0;
+	strmh->publish_cb = strmh->devh->publish_cb;
+	strmh->assembly_cb = strmh->devh->assembly_cb;
+	strmh->usb_cb_user_ptr = strmh->devh->usb_cb_user_ptr;
+	strmh->consumed_valid = 0;
+	strmh->asm_open = 0;
+	strmh->asm_reported_bytes = 0;
+	strmh->asm_report_step = 32u * 1024u;
 
 	frame_desc = uvc_find_frame_desc_stream(strmh, ctrl->bFormatIndex, ctrl->bFrameIndex);
 	if (UNLIKELY(!frame_desc)) {
@@ -1704,7 +1749,11 @@ static void *_uvc_user_caller(void *arg) {
 	for (; 1 ;) {
 		pthread_mutex_lock(&strmh->cb_mutex);
 		{
-			for (; strmh->running && (last_seq == strmh->hold_seq) ;) {
+			/* Nothing to do while the held frame is one already delivered,
+			 * or one the USB-thread publish callback took. */
+			for (; strmh->running && ((last_seq == strmh->hold_seq)
+					|| (strmh->consumed_valid
+						&& strmh->consumed_seq == strmh->hold_seq)) ;) {
 				pthread_cond_wait(&strmh->cb_cond, &strmh->cb_mutex);
 			}
 
@@ -1744,7 +1793,10 @@ static void *_uvc_user_caller(void *arg) {
  * must be called with stream cb lock held!
  */
 void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
-	uvc_frame_t *frame = &strmh->frame;
+	_uvc_populate_frame_into(strmh, &strmh->frame);
+}
+
+static void _uvc_populate_frame_into(uvc_stream_handle_t *strmh, uvc_frame_t *frame) {
 	uvc_frame_desc_t *frame_desc;
 
 	/** @todo this stuff that hits the main config cache should really happen
@@ -1805,6 +1857,7 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
 	frame->capture_time.tv_usec = 0;
 	frame->arrival_monotonic_ns = strmh->hold_start_monotonic_ns;
 	frame->integrity_sample_hash = strmh->hold_sample_hash;
+	frame->assembly_generation = strmh->hold_asm_gen;
 	frame->iso_trace_count = strmh->hold_iso_trace_count;
 	memcpy(frame->iso_trace_len, strmh->hold_iso_trace_len,
 		(size_t)strmh->hold_iso_trace_count * sizeof(frame->iso_trace_len[0]));
@@ -2053,4 +2106,21 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 	free(strmh);
 
 	UVC_EXIT_VOID();
+}
+
+/** @brief Install callbacks that run on the USB event thread.
+ * @ingroup streaming
+ *
+ * See uvc_publish_callback_t and uvc_assembly_callback_t.  Takes effect for
+ * streams started afterwards; pass NULLs to remove.
+ */
+void uvc_set_usb_thread_callbacks(uvc_device_handle_t *devh,
+		uvc_publish_callback_t *publish_cb,
+		uvc_assembly_callback_t *assembly_cb,
+		void *user_ptr) {
+	if (UNLIKELY(!devh))
+		return;
+	devh->publish_cb = publish_cb;
+	devh->assembly_cb = assembly_cb;
+	devh->usb_cb_user_ptr = user_ptr;
 }

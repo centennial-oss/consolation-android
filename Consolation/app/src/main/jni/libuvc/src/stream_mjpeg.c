@@ -176,9 +176,70 @@ int _uvc_mjpeg_note_payload_append(uvc_stream_handle_t *strmh) {
 	data = strmh->outbuf;
 	if (data && data[len - 2] == 0xff && data[len - 1] == 0xd9) {
 		strmh->frame_complete_monotonic_ns = uvc_diag_now_ns();
+		_uvc_asm_report(strmh, 1);
 		return 1;
 	}
+	_uvc_asm_report(strmh, 0);
 	return 0;
+}
+
+/*
+ * Assembly progress.  A listener (a decoder working ahead of the frame's
+ * arrival) is told when enough new bytes are in place to be worth a wake-up,
+ * and always when the end-of-image marker lands.  The step tracks the size of
+ * recent frames so a frame costs the listener a handful of wake-ups whatever
+ * the bitrate.
+ */
+#define UVC_ASM_REPORT_MIN_STEP (32u * 1024u)
+#define UVC_ASM_REPORTS_PER_FRAME 8u
+
+void _uvc_asm_report(uvc_stream_handle_t *strmh, int complete) {
+	uvc_assembly_event_t ev;
+
+	if (!strmh->assembly_cb || !strmh->outbuf || !strmh->got_bytes)
+		return;
+
+	if (!strmh->asm_open) {
+		strmh->asm_open = 1;
+		strmh->asm_reported_bytes = 0;
+		if (!++strmh->asm_gen)
+			strmh->asm_gen = 1;	/* 0 means "no generation" */
+	}
+
+	if (!complete
+			&& strmh->got_bytes - strmh->asm_reported_bytes < strmh->asm_report_step)
+		return;
+
+	strmh->asm_reported_bytes = strmh->got_bytes;
+	if (complete) {
+		size_t step = strmh->got_bytes / UVC_ASM_REPORTS_PER_FRAME;
+		strmh->asm_report_step = step > UVC_ASM_REPORT_MIN_STEP
+			? step : UVC_ASM_REPORT_MIN_STEP;
+	}
+
+	ev.type = UVC_ASSEMBLY_PROGRESS;
+	ev.generation = strmh->asm_gen;
+	ev.data = strmh->outbuf;
+	ev.bytes = strmh->got_bytes;
+	ev.complete = complete ? 1 : 0;
+	strmh->assembly_cb(&ev, strmh->usb_cb_user_ptr);
+}
+
+void _uvc_asm_discard(uvc_stream_handle_t *strmh) {
+	uvc_assembly_event_t ev;
+
+	if (!strmh->asm_open)
+		return;
+	strmh->asm_open = 0;
+	if (!strmh->assembly_cb)
+		return;
+
+	ev.type = UVC_ASSEMBLY_DISCARDED;
+	ev.generation = strmh->asm_gen;
+	ev.data = NULL;
+	ev.bytes = 0;
+	ev.complete = 0;
+	strmh->assembly_cb(&ev, strmh->usb_cb_user_ptr);
 }
 
 /*

@@ -110,6 +110,7 @@ import org.centennialoss.consolation.capture.DeviceCompatibilityIssues
 import org.centennialoss.consolation.capture.NoopCaptureEngine
 import org.centennialoss.consolation.core.capture.CaptureDevice
 import org.centennialoss.consolation.core.capture.CaptureState
+import org.centennialoss.consolation.preview.UsbPreviewSurfaceHints.applyLowLatencyDisplayMode
 import org.centennialoss.consolation.preview.backend.UsbVideoPreviewBackend
 import org.centennialoss.consolation.preview.backend.UsbVideoPreviewBackendFactory
 import org.centennialoss.consolation.usb.UsbCaptureDeviceRepository
@@ -565,10 +566,12 @@ class MainActivity : ComponentActivity() {
             }
             applyAudioVolumeFromUi()
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            window.applyLowLatencyDisplayMode(true)
         }
 
         if (!isRunning) {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            window.applyLowLatencyDisplayMode(false)
         }
 
         updatePipParams()

@@ -363,6 +363,23 @@ struct uvc_stream_handle {
   /* EOI seen but the frame is held until its trailing UVC status is known:
    * a later header-only payload may still carry EOF/ERR for this frame. */
   uint8_t mjpeg_eoi_pending;
+  /* USB-thread callbacks (see uvc_set_usb_thread_callbacks), latched at start. */
+  uvc_publish_callback_t *publish_cb;
+  uvc_assembly_callback_t *assembly_cb;
+  void *usb_cb_user_ptr;
+  /* Frame handed to publish_cb; separate from `frame`, which belongs to the
+   * callback thread. */
+  struct uvc_frame publish_frame;
+  /* Sequence the publish callback took; the callback thread skips it. */
+  uint32_t consumed_seq;
+  uint8_t consumed_valid;
+  /* Assembly progress reporting.  asm_gen names the frame under assembly and
+   * is bumped when its first bytes land; asm_open is set from then until the
+   * frame is published or discarded. */
+  uint32_t asm_gen, hold_asm_gen;
+  uint8_t asm_open;
+  size_t asm_reported_bytes;
+  size_t asm_report_step;
   const char *mjpeg_eoi_pending_reason;
   size_t size_buf;	// XXX add for boundary check
   uint8_t *outbuf, *holdbuf;
@@ -463,6 +480,9 @@ struct uvc_device_handle {
   void *button_user_ptr;
 
   uvc_stream_handle_t *streams;
+  uvc_publish_callback_t *publish_cb;
+  uvc_assembly_callback_t *assembly_cb;
+  void *usb_cb_user_ptr;
   uint8_t reset_on_release_if;	// XXX whether interface alt setting needs to reset to 0.
 };
 

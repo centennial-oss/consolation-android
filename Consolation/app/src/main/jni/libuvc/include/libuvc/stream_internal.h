@@ -26,6 +26,10 @@ int _uvc_mjpeg_eoi_pending(const uvc_stream_handle_t *strmh);
 int _uvc_mjpeg_payload_after_eoi(uvc_stream_handle_t *strmh, uint8_t header_info,
 		const uint8_t *data, size_t data_len);
 void _uvc_mjpeg_scan_reset(uvc_stream_handle_t *strmh);
+/* Report bytes appended to the frame under assembly (USB thread). */
+void _uvc_asm_report(uvc_stream_handle_t *strmh, int complete);
+/* The frame under assembly is being dropped: tell the listener, close it. */
+void _uvc_asm_discard(uvc_stream_handle_t *strmh);
 void _uvc_diag_mjpeg_drop(uvc_stream_handle_t *strmh, const char *reason);
 void _uvc_diag_mjpeg_publish(uvc_stream_handle_t *strmh, const char *reason);
 void _uvc_diag_mjpeg_log_stream_start(const uvc_stream_ctrl_t *ctrl,
