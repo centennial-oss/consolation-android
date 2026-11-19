@@ -168,8 +168,10 @@ static const char *mjpeg_planar_packed_fragment_shader_src =
 	"uniform int uGray;\n"
 	"in vec2 vTex;\n"
 	"out vec4 fragColor;\n"
-	"float planeByte(sampler2D s, int x, int y) {\n"
-	"  vec4 v = texelFetch(s, ivec2(x >> 2, y), 0);\n"
+	/* Samplers are fetched directly in main(), never passed as function
+	 * arguments: old GLSL compilers (Adreno 30x) resolve every such call to the
+	 * first sampler, which reads luma as chroma (green tint, 2x-wide ghosts). */
+	"float pickByte(vec4 v, int x) {\n"
 	"  int c = x & 3;\n"
 	"  return c == 0 ? v.r : (c == 1 ? v.g : (c == 2 ? v.b : v.a));\n"
 	"}\n"
@@ -181,15 +183,15 @@ static const char *mjpeg_planar_packed_fragment_shader_src =
 	"void main() {\n"
 	"  int x = clamp(int(vTex.x * float(uWidth)), 0, uWidth - 1);\n"
 	"  int yrow = clamp(int(vTex.y * float(uHeight)), 0, uHeight - 1);\n"
-	"  float yy = planeByte(uY, x, yrow);\n"
+	"  float yy = pickByte(texelFetch(uY, ivec2(x >> 2, yrow), 0), x);\n"
 	"  if (uGray != 0) {\n"
 	"    fragColor = vec4(yy, yy, yy, 1.0);\n"
 	"    return;\n"
 	"  }\n"
 	"  int cx = clamp((x * uChromaWidth) / uWidth, 0, uChromaWidth - 1);\n"
 	"  int cy = clamp((yrow * uChromaHeight) / uHeight, 0, uChromaHeight - 1);\n"
-	"  float uu = planeByte(uU, cx, cy);\n"
-	"  float vv = planeByte(uV, cx, cy);\n"
+	"  float uu = pickByte(texelFetch(uU, ivec2(cx >> 2, cy), 0), cx);\n"
+	"  float vv = pickByte(texelFetch(uV, ivec2(cx >> 2, cy), 0), cx);\n"
 	"  fragColor = vec4(clamp(yuvToRgb(yy, uu, vv), 0.0, 1.0), 1.0);\n"
 	"}\n";
 
@@ -808,6 +810,12 @@ void UVCGpuPreviewRenderer::Impl::drawQuad(ProgramKind kind)
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glUniformMatrix3fv(uniforms[kind].xform, 1, GL_FALSE, xform);
+	/* Re-issue the sampler bindings every draw: some old drivers drop the
+	 * values set at link time, leaving every sampler on unit 0 (the Y plane).
+	 * Absent samplers have location -1, which is a defined no-op. */
+	glUniform1i(uniforms[kind].tex0, 0);
+	glUniform1i(uniforms[kind].tex1, 1);
+	glUniform1i(uniforms[kind].tex2, 2);
 	glBindVertexArray(vao);
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	glBindVertexArray(0);
